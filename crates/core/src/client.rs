@@ -17,9 +17,10 @@ use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use tracing::{debug, info, warn};
 
-use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path};
+use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path, resolve_reference};
 use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
+use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
@@ -424,6 +425,11 @@ impl Engine {
             self.process_path(&path)?;
         }
         self.finalize_removals(true)?;
+        // Notes that predate `id:` in front matter gain one on first sync.
+        let ids: Vec<NoteId> = self.notes.keys().copied().collect();
+        for id in ids {
+            self.normalize_note(id)?;
+        }
         // Referenced attachments whose upload never completed, or tracked attachments edited
         // while we were not running: the local file wins.
         for path in self.store.referenced_attachment_paths()? {
@@ -470,14 +476,38 @@ impl Engine {
     }
 
     fn local_create(&mut self, rel: &str) -> Result<()> {
-        let text = self.proj.read(rel)?;
+        let mut text = self.proj.read(rel)?;
+        let fm_id = frontmatter::id_of(&text).and_then(|s| s.parse::<NoteId>().ok());
+        // A known id whose old file is gone is a move — even if the content changed too.
+        if let Some(fid) = fm_id
+            && let Some(state) = self.notes.get(&fid)
+            && !self.proj.resolve(&state.path)?.is_file()
+        {
+            info!(from = %state.path, to = %rel, "rename detected by id");
+            self.pending_removals.retain(|r| r.id != fid);
+            return self.apply_local_rename(fid, rel);
+        }
         let hash = content_hash(&text);
         if let Some(pos) = self.pending_removals.iter().position(|r| r.content_hash == hash) {
             let removed = self.pending_removals.remove(pos);
-            info!(from = %removed.path, to = %rel, "rename detected");
+            info!(from = %removed.path, to = %rel, "rename detected by content");
             return self.apply_local_rename(removed.id, rel);
         }
-        let id = NoteId::new();
+        // Adopt an unknown id from the file (e.g. moved in from another vault); a copy of an
+        // existing note gets a fresh one.
+        let id = match fm_id {
+            Some(fid) if !self.notes.contains_key(&fid) => fid,
+            _ => NoteId::new(),
+        };
+        let wanted = id.to_string();
+        let rewrite = match fm_id {
+            Some(fid) if fid != id => frontmatter::normalize(&strip_id_line(&text), &wanted),
+            _ => frontmatter::normalize(&text, &wanted),
+        };
+        if let Some(fixed) = rewrite {
+            text = fixed;
+            self.proj.write(rel, &text)?;
+        }
         let doc = NoteDoc::new();
         let update = doc.set_text(&text);
         self.store.append_update(DocId::Note(id), &update, None)?;
@@ -511,7 +541,28 @@ impl Engine {
         if self.notes[&id].doc.text() != on_disk {
             self.dirty.insert(id, Instant::now());
         }
+        self.normalize_note(id)?;
         Ok(())
+    }
+
+    /// Ensure the note text carries its id exactly once (SPEC §6.3); applies the fix as a CRDT
+    /// edit and rewrites the file. Empty docs are skipped: their content has not arrived yet.
+    fn normalize_note(&mut self, id: NoteId) -> Result<bool> {
+        let Some(state) = self.notes.get(&id) else { return Ok(false) };
+        let text = state.doc.text();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let Some(fixed) = frontmatter::normalize(&text, &id.to_string()) else { return Ok(false) };
+        let path = state.path.clone();
+        let update = state.doc.set_text(&fixed);
+        self.store.append_update(DocId::Note(id), &update, None)?;
+        self.send_update(DocId::Note(id), update);
+        self.store.set_projected_text(DocId::Note(id), &path, &fixed)?;
+        self.proj.write(&path, &fixed)?;
+        self.index(id, &path, &fixed)?;
+        debug!(path = %path, "front matter id normalised");
+        Ok(true)
     }
 
     fn local_remove(&mut self, rel: &str) -> Result<()> {
@@ -572,6 +623,7 @@ impl Engine {
         self.proj.write(&path, &text)?;
         self.index(id, &path, &text)?;
         debug!(path = %path, "projected");
+        self.normalize_note(id)?;
         Ok(())
     }
 
@@ -610,31 +662,11 @@ impl Engine {
         Ok(())
     }
 
-    /// Map a link target to an existing non-note file in the vault: relative to the note,
-    /// relative to the root, under `attachments/`, and (for `![[wikilinks]]`) by basename.
+    /// Map a link target to an existing non-note file in the vault (see [`resolve_reference`]).
     fn resolve_attachment(&self, note_rel: &str, target: &str, wiki: bool) -> Result<Option<String>> {
-        let t = target.split(['#', '?']).next().unwrap_or("").trim().replace("%20", " ");
-        if t.is_empty() || t.contains("://") || t.starts_with("mailto:") || t.starts_with("data:") {
-            return Ok(None);
-        }
-        let name = t.rsplit('/').next().unwrap_or(&t).to_owned();
-        let mut candidates = Vec::new();
-        candidates.extend(Projection::normalize_relative(note_rel, &t));
-        candidates.extend(Projection::normalize_relative("", &t));
-        candidates.push(format!("attachments/{name}"));
-        for c in &candidates {
-            if self.is_attachment_file(c)? {
-                return Ok(Some(c.clone()));
-            }
-        }
-        if wiki {
-            for f in self.proj.walk_files()? {
-                if f.rsplit('/').next() == Some(name.as_str()) {
-                    return Ok(Some(f));
-                }
-            }
-        }
-        Ok(None)
+        let exists = |p: &str| self.is_attachment_file(p).unwrap_or(false);
+        let all = || self.proj.walk_files().unwrap_or_default();
+        Ok(resolve_reference(note_rel, target, wiki, exists, all))
     }
 
     fn is_attachment_file(&self, rel: &str) -> Result<bool> {
@@ -1033,6 +1065,22 @@ impl Engine {
     }
 }
 
+/// Remove `id:` lines from the front matter so a fresh id can be written.
+fn strip_id_line(text: &str) -> String {
+    match frontmatter::block(text) {
+        Some((range, _)) => {
+            let body: String = text[range.clone()]
+                .split_inclusive('\n')
+                .filter(|l| !l.trim_start().starts_with("id:"))
+                .collect();
+            let mut out = text.to_owned();
+            out.replace_range(range, &body);
+            out
+        }
+        None => text.to_owned(),
+    }
+}
+
 fn content_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
 }
@@ -1097,6 +1145,52 @@ mod tests {
     }
 
     #[test]
+    fn ids_are_written_adopted_and_used_for_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SyncOptions {
+            vault_dir: dir.path().into(),
+            server_url: "http://x".into(),
+            vault_id: None,
+            once: true,
+            ca_cert: None,
+        };
+        let proj = Projection::new(dir.path());
+        proj.write("plain.md", "# Plain\n").unwrap();
+        proj.write("fm.md", "---\ntitle: FM\n---\nbody\n").unwrap();
+        let mut e = Engine::open(&opts).unwrap();
+        e.reconcile_disk().unwrap();
+        let plain = e.by_path["plain.md"];
+        let fm = e.by_path["fm.md"];
+        assert_eq!(proj.read("plain.md").unwrap(), format!("---\nid: {plain}\n---\n# Plain\n"));
+        assert_eq!(proj.read("fm.md").unwrap(), format!("---\ntitle: FM\nid: {fm}\n---\nbody\n"));
+        assert_eq!(e.notes[&plain].doc.text(), proj.read("plain.md").unwrap());
+        drop(e);
+
+        // Move + edit at once (content hash no longer matches) resolves by id; a copy gets a
+        // fresh id; a file carrying an unknown id keeps it.
+        let moved = proj.read("plain.md").unwrap().replace("# Plain", "# Plain (moved)");
+        proj.remove("plain.md").unwrap();
+        proj.write("archive/plain.md", &moved).unwrap();
+        let copy = proj.read("fm.md").unwrap();
+        proj.write("fm-copy.md", &copy).unwrap();
+        let foreign = NoteId::new();
+        proj.write("foreign.md", &format!("---\nid: {foreign}\n---\nhi\n")).unwrap();
+        let mut e = Engine::open(&opts).unwrap();
+        e.reconcile_disk().unwrap();
+        assert_eq!(e.by_path["archive/plain.md"], plain);
+        assert!(!e.by_path.contains_key("plain.md"));
+        assert!(e.notes[&plain].doc.text().contains("# Plain (moved)"));
+        let copy_id = e.by_path["fm-copy.md"];
+        assert_ne!(copy_id, fm);
+        assert_eq!(
+            frontmatter::id_of(&proj.read("fm-copy.md").unwrap()).as_deref(),
+            Some(copy_id.to_string().as_str())
+        );
+        assert_eq!(e.by_path["foreign.md"], foreign);
+        assert_eq!(e.notes.len(), 4);
+    }
+
+    #[test]
     fn reconcile_disk_creates_edits_renames_and_removes() {
         let dir = tempfile::tempdir().unwrap();
         let opts = SyncOptions {
@@ -1123,7 +1217,7 @@ mod tests {
         proj.write("c.md", "# C\n").unwrap();
         let mut e = Engine::open(&opts).unwrap();
         e.reconcile_disk().unwrap();
-        assert_eq!(e.notes[&a].doc.text(), "# A\n\nmore\n");
+        assert!(e.notes[&a].doc.text().ends_with("# A\n\nmore\n"), "{}", e.notes[&a].doc.text());
         assert!(e.by_path.contains_key("b-renamed.md") && !e.by_path.contains_key("sub/b.md"));
         assert_eq!(e.notes.len(), 3, "rename must not create a new note");
         assert_eq!(e.vault.path_of(e.by_path["b-renamed.md"]).as_deref(), Some("b-renamed.md"));

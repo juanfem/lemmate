@@ -22,6 +22,36 @@ pub fn mime_for_path(path: &str) -> String {
     mime_guess::from_path(path).first_or_octet_stream().essence_str().to_owned()
 }
 
+/// Map a link target to an attachment path: relative to the note, relative to the root, under
+/// `attachments/`, and (for `![[wikilinks]]`) by basename among `candidates()`. `exists` says
+/// whether a vault-relative path is a known attachment (a file on disk for clients, a vault-doc
+/// entry on the server).
+pub fn resolve_reference(
+    note_rel: &str,
+    target: &str,
+    wiki: bool,
+    exists: impl Fn(&str) -> bool,
+    candidates: impl FnOnce() -> Vec<String>,
+) -> Option<String> {
+    use crate::projection::Projection;
+    let t = target.split(['#', '?']).next().unwrap_or("").trim().replace("%20", " ");
+    if t.is_empty() || t.contains("://") || t.starts_with("mailto:") || t.starts_with("data:") {
+        return None;
+    }
+    let name = t.rsplit('/').next().unwrap_or(&t).to_owned();
+    let mut tries = Vec::new();
+    tries.extend(Projection::normalize_relative(note_rel, &t));
+    tries.extend(Projection::normalize_relative("", &t));
+    tries.push(format!("attachments/{name}"));
+    if let Some(hit) = tries.iter().find(|c| exists(c)) {
+        return Some(hit.clone());
+    }
+    if wiki {
+        return candidates().into_iter().find(|f| f.rsplit('/').next() == Some(name.as_str()));
+    }
+    None
+}
+
 /// Server-side blob store: `<root>/<vault>/<hh>/<hash>`.
 #[derive(Debug, Clone)]
 pub struct AttachmentStore {
@@ -84,6 +114,32 @@ impl AttachmentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_references() {
+        let files = ["attachments/a.png".to_owned(), "sub/img/b.bin".to_owned()];
+        let exists = |p: &str| files.contains(&p.to_owned());
+        let all = || files.to_vec();
+        assert_eq!(
+            resolve_reference("sub/n.md", "img/b.bin", false, exists, all).as_deref(),
+            Some("sub/img/b.bin")
+        );
+        assert_eq!(
+            resolve_reference("sub/n.md", "../attachments/a.png", false, exists, all).as_deref(),
+            Some("attachments/a.png")
+        );
+        assert_eq!(
+            resolve_reference("n.md", "a.png", true, exists, all).as_deref(),
+            Some("attachments/a.png")
+        );
+        assert_eq!(resolve_reference("n.md", "b.bin", true, exists, all).as_deref(), Some("sub/img/b.bin"));
+        assert_eq!(resolve_reference("n.md", "b.bin", false, exists, all), None);
+        assert_eq!(resolve_reference("n.md", "https://x/a.png", true, exists, all), None);
+        assert_eq!(
+            resolve_reference("n.md", "a.png#frag", true, exists, all).as_deref(),
+            Some("attachments/a.png")
+        );
+    }
 
     #[test]
     fn put_get_idempotent() {

@@ -355,6 +355,35 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> notes_core::Resu
         (RoomDoc::Note(n), DocId::Note(id)) => {
             let ix = markdown::index(&n.text())?;
             store.index_note(id, &ix)?;
+            // Which vault-doc attachments this note references (for the API and cleanup UIs).
+            if let Some(row) = store.note_by_id(id)? {
+                let entries: Vec<String> = store
+                    .load_vault_doc(row.vault_id)?
+                    .attachment_entries()
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+                let mut paths: Vec<String> = Vec::new();
+                let targets = ix
+                    .wikilinks
+                    .iter()
+                    .filter(|w| w.embed)
+                    .map(|w| (w.target.clone(), true))
+                    .chain(ix.links.iter().map(|l| (l.clone(), false)));
+                for (target, wiki) in targets {
+                    if let Some(p) = notes_core::attachments::resolve_reference(
+                        &row.path,
+                        &target,
+                        wiki,
+                        |c| entries.iter().any(|e| e == c),
+                        || entries.clone(),
+                    ) && !paths.contains(&p)
+                    {
+                        paths.push(p);
+                    }
+                }
+                store.set_note_attachments(id, &paths)?;
+            }
         }
         _ => {}
     }

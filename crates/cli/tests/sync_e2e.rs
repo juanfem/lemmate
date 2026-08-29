@@ -39,8 +39,23 @@ async fn run(o: SyncOptions) -> notes_core::Result<SyncReport> {
         .expect("sync run timed out")
 }
 
+/// Note body without the `id:` front matter the engine adds (SPEC §6.3).
 fn read(dir: &Path, rel: &str) -> String {
-    std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    let text = std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    match notes_core::frontmatter::block(&text) {
+        Some((_, end)) => text[end..].to_owned(),
+        None => text,
+    }
+}
+
+/// Replace a note's body the way an editor would, keeping its front matter.
+fn write_body(dir: &Path, rel: &str, body: &str) {
+    let path = dir.join(rel);
+    let head = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| notes_core::frontmatter::block(&t).map(|(_, end)| t[..end].to_owned()))
+        .unwrap_or_default();
+    std::fs::write(path, format!("{head}{body}")).unwrap();
 }
 
 #[tokio::test]
@@ -51,7 +66,7 @@ async fn two_directories_round_trip_through_server() {
 
     // A creates a vault with one note and pushes it.
     std::fs::create_dir_all(a.path().join("Projects")).unwrap();
-    std::fs::write(a.path().join("Projects/plan.md"), "# Plan\n\nstep one\n").unwrap();
+    write_body(a.path(), "Projects/plan.md", "# Plan\n\nstep one\n");
     let report = run(opts(a.path(), &server, None)).await.unwrap();
     assert_eq!(report.notes, 1);
     let vault_id = report.vault_id;
@@ -62,14 +77,14 @@ async fn two_directories_round_trip_through_server() {
     assert_eq!(read(b.path(), "Projects/plan.md"), "# Plan\n\nstep one\n");
 
     // B edits offline, syncs; A syncs and sees the edit.
-    std::fs::write(b.path().join("Projects/plan.md"), "# Plan\n\nstep one\nstep two\n").unwrap();
+    write_body(b.path(), "Projects/plan.md", "# Plan\n\nstep one\nstep two\n");
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
     assert_eq!(read(a.path(), "Projects/plan.md"), "# Plan\n\nstep one\nstep two\n");
 
     // Concurrent offline edits on both sides merge rather than clobber.
-    std::fs::write(a.path().join("Projects/plan.md"), "# Plan!\n\nstep one\nstep two\n").unwrap();
-    std::fs::write(b.path().join("Projects/plan.md"), "# Plan\n\nstep one\nstep two\nstep three\n").unwrap();
+    write_body(a.path(), "Projects/plan.md", "# Plan!\n\nstep one\nstep two\n");
+    write_body(b.path(), "Projects/plan.md", "# Plan\n\nstep one\nstep two\nstep three\n");
     run(opts(a.path(), &server, None)).await.unwrap();
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
@@ -121,8 +136,7 @@ async fn attachments_follow_references() {
     std::fs::create_dir_all(a.path().join("attachments")).unwrap();
     std::fs::write(a.path().join("attachments/logo.png"), &logo).unwrap();
     std::fs::write(a.path().join("attachments/unreferenced.bin"), b"nope").unwrap();
-    std::fs::write(a.path().join("pic.md"), "# Pic\n\n![[logo.png]] and ![again](attachments/logo.png)\n")
-        .unwrap();
+    write_body(a.path(), "pic.md", "# Pic\n\n![[logo.png]] and ![again](attachments/logo.png)\n");
     let report = run(opts(a.path(), &server, None)).await.unwrap();
     let vault_id = report.vault_id;
 
@@ -169,14 +183,14 @@ async fn attachments_follow_references() {
         (1, 0),
         "old logo version is orphaned; nothing purged yet"
     );
-    std::fs::write(
-        b.path().join("pic.md"),
+    write_body(
+        b.path(),
+        "pic.md",
         "# Pic
 
 no images any more
 ",
-    )
-    .unwrap();
+    );
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
     let a_store = Store::open(a.path().join(".notes/local.db")).unwrap();

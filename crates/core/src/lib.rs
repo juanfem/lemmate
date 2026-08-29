@@ -15,6 +15,7 @@ pub mod client;
 pub mod diff;
 pub mod doc;
 pub mod error;
+pub mod frontmatter;
 pub mod ids;
 pub mod markdown;
 pub mod projection;
