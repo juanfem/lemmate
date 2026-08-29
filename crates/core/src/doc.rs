@@ -57,10 +57,13 @@ impl NoteDoc {
         self.doc.transact().encode_diff_v1(sv)
     }
 
-    pub fn apply_update(&self, update: &[u8]) -> Result<()> {
+    /// Apply a v1 update; returns whether it changed anything.
+    pub fn apply_update(&self, update: &[u8]) -> Result<bool> {
         let update = Update::decode_v1(update).map_err(|e| Error::Crdt(e.to_string()))?;
         let mut txn = self.doc.transact_mut();
-        txn.apply_update(update).map_err(|e| Error::Crdt(e.to_string()))
+        let before = txn.state_vector();
+        txn.apply_update(update).map_err(|e| Error::Crdt(e.to_string()))?;
+        Ok(txn.state_vector() != before)
     }
 
     /// Replace the text by applying a minimal diff as CRDT edits, so concurrent edits elsewhere

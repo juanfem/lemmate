@@ -7,18 +7,34 @@ specification; this README covers the repository and the current milestone.
 
 | Crate | Path | What it is |
 |---|---|---|
-| `notes-core` | `crates/core` | Shared engine: yrs CRDT docs, text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, filesystem watcher, sync frame codec, markdown indexer. |
-| `notes-server` | `crates/server` | axum server: WebSocket sync relay with persistence, minimal REST (`/api/v1`). **No auth yet.** |
-| `notes-cli` | `crates/cli` | `notes` binary: `index`, `search`, `doctor`; `sync` is a stub. |
+| `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, filesystem watcher, sync frame codec, markdown indexer, and the **client sync engine** (`client::run`). |
+| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence, derives notes/tags/FTS from the CRDT stream, minimal REST (`/api/v1`). **No auth yet.** |
+| `notes-cli` | `crates/cli` | `notes` binary: `sync`, `index`, `search`, `doctor`. |
 | corpus | `corpus/` | Markdown conformance cases (`*.md` + expected `*.json`) that the Rust indexer and the future JS parser must both satisfy. |
 
 Done in M0 so far: CRDT doc model with merge tests, diff-to-CRDT edits, store schema and
 round-trip tests, projection write/ingest with a 3-way merge test, watcher, wire framing,
-markdown indexing (front matter, tags, wikilinks, links, headings, math/task flags, code langs).
+markdown indexing, server relay with an end-to-end WebSocket test, and `notes sync` — the full
+projection loop (watch → debounce → ingest/create/rename/delete → WebSocket → project), with an
+end-to-end test that drives two directories through a real server across create, edit,
+concurrent offline edits, rename, and delete.
 
-Still to do for M0: the client sync loop (`notes sync`: watcher → ingest → WebSocket → project),
-vault-doc handling for paths/bookmarks, attachment upload, snapshot/pruning policy, and the JS
+Still to do for M0: attachment upload, snapshot/pruning policy, TLS for `wss://`, and the JS
 side of the parser conformance test.
+
+## `notes sync`
+
+```sh
+# machine 1: publish a folder as a new vault (prints the vault id; also stored in .notes/)
+notes sync --vault ~/vault --server http://127.0.0.1:8080 --once
+
+# machine 2: join it into an empty folder, then keep watching
+notes sync --vault ~/vault --server http://127.0.0.1:8080 --vault-id <ULID>
+```
+
+Without `--once` the command runs until interrupted, reconnecting with backoff; while offline,
+edits are journaled in `<vault>/.notes/local.db` and reconciled on reconnect. Renames are
+detected by content hash within 2 s; deletions go to the trash (the note's history is kept).
 
 ## Build and test
 
@@ -28,6 +44,7 @@ cargo test
 cargo run -p notes-cli -- doctor
 cargo run -p notes-cli -- index corpus/basic.md --json
 cargo run -p notes-cli -- search /path/to/vault "quick fox"
+cargo run -p notes-cli -- sync --vault /path/to/vault --server http://127.0.0.1:8080 --once
 cargo run -p notes-server -- --data-dir ./data        # http://127.0.0.1:8080/healthz
 ```
 

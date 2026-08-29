@@ -1,13 +1,14 @@
 //! `notes` — command-line client (SPEC §13.2).
 //!
-//! M0 scope: local, offline commands built directly on `notes-core`. Server-backed commands
-//! (`login`, `sync`) are stubs until the sync loop lands.
+//! M0 scope: local commands built directly on `notes-core`, plus `sync` against a server.
+//! Accounts (`login`) arrive with M2.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+use notes_core::client::{self, SyncOptions};
 use notes_core::{NoteId, Projection, Store, VaultId, markdown};
 
 #[derive(Parser)]
@@ -33,12 +34,20 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    /// Run the projection sync loop for a vault against a server. (M0: not yet implemented.)
+    /// Keep a vault directory in sync with a server (creates `<vault>/.notes/`).
     Sync {
+        /// Vault directory; created if missing.
         #[arg(long)]
         vault: PathBuf,
+        /// Server base URL, e.g. http://127.0.0.1:8080
         #[arg(long, env = "NOTES_SERVER")]
         server: String,
+        /// Vault id to join (required to pull an existing vault into an empty directory).
+        #[arg(long)]
+        vault_id: Option<String>,
+        /// Sync once and exit instead of watching for changes.
+        #[arg(long)]
+        once: bool,
     },
     /// Print versions and environment facts.
     Doctor,
@@ -113,11 +122,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Sync { vault, server } => {
-            bail!(
-                "`notes sync` is not implemented yet (vault {}, server {server}); see SPEC.md §6.3/§7",
-                vault.display()
-            )
+        Cmd::Sync { vault, server, vault_id, once } => {
+            let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
+            std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
+            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once };
+            let rt = tokio::runtime::Runtime::new()?;
+            let report = rt.block_on(client::run(opts))?;
+            if once {
+                println!("in sync: vault {} ({} notes)", report.vault_id, report.notes);
+            }
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor => {
             println!("notes {}", env!("CARGO_PKG_VERSION"));

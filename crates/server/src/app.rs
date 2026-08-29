@@ -11,11 +11,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store, VaultId};
+use notes_core::{DocId, NoteDoc, NoteId, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use yrs::StateVector;
 
 pub struct AppState {
     pub store: Mutex<Store>,
@@ -26,7 +27,34 @@ pub struct AppState {
 
 struct Room {
     id: DocId,
-    doc: Mutex<NoteDoc>,
+    doc: Mutex<RoomDoc>,
+}
+
+/// A note doc or the vault doc, behind one CRDT interface.
+enum RoomDoc {
+    Note(NoteDoc),
+    Vault(VaultDoc),
+}
+
+impl RoomDoc {
+    fn state_vector(&self) -> StateVector {
+        match self {
+            RoomDoc::Note(d) => d.state_vector(),
+            RoomDoc::Vault(d) => d.state_vector(),
+        }
+    }
+    fn diff_since(&self, sv: &StateVector) -> Vec<u8> {
+        match self {
+            RoomDoc::Note(d) => d.diff_since(sv),
+            RoomDoc::Vault(d) => d.diff_since(sv),
+        }
+    }
+    fn apply_update(&self, u: &[u8]) -> notes_core::Result<bool> {
+        match self {
+            RoomDoc::Note(d) => d.apply_update(u),
+            RoomDoc::Vault(d) => d.apply_update(u),
+        }
+    }
 }
 
 /// A frame to fan out to every other connection subscribed to `doc_id`.
@@ -151,19 +179,22 @@ async fn handle_frame(
             subscribed.insert(frame.doc_id.clone());
             {
                 let doc = room.doc.lock().await;
-                let before = doc.state_vector();
-                if let Err(e) = doc.apply_update(&update) {
-                    warn!(conn_id, %e, "rejected update");
-                    return Vec::new();
-                }
-                if doc.state_vector() == before {
+                match doc.apply_update(&update) {
+                    Err(e) => {
+                        warn!(conn_id, %e, "rejected update");
+                        return Vec::new();
+                    }
                     // Nothing new (e.g. the empty SyncStep2 an in-sync client answers with):
                     // don't persist it and don't wake other subscribers.
-                    return Vec::new();
+                    Ok(false) => return Vec::new(),
+                    Ok(true) => {}
                 }
             }
             if let Err(e) = state.store.lock().await.append_update(room.id, &update, None) {
                 warn!(conn_id, %e, "persisting update");
+            }
+            if let Err(e) = derive_metadata(state, &room).await {
+                warn!(conn_id, %e, "indexing");
             }
             let out = Frame::new(&frame.doc_id, &Message::Sync(SyncMessage::Update(update))).encode();
             let _ =
@@ -188,10 +219,46 @@ async fn get_room(state: &Arc<AppState>, id: DocId) -> notes_core::Result<Arc<Ro
     if let Some(r) = rooms.get(&key) {
         return Ok(r.clone());
     }
-    let doc = state.store.lock().await.load_doc(id)?;
+    let store = state.store.lock().await;
+    let doc = match id {
+        DocId::Note(_) => RoomDoc::Note(store.load_doc(id)?),
+        DocId::Vault(v) => RoomDoc::Vault(store.load_vault_doc(v)?),
+    };
+    drop(store);
     let room = Arc::new(Room { id, doc: Mutex::new(doc) });
     rooms.insert(key, room.clone());
     Ok(room)
+}
+
+/// Keep the relational tables (notes, tags, links, FTS) in step with the CRDT truth so the REST
+/// and search endpoints reflect what clients synced (SPEC §4.2: metadata is derived, never a
+/// second source of truth).
+async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> notes_core::Result<()> {
+    let doc = room.doc.lock().await;
+    let mut store = state.store.lock().await;
+    match (&*doc, room.id) {
+        (RoomDoc::Vault(v), DocId::Vault(vault_id)) => {
+            let entries = v.entries();
+            let live: std::collections::HashSet<NoteId> = entries.iter().map(|(id, _)| *id).collect();
+            for row in store.list_notes(vault_id)? {
+                if !live.contains(&row.id) {
+                    store.trash_note(row.id)?;
+                }
+            }
+            for (id, path) in entries {
+                let title = store.note_by_id(id)?.and_then(|r| r.title).or_else(|| {
+                    std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
+                });
+                store.upsert_note(id, vault_id, &path, title.as_deref())?;
+            }
+        }
+        (RoomDoc::Note(n), DocId::Note(id)) => {
+            let ix = markdown::index(&n.text())?;
+            store.index_note(id, &ix)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---- REST -------------------------------------------------------------------------------------
@@ -258,7 +325,10 @@ async fn get_note(
         .find(|n| n.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
     let room = get_room(&state, DocId::Note(id)).await.map_err(internal)?;
-    let content = room.doc.lock().await.text();
+    let content = match &*room.doc.lock().await {
+        RoomDoc::Note(d) => d.text(),
+        RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
+    };
     Ok(Json(NoteBody { id: id.to_string(), path: row.path, title: row.title, content }))
 }
 

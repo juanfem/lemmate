@@ -9,8 +9,9 @@ use crate::doc::NoteDoc;
 use crate::error::Result;
 use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
+use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -50,6 +51,8 @@ CREATE TABLE IF NOT EXISTS projection (
     path   TEXT NOT NULL,
     text   TEXT NOT NULL
 );
+-- Small key/value facts about this database (e.g. `vault_id` in a client sidecar).
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
 pub struct Store {
@@ -112,8 +115,8 @@ impl Store {
         Ok(seq)
     }
 
-    /// Load a doc from its latest snapshot plus subsequent updates. A never-seen doc is empty.
-    pub fn load_doc(&self, doc_id: DocId) -> Result<NoteDoc> {
+    /// Latest snapshot (if any) followed by the updates after it, in order.
+    pub fn load_updates(&self, doc_id: DocId) -> Result<Vec<Vec<u8>>> {
         let id = doc_id.to_string();
         let snapshot: Option<(i64, Vec<u8>)> = self
             .conn
@@ -132,7 +135,18 @@ impl Store {
         for row in stmt.query_map(params![id, from_seq], |r| r.get::<_, Vec<u8>>(0))? {
             updates.push(row?);
         }
+        Ok(updates)
+    }
+
+    /// Load a note doc from its latest snapshot plus subsequent updates. A never-seen doc is empty.
+    pub fn load_doc(&self, doc_id: DocId) -> Result<NoteDoc> {
+        let updates = self.load_updates(doc_id)?;
         NoteDoc::from_updates(updates.iter().map(Vec::as_slice))
+    }
+
+    pub fn load_vault_doc(&self, vault_id: VaultId) -> Result<VaultDoc> {
+        let updates = self.load_updates(DocId::Vault(vault_id))?;
+        VaultDoc::from_updates(updates.iter().map(Vec::as_slice))
     }
 
     /// Persist the doc's full state as a snapshot at the current head. Retention/pruning of
@@ -190,6 +204,17 @@ impl Store {
             .query_row(
                 "SELECT id, vault_id, path, title FROM notes WHERE vault_id = ?1 AND path = ?2 AND deleted_at IS NULL",
                 params![vault_id.to_string(), path],
+                row_to_note,
+            )
+            .optional()?)
+    }
+
+    pub fn note_by_id(&self, id: NoteId) -> Result<Option<NoteRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, vault_id, path, title FROM notes WHERE id = ?1 AND deleted_at IS NULL",
+                params![id.to_string()],
                 row_to_note,
             )
             .optional()?)
@@ -279,6 +304,28 @@ impl Store {
             .optional()?)
     }
 
+    pub fn delete_projection(&mut self, doc_id: DocId) -> Result<()> {
+        self.conn.execute("DELETE FROM projection WHERE doc_id = ?1", params![doc_id.to_string()])?;
+        Ok(())
+    }
+
+    // ---- Meta -------------------------------------------------------------------------------
+
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn meta_set(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn set_projected_text(&mut self, doc_id: DocId, path: &str, text: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO projection (doc_id, path, text) VALUES (?1, ?2, ?3)
@@ -328,6 +375,18 @@ mod tests {
         assert_eq!(store.append_update(id, &u3, None).unwrap(), 3);
         assert_eq!(store.load_doc(id).unwrap().text(), "first second third");
         assert_eq!(store.load_doc(DocId::Note(NoteId::new())).unwrap().text(), "");
+
+        let vault = VaultId::new();
+        let vd = VaultDoc::new();
+        let n = NoteId::new();
+        let uv = vd.set_path(n, "x.md");
+        store.append_update(DocId::Vault(vault), &uv, None).unwrap();
+        assert_eq!(store.load_vault_doc(vault).unwrap().entries(), vec![(n, "x.md".to_owned())]);
+
+        assert_eq!(store.meta_get("vault_id").unwrap(), None);
+        store.meta_set("vault_id", &vault.to_string()).unwrap();
+        store.meta_set("vault_id", &vault.to_string()).unwrap();
+        assert_eq!(store.meta_get("vault_id").unwrap().as_deref(), Some(vault.to_string().as_str()));
     }
 
     #[test]

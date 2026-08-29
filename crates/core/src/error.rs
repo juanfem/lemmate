@@ -20,6 +20,10 @@ pub enum Error {
     Watcher(#[from] notify::Error),
     #[error("path escapes vault root: {0}")]
     PathEscape(String),
+    #[error("sync: {0}")]
+    Sync(String),
+    #[error("websocket: {0}")]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

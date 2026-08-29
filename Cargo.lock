@@ -844,9 +844,13 @@ name = "notes-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "notes-core",
+ "notes-server",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -856,6 +860,7 @@ name = "notes-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "futures-util",
  "markdown",
  "notify",
  "rusqlite",
@@ -865,6 +870,8 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-tungstenite",
  "tracing",
  "ulid",
  "yrs",

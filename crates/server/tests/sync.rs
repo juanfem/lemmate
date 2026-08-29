@@ -102,12 +102,12 @@ async fn two_clients_converge_and_updates_persist() {
     let (_, ma) = recv(&mut a).await;
     let (_, mb) = recv(&mut b).await;
     if let Message::Sync(SyncMessage::Update(u)) = ma {
-        doc_a.apply_update(&u).unwrap()
+        doc_a.apply_update(&u).unwrap();
     } else {
         panic!()
     }
     if let Message::Sync(SyncMessage::Update(u)) = mb {
-        doc_b.apply_update(&u).unwrap()
+        doc_b.apply_update(&u).unwrap();
     } else {
         panic!()
     }
