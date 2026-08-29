@@ -1,0 +1,24 @@
+{
+  "title": "Quarto document",
+  "front_matter": {
+    "title": "Quarto document",
+    "tags": [],
+    "aliases": [],
+    "id": null
+  },
+  "tags": [],
+  "wikilinks": [],
+  "links": [],
+  "headings": [
+    {
+      "depth": 2,
+      "text": "Slide one"
+    }
+  ],
+  "has_math": false,
+  "has_tasks": false,
+  "code_langs": [
+    "r"
+  ],
+  "plain_text": ""
+}

@@ -1,0 +1,29 @@
+{
+  "title": "Title from H1",
+  "front_matter": null,
+  "tags": [
+    "1a",
+    "ok-tag"
+  ],
+  "wikilinks": [
+    {
+      "target": "Title from H1",
+      "embed": false
+    }
+  ],
+  "links": [],
+  "headings": [
+    {
+      "depth": 1,
+      "text": "Title from H1"
+    },
+    {
+      "depth": 3,
+      "text": "Skips to h3"
+    }
+  ],
+  "has_math": false,
+  "has_tasks": false,
+  "code_langs": [],
+  "plain_text": ""
+}

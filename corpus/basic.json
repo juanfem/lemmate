@@ -1,0 +1,59 @@
+{
+  "title": "Basic note",
+  "front_matter": {
+    "title": "Basic note",
+    "tags": [
+      "alpha",
+      "Beta/Gamma"
+    ],
+    "aliases": [
+      "nick",
+      "other"
+    ],
+    "id": null
+  },
+  "tags": [
+    "inline-tag",
+    "alpha",
+    "nested/tag",
+    "heading-tag",
+    "beta/gamma"
+  ],
+  "wikilinks": [
+    {
+      "target": "Wikilink",
+      "embed": false
+    },
+    {
+      "target": "Target",
+      "heading": "Section",
+      "label": "labelled",
+      "embed": false
+    },
+    {
+      "target": "diagram.png",
+      "embed": true
+    }
+  ],
+  "links": [
+    "https://example.com/x",
+    "img/pic.png"
+  ],
+  "headings": [
+    {
+      "depth": 1,
+      "text": "Ignored H1 (front matter title wins)"
+    },
+    {
+      "depth": 2,
+      "text": "Second heading with #heading-tag"
+    }
+  ],
+  "has_math": true,
+  "has_tasks": true,
+  "code_langs": [
+    "python",
+    "rust"
+  ],
+  "plain_text": ""
+}
