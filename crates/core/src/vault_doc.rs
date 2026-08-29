@@ -55,9 +55,9 @@ impl VaultDoc {
     pub fn apply_update(&self, update: &[u8]) -> Result<bool> {
         let update = Update::decode_v1(update).map_err(|e| Error::Crdt(e.to_string()))?;
         let mut txn = self.doc.transact_mut();
-        let before = txn.state_vector();
         txn.apply_update(update).map_err(|e| Error::Crdt(e.to_string()))?;
-        Ok(txn.state_vector() != before)
+        // Insertions advance the state vector; pure deletions only touch the delete set.
+        Ok(txn.after_state() != txn.before_state() || !txn.delete_set().is_empty())
     }
 
     pub fn path_of(&self, id: NoteId) -> Option<String> {
@@ -183,7 +183,8 @@ mod tests {
         let ur = a.remove(n1);
         assert!(!ur.is_empty());
         assert!(a.remove(n1).is_empty());
-        b.apply_update(&ur).unwrap();
+        assert!(b.apply_update(&ur).unwrap(), "a pure deletion is a change");
+        assert!(!b.apply_update(&ur).unwrap(), "replaying it is not");
         assert_eq!(b.entries(), vec![(n2, "b.md".to_owned())]);
     }
 

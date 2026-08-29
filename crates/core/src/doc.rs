@@ -61,9 +61,9 @@ impl NoteDoc {
     pub fn apply_update(&self, update: &[u8]) -> Result<bool> {
         let update = Update::decode_v1(update).map_err(|e| Error::Crdt(e.to_string()))?;
         let mut txn = self.doc.transact_mut();
-        let before = txn.state_vector();
         txn.apply_update(update).map_err(|e| Error::Crdt(e.to_string()))?;
-        Ok(txn.state_vector() != before)
+        // Insertions advance the state vector; pure deletions only touch the delete set.
+        Ok(txn.after_state() != txn.before_state() || !txn.delete_set().is_empty())
     }
 
     /// Replace the text by applying a minimal diff as CRDT edits, so concurrent edits elsewhere
@@ -133,6 +133,17 @@ mod tests {
         b.apply_update(&missing).unwrap();
         assert_eq!(b.text(), "one two");
         assert!(a.diff_since(&b.state_vector()).len() <= 2, "nothing left to send");
+    }
+
+    #[test]
+    fn deletion_only_updates_count_as_changes() {
+        let a = NoteDoc::new();
+        a.set_text("abc");
+        let b = NoteDoc::from_updates([a.encode_full().as_slice()]).unwrap();
+        let del = a.set_text("ab");
+        assert!(b.apply_update(&del).unwrap());
+        assert!(!b.apply_update(&del).unwrap());
+        assert_eq!(b.text(), "ab");
     }
 
     #[test]

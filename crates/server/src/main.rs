@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use notes_core::RetentionPolicy;
 use notes_core::Store;
-use notes_server::{ServerOptions, build_state, router};
+use notes_server::{ServerOptions, build_state, purge_orphans, router};
 use std::time::Duration;
 use tracing::info;
 
@@ -32,6 +32,9 @@ struct Config {
     /// Keep raw updates (fine-grained history) for this many days; versions are kept forever.
     #[arg(long, env = "NOTES_RETAIN_DAYS", default_value_t = 90)]
     retain_days: u64,
+    /// Purge attachment blobs that have been unreferenced for this many days.
+    #[arg(long, env = "NOTES_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
+    attachment_grace_days: u64,
 }
 
 #[tokio::main]
@@ -49,13 +52,29 @@ async fn main() -> anyhow::Result<()> {
 
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),
+        attachment_grace: Duration::from_secs(cfg.attachment_grace_days * 24 * 60 * 60),
         policy: RetentionPolicy {
             snapshot_every_updates: cfg.snapshot_every_updates,
             snapshot_interval: Duration::from_secs(cfg.snapshot_every_minutes * 60),
             retain_updates: Duration::from_secs(cfg.retain_days * 24 * 60 * 60),
         },
     };
-    let app = router(build_state(store, options));
+    let state = build_state(store, options);
+    // Hourly orphan sweep (also once at startup).
+    let sweeper = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            tick.tick().await;
+            match purge_orphans(&sweeper, notes_core::store::now_ms(), sweeper.options.attachment_grace).await
+            {
+                Ok(r) if r.purged > 0 || r.newly_orphaned > 0 => info!(?r, "attachment sweep"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(%e, "attachment sweep"),
+            }
+        }
+    });
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), "notes-server listening");
     axum::serve(listener, app).await?;

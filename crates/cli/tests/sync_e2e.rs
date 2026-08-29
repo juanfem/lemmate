@@ -108,6 +108,10 @@ async fn two_directories_round_trip_through_server() {
 
 #[tokio::test]
 async fn attachments_follow_references() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let (server, state, _blobs) = start_server().await;
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -150,6 +154,47 @@ async fn attachments_follow_references() {
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
     assert_eq!(std::fs::read(a.path().join("sub/img/two.bin")).unwrap(), b"two");
+
+    // Orphans: B drops every reference to the logo; the entry leaves the vault doc, the server
+    // purges both logo versions after the grace period, and two.bin survives.
+    let (h1, h2, h_two) = (
+        notes_core::attachments::hash_bytes(&logo),
+        notes_core::attachments::hash_bytes(&logo2),
+        notes_core::attachments::hash_bytes(b"two"),
+    );
+    let now = notes_core::store::now_ms();
+    let first = notes_server::purge_orphans(&state, now, Duration::from_secs(3600)).await.unwrap();
+    assert_eq!(
+        (first.newly_orphaned, first.purged),
+        (1, 0),
+        "old logo version is orphaned; nothing purged yet"
+    );
+    std::fs::write(
+        b.path().join("pic.md"),
+        "# Pic
+
+no images any more
+",
+    )
+    .unwrap();
+    run(opts(b.path(), &server, None)).await.unwrap();
+    run(opts(a.path(), &server, None)).await.unwrap();
+    let a_store = Store::open(a.path().join(".notes/local.db")).unwrap();
+    let entries = a_store.load_vault_doc(vault_id).unwrap().attachment_entries();
+    assert_eq!(entries.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["sub/img/two.bin"]);
+    assert!(a.path().join("attachments/logo.png").exists(), "local files are never deleted by cleanup");
+    drop(a_store);
+
+    let within = notes_server::purge_orphans(&state, now + 1000, Duration::from_secs(3600)).await.unwrap();
+    assert_eq!((within.newly_orphaned, within.purged), (1, 0));
+    let later =
+        notes_server::purge_orphans(&state, now + 3_600_000 + 2000, Duration::from_secs(3600)).await.unwrap();
+    assert_eq!(later.purged, 2);
+    assert!(!state.attachments.exists(vault_id, &h1) && !state.attachments.exists(vault_id, &h2));
+    assert!(state.attachments.exists(vault_id, &h_two));
+    let store = state.store.lock().await;
+    assert!(store.attachment(vault_id, &h2).unwrap().is_none());
+    assert!(store.attachment(vault_id, &h_two).unwrap().is_some());
 }
 
 /// `wss://` + `https://` against a TLS server signed by a private CA, trusted via `ca_cert`.

@@ -330,6 +330,8 @@ pub struct Engine {
     pending_attachment_fs: HashMap<String, Instant>,
     /// Cache of blake3 hashes of local attachment files; invalidated by watcher events.
     local_hashes: HashMap<String, String>,
+    /// Something changed that may have orphaned an attachment entry; checked once idle.
+    orphan_check_due: bool,
 }
 
 impl Engine {
@@ -380,6 +382,7 @@ impl Engine {
             upload_retry_after: None,
             pending_attachment_fs: HashMap::new(),
             local_hashes: HashMap::new(),
+            orphan_check_due: true,
         })
     }
 
@@ -600,6 +603,7 @@ impl Engine {
         if let Some(id) = id {
             self.store.set_note_attachments(id, &paths)?;
         }
+        self.orphan_check_due = true;
         for path in paths {
             self.want_upload(&path)?;
         }
@@ -685,6 +689,22 @@ impl Engine {
             if let Some(tx) = &self.transfers {
                 self.in_flight.insert(path.clone());
                 let _ = tx.send(TransferJob::Download { path, hash });
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop vault-doc entries no live note references any more (SPEC §9). Only runs when the
+    /// replica is fully caught up, so a note whose content has not arrived yet cannot make its
+    /// attachments look unreferenced. Local files are left alone; the server purges blobs.
+    fn cleanup_orphans(&mut self) -> Result<()> {
+        self.orphan_check_due = false;
+        let referenced = self.store.referenced_attachment_paths()?;
+        for (path, _) in self.vault.attachment_entries() {
+            if !referenced.contains(&path) {
+                info!(path = %path, "attachment no longer referenced; dropping from vault");
+                let u = self.vault.remove_attachment(&path);
+                self.persist_and_send(DocId::Vault(self.vault_id), u)?;
             }
         }
         Ok(())
@@ -815,6 +835,7 @@ impl Engine {
     fn forget(&mut self, id: NoteId, path: &str) -> Result<()> {
         self.store.trash_note(id)?;
         self.store.clear_note_attachments(id)?;
+        self.orphan_check_due = true;
         self.store.delete_projection(DocId::Note(id))?;
         self.by_path.remove(path);
         self.notes.remove(&id);
@@ -913,7 +934,10 @@ impl Engine {
                 if changed {
                     self.store.append_update(doc, &update, None)?;
                     match doc {
-                        DocId::Vault(_) => self.reconcile_vault()?,
+                        DocId::Vault(_) => {
+                            self.reconcile_vault()?;
+                            self.orphan_check_due = true;
+                        }
                         DocId::Note(id) => {
                             self.dirty.insert(id, Instant::now());
                         }
@@ -1001,6 +1025,9 @@ impl Engine {
         for id in ready {
             self.dirty.remove(&id);
             self.project(id)?;
+        }
+        if self.orphan_check_due && self.is_idle() {
+            self.cleanup_orphans()?;
         }
         Ok(())
     }

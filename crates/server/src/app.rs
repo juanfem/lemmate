@@ -28,6 +28,8 @@ pub struct ServerOptions {
     pub policy: RetentionPolicy,
     /// Root of the content-addressed blob store.
     pub attachments_dir: std::path::PathBuf,
+    /// How long an unreferenced blob is kept before it is purged (SPEC §9: trash window).
+    pub attachment_grace: std::time::Duration,
 }
 
 impl Default for ServerOptions {
@@ -35,8 +37,61 @@ impl Default for ServerOptions {
         Self {
             policy: RetentionPolicy::default(),
             attachments_dir: std::env::temp_dir().join("notes-attachments"),
+            attachment_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
         }
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PurgeReport {
+    pub vaults: usize,
+    pub newly_orphaned: usize,
+    pub rescued: usize,
+    pub purged: usize,
+}
+
+/// Orphan sweep (SPEC §9): a blob no live vault-doc entry references is marked at first sight
+/// and deleted once it has been unreferenced for `grace`; a blob referenced again is rescued.
+pub async fn purge_orphans(
+    state: &AppState,
+    now_ms: i64,
+    grace: std::time::Duration,
+) -> notes_core::Result<PurgeReport> {
+    let mut report = PurgeReport::default();
+    let mut store = state.store.lock().await;
+    let vaults: Vec<VaultId> = store
+        .doc_ids()?
+        .into_iter()
+        .filter_map(|d| match d {
+            DocId::Vault(v) => Some(v),
+            DocId::Note(_) => None,
+        })
+        .collect();
+    let grace_ms = grace.as_millis() as i64;
+    for vault in vaults {
+        report.vaults += 1;
+        let live: std::collections::HashSet<String> =
+            store.load_vault_doc(vault)?.attachment_entries().into_iter().map(|(_, h)| h).collect();
+        for (hash, orphaned) in store.attachment_hashes(vault)? {
+            if live.contains(&hash) {
+                if orphaned.is_some() {
+                    store.set_attachment_orphaned(vault, &hash, None)?;
+                    report.rescued += 1;
+                }
+                continue;
+            }
+            let since = orphaned.unwrap_or(now_ms);
+            if now_ms - since >= grace_ms {
+                state.attachments.remove(vault, &hash)?;
+                store.delete_attachment(vault, &hash)?;
+                report.purged += 1;
+            } else if orphaned.is_none() {
+                store.set_attachment_orphaned(vault, &hash, Some(now_ms))?;
+                report.newly_orphaned += 1;
+            }
+        }
+    }
+    Ok(report)
 }
 
 pub struct AppState {

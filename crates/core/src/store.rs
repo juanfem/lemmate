@@ -345,6 +345,36 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
+    /// (hash, orphaned_ms) for every attachment row of a vault.
+    pub fn attachment_hashes(&self, vault_id: VaultId) -> Result<Vec<(String, Option<i64>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash, orphaned_ms FROM attachments WHERE vault_id = ?1 ORDER BY hash")?;
+        let rows = stmt.query_map(params![vault_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    pub fn set_attachment_orphaned(
+        &mut self,
+        vault_id: VaultId,
+        hash: &str,
+        orphaned_ms: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachments SET orphaned_ms = ?3 WHERE vault_id = ?1 AND hash = ?2",
+            params![vault_id.to_string(), hash, orphaned_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_attachment(&mut self, vault_id: VaultId, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM attachments WHERE vault_id = ?1 AND hash = ?2",
+            params![vault_id.to_string(), hash],
+        )?;
+        Ok(())
+    }
+
     pub fn attachment(&self, vault_id: VaultId, hash: &str) -> Result<Option<AttachmentRow>> {
         Ok(self
             .conn

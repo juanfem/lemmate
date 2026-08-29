@@ -3,4 +3,4 @@
 
 pub mod app;
 
-pub use app::{AppState, ServerOptions, build_state, router};
+pub use app::{AppState, PurgeReport, ServerOptions, build_state, purge_orphans, router};

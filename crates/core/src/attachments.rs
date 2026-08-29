@@ -68,6 +68,14 @@ impl AttachmentStore {
         }
     }
 
+    pub fn remove(&self, vault: VaultId, hash: &str) -> Result<()> {
+        match fs::remove_file(self.path_for(vault, hash)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -89,6 +97,9 @@ mod tests {
         assert_eq!(store.get(VaultId::new(), &h).unwrap(), None);
         assert!(store.path_for(v, "../x").is_err());
         assert!(store.exists(v, &h));
+        store.remove(v, &h).unwrap();
+        store.remove(v, &h).unwrap();
+        assert!(!store.exists(v, &h));
         assert_eq!(mime_for_path("a/b.png"), "image/png");
         assert_eq!(mime_for_path("weird.zzz"), "application/octet-stream");
     }
