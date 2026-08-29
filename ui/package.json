@@ -1,0 +1,29 @@
+{
+  "name": "notes-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript side of notes: markdown parsing (shared corpus with notes-core), later the CodeMirror 6 editor and Svelte 5 shell.",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-frontmatter": "^2.0.1",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-extension-frontmatter": "^2.0.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  }
+}

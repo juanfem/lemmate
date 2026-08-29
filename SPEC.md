@@ -1,6 +1,6 @@
 # Notes — Specification
 
-Status: draft v0.1 (2026-08-29)
+Status: draft v0.2 (2026-08-30) — open questions resolved
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
@@ -83,7 +83,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 - **`server`** — axum HTTP/WebSocket server embedding `core`. Serves the web client. Single
   static binary. Configuration by environment variables / one TOML file.
 - **`ui`** — TypeScript, framework-agnostic core around CodeMirror 6 + Yjs; app shell in
-  **Svelte 5 [recommended]** (small bundle, matters on mobile webviews). Identical bundle in
+  **Svelte 5 [decided]** (small bundle, matters on mobile webviews). Identical bundle in
   desktop, mobile, and web.
 - **`desktop`, `mobile`** — Tauri 2 shells. Expose `core` to the UI via Tauri commands.
 - **`cli`** — `notes` binary. Talks to a server over the REST API, or to a local vault
@@ -207,7 +207,7 @@ tags: [a, b/c]    # merged with inline #tags
 aliases: [x, y]   # alternative link targets
 created: 2026-08-29
 date: 2026-08-29  # Quarto-compatible
-id: 01J…          # optional; written only on export/import, see §6.3
+id: 01J…          # written by the app on creation/import [decided]; see §6.3
 ```
 
 ### 5.3 Callouts
@@ -276,8 +276,9 @@ Per vault, a local directory chosen by the user (the projection, §6.3) plus a s
 Write direction (CRDT → disk):
 - Debounced 500 ms after the last local or remote change to a doc, `core` writes the full
   text atomically (write temp, rename). Path from the vault doc.
-- Attachments referenced by a note are materialised under `attachments/` with
-  `<filename_hint>` (deduplicated with `-<hash[0..6]>` on collision).
+- Attachments referenced by a note are materialised under a single vault-level
+  `attachments/` folder **[decided]** with `<filename_hint>` (deduplicated with
+  `-<hash[0..6]>` on collision); notes may still reference files anywhere in the vault.
 
 Read direction (disk → CRDT):
 - A watcher (`notify` crate) observes the vault directory, ignoring `.notes/`.
@@ -289,8 +290,10 @@ Read direction (disk → CRDT):
   from disk without a trash stop.
 - Moved file: if a new file's content hash equals a just-deleted file's hash within 2 s,
   treat as rename; otherwise delete + create.
-- The optional `id:` front-matter field, when present, takes precedence for identity —
-  this is how external tooling can move files safely.
+- The `id:` front-matter field is written by default when a note is created or imported
+  **[decided]** and takes precedence for identity, so external tools (and plain `mv`) can move
+  files without the content-hash heuristic. Hand-made files without one still get the
+  heuristic and gain an `id:` on first sync.
 
 Mobile projection: Android exposes the vault folder via the Storage Access Framework;
 iOS exposes it in the Files app under the app's Documents (`UIFileSharingEnabled`).
@@ -340,7 +343,7 @@ Editing features:
   selection → link.
 - Table editing: Tab/Shift-Tab across cells, row/column commands, column alignment.
 - Heading folding, outline pane, jump-to-heading.
-- Find/replace in note; multi-cursor; optional Vim keymap.
+- Find/replace in note; multi-cursor. (Vim keymap: not planned for M1 **[decided]**.)
 - Spellcheck via the platform webview.
 - Collaboration: remote cursors and selections with name labels; presence list per note.
 - Mobile: toolbar row above the keyboard for markup, indent, checkbox, link, image.
@@ -368,7 +371,7 @@ Editing features:
 - **Version history** — a `Version` row is created every 15 minutes of activity per note
   and on explicit "save version"; history pane shows versions with author, diff view,
   restore (restore = new edit, history preserved). Raw update log retained 90 days
-  (configurable), versions retained forever.
+  (configurable) **[decided]**, versions retained forever.
 - **Trash** — deleted notes are hidden, restorable for 30 days, then purged along with
   orphaned attachments.
 
@@ -421,6 +424,9 @@ Enforcement is at the sync layer (§7) and API layer, not in the UI.
 - Imports `.obsidian/bookmarks.json`, daily-notes settings, and `templates` folder.
 - Copies attachments into content-addressed storage, keeps projected filenames.
 - Ignores `.obsidian/` otherwise; reports unsupported syntax in a summary.
+- Plugins in current use and what replaces them: *Self-hosted LiveSync* → the built-in sync
+  (§7); *File Tree Alternative* → the folder-first tree pane with per-folder note counts and
+  folder notes (§9) is the M1 target for that workflow.
 
 ---
 
@@ -433,7 +439,9 @@ Server-side (or local when the binary is installed) pandoc/quarto:
 - `.qmd` → `quarto render` with the note's own front matter.
 - Export options: include front matter, resolve wikilinks to relative paths, embed images.
 - A per-vault `export/` folder may hold `defaults.yaml`, `template.tex`, `references.bib`,
-  `style.csl`; the export uses them when present.
+  `style.csl`; the export uses them when present. Citations resolve against the single
+  vault-level `references.bib` **[decided]**; a per-note `bibliography:` override is an
+  export-time feature for later.
 
 ---
 
@@ -529,17 +537,14 @@ Android/iOS apps with projection, pandoc export (PDF/slides/HTML/DOCX), citation
 
 ---
 
-## 17. Open questions
+## 17. Resolved questions (2026-08-30)
 
-1. **[open]** UI framework: Svelte 5 is recommended above; confirm or choose otherwise
-   before M1 starts. CM6 and Yjs are framework-independent either way.
-2. **[open]** Attachment placement in the projection: single `attachments/` at vault root
-   (recommended, matches Obsidian default) vs per-folder `_attachments/`.
-3. **[open]** Should `id:` be written into front matter by default (robust external
-   renames, slight file noise) or only on demand (recommended)?
-4. **[open]** Update-log retention (90 days proposed) vs storage on small servers.
-5. **[open]** Citations: a single vault-level `references.bib` (recommended) or
-   per-note `bibliography:` front matter — or both.
-6. **[open]** Is a Vim keymap required for M1 or later?
-7. **[open]** Which Obsidian plugins are in current use — any behaviour they provide that
-   is not covered above?
+| Question | Decision |
+|---|---|
+| UI framework | Svelte 5. |
+| Attachment placement | Single vault-level `attachments/` folder. |
+| `id:` in front matter | Written by default; renames/moves resolve by id. |
+| Update-log retention | 90 days. |
+| Citations | One `references.bib` per vault; per-note `bibliography:` as a later export feature. |
+| Vim keymap | Not for now. |
+| Obsidian plugins in use | File Tree Alternative, Self-hosted LiveSync — both covered by built-ins (§9, §7). |
