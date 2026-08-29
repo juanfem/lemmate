@@ -21,5 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 axum = "0.8"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 notes-server = { path = "../server" }
+rcgen = "0.14"
 tempfile = "3"

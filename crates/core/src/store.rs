@@ -12,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -37,7 +37,14 @@ CREATE TABLE IF NOT EXISTS attachments (
     mime          TEXT    NOT NULL,
     filename_hint TEXT,
     created_ms    INTEGER NOT NULL,
+    orphaned_ms   INTEGER,             -- when the blob was first seen unreferenced (server)
     PRIMARY KEY (vault_id, hash)
+);
+-- Resolved attachment paths each note references (client sidecar; drives uploads and orphans).
+CREATE TABLE IF NOT EXISTS note_attachments (
+    note_id TEXT NOT NULL,
+    path    TEXT NOT NULL,
+    PRIMARY KEY (note_id, path)
 );
 CREATE TABLE IF NOT EXISTS notes (
     id         TEXT PRIMARY KEY,
@@ -144,6 +151,9 @@ impl Store {
         if version > 0 && version < 3 {
             // Pre-release schemas (v1/v2) stored ISO timestamps; nothing shipped, so rebuild.
             conn.execute_batch("DROP TABLE IF EXISTS doc_updates; DROP TABLE IF EXISTS doc_snapshots;")?;
+        }
+        if version == 3 {
+            conn.execute_batch("ALTER TABLE attachments ADD COLUMN orphaned_ms INTEGER;")?;
         }
         if version < SCHEMA_VERSION {
             conn.execute_batch(SCHEMA)?;
@@ -304,6 +314,35 @@ impl Store {
             params![a.hash, vault_id.to_string(), a.size as i64, a.mime, a.filename_hint, now_ms()],
         )?;
         Ok(())
+    }
+
+    /// Replace the set of attachment paths a note references.
+    pub fn set_note_attachments(&mut self, note_id: NoteId, paths: &[String]) -> Result<()> {
+        let id = note_id.to_string();
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![id])?;
+        for p in paths {
+            tx.execute(
+                "INSERT OR IGNORE INTO note_attachments (note_id, path) VALUES (?1, ?2)",
+                params![id, p],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_note_attachments(&mut self, note_id: NoteId) -> Result<()> {
+        self.conn.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![note_id.to_string()])?;
+        Ok(())
+    }
+
+    /// Every attachment path referenced by at least one live (non-trashed) note.
+    pub fn referenced_attachment_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT a.path FROM note_attachments a JOIN notes n ON n.id = a.note_id WHERE n.deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| r.map_err(Into::into)).collect()
     }
 
     pub fn attachment(&self, vault_id: VaultId, hash: &str) -> Result<Option<AttachmentRow>> {
@@ -610,6 +649,18 @@ mod tests {
         let got = store.attachment(v, "abc").unwrap().unwrap();
         assert_eq!(got.filename_hint.as_deref(), Some("x.png"));
         assert_eq!(store.attachment(VaultId::new(), "abc").unwrap(), None);
+
+        let (a, b) = (NoteId::new(), NoteId::new());
+        store.upsert_note(a, v, "a.md", None).unwrap();
+        store.upsert_note(b, v, "b.md", None).unwrap();
+        store.set_note_attachments(a, &["x.png".into(), "y.png".into()]).unwrap();
+        store.set_note_attachments(b, &["y.png".into()]).unwrap();
+        assert_eq!(store.referenced_attachment_paths().unwrap().len(), 2);
+        store.trash_note(a).unwrap();
+        let refs = store.referenced_attachment_paths().unwrap();
+        assert!(refs.contains("y.png") && !refs.contains("x.png"));
+        store.clear_note_attachments(b).unwrap();
+        assert!(store.referenced_attachment_paths().unwrap().is_empty());
     }
 
     #[test]

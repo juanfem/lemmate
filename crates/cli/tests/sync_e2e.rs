@@ -23,7 +23,13 @@ async fn start_server() -> (String, Arc<AppState>, tempfile::TempDir) {
 }
 
 fn opts(dir: &Path, server: &str, vault_id: Option<VaultId>) -> SyncOptions {
-    SyncOptions { vault_dir: dir.to_path_buf(), server_url: server.to_owned(), vault_id, once: true }
+    SyncOptions {
+        vault_dir: dir.to_path_buf(),
+        server_url: server.to_owned(),
+        vault_id,
+        once: true,
+        ca_cert: None,
+    }
 }
 
 /// `client::run` in once mode, bounded so a regression can never hang the suite.
@@ -144,6 +150,51 @@ async fn attachments_follow_references() {
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
     assert_eq!(std::fs::read(a.path().join("sub/img/two.bin")).unwrap(), b"two");
+}
+
+/// `wss://` + `https://` against a TLS server signed by a private CA, trusted via `ca_cert`.
+#[tokio::test]
+async fn wss_with_private_ca() {
+    notes_core::tls::install_crypto_provider();
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]).unwrap();
+    let ca_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ca_file.path(), cert.cert.pem()).unwrap();
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+        cert.cert.pem().into_bytes(),
+        cert.signing_key.serialize_pem().into_bytes(),
+    )
+    .await
+    .unwrap();
+
+    let blobs = tempfile::tempdir().unwrap();
+    let options = ServerOptions { attachments_dir: blobs.path().to_path_buf(), ..ServerOptions::default() };
+    let state = build_state(Store::open_in_memory().unwrap(), options);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(state.clone());
+    let server_task = axum_server::from_tcp_rustls(listener, tls).unwrap().serve(app.into_make_service());
+    tokio::spawn(async move { server_task.await.unwrap() });
+    let server = format!("https://{addr}");
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("secure.md"), "![[blob.bin]]\n").unwrap();
+    std::fs::write(a.path().join("blob.bin"), b"over tls").unwrap();
+
+    // Public roots do not know this CA → the handshake must fail.
+    let err = run(opts(a.path(), &server, None)).await.unwrap_err();
+    assert!(err.to_string().contains("cannot connect"), "{err}");
+
+    let with_ca = |dir: &Path, id| SyncOptions {
+        ca_cert: Some(ca_file.path().to_path_buf()),
+        ..opts(dir, &server, id)
+    };
+    let report = run(with_ca(a.path(), None)).await.unwrap();
+    run(with_ca(b.path(), Some(report.vault_id))).await.unwrap();
+    assert_eq!(read(b.path(), "secure.md"), "![[blob.bin]]\n");
+    assert_eq!(std::fs::read(b.path().join("blob.bin")).unwrap(), b"over tls");
 }
 
 #[tokio::test]

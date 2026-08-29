@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use tracing::{debug, info, warn};
 
 use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path};
@@ -50,6 +50,8 @@ pub struct SyncOptions {
     pub vault_id: Option<VaultId>,
     /// Reconcile, exchange updates until both sides are quiet, then return.
     pub once: bool,
+    /// PEM file of a private CA to trust for `wss://` / `https://` instead of the public roots.
+    pub ca_cert: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub struct SyncReport {
 /// Run the sync loop. In `once` mode returns when in sync; otherwise runs until the task is
 /// cancelled (it reconnects forever).
 pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
+    crate::tls::install_crypto_provider();
     let mut engine = Engine::open(&opts)?;
     engine.reconcile_disk()?;
     engine.maintain_all()?;
@@ -77,9 +80,13 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     });
 
     let ws_url = ws_url(&opts.server_url)?;
+    let ca = opts.ca_cert.as_deref();
+    let tls = if ws_url.starts_with("wss://") { Some(crate::tls::client_config(ca)?) } else { None };
+    let agent = crate::tls::http_agent(ca)?;
     let (job_tx, job_rx) = mpsc::unbounded_channel::<TransferJob>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TransferDone>();
     tokio::spawn(transfer_worker(
+        agent,
         http_url(&opts.server_url)?,
         engine.vault_id,
         engine.proj.root().to_path_buf(),
@@ -89,7 +96,8 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     engine.transfers = Some(job_tx);
     let mut backoff = RECONNECT_MIN;
     loop {
-        match connect_async(&ws_url).await {
+        let connector = tls.clone().map(Connector::Rustls);
+        match connect_async_tls_with_config(&ws_url, None, false, connector).await {
             Ok((ws, _)) => {
                 info!(url = %ws_url, "connected");
                 backoff = RECONNECT_MIN;
@@ -207,6 +215,7 @@ enum TransferDone {
 
 /// Runs attachment HTTP transfers off the engine's loop, one at a time, in blocking tasks.
 async fn transfer_worker(
+    agent: ureq::Agent,
     base: String,
     vault: VaultId,
     root: PathBuf,
@@ -214,18 +223,27 @@ async fn transfer_worker(
     done: mpsc::UnboundedSender<TransferDone>,
 ) {
     while let Some(job) = jobs.recv().await {
-        let (base, root) = (base.clone(), root.clone());
-        let result =
-            tokio::task::spawn_blocking(move || run_transfer(&base, vault, &root, job)).await.unwrap_or_else(
-                |e| TransferDone::Failed { path: String::new(), upload: false, error: e.to_string() },
-            );
+        let (agent, base, root) = (agent.clone(), base.clone(), root.clone());
+        let result = tokio::task::spawn_blocking(move || run_transfer(&agent, &base, vault, &root, job))
+            .await
+            .unwrap_or_else(|e| TransferDone::Failed {
+                path: String::new(),
+                upload: false,
+                error: e.to_string(),
+            });
         if done.send(result).is_err() {
             break;
         }
     }
 }
 
-fn run_transfer(base: &str, vault: VaultId, root: &std::path::Path, job: TransferJob) -> TransferDone {
+fn run_transfer(
+    agent: &ureq::Agent,
+    base: &str,
+    vault: VaultId,
+    root: &std::path::Path,
+    job: TransferJob,
+) -> TransferDone {
     let url = |hash: &str| format!("{base}/api/v1/vaults/{vault}/attachments/{hash}");
     match job {
         TransferJob::Upload { path } => {
@@ -235,13 +253,14 @@ fn run_transfer(base: &str, vault: VaultId, root: &std::path::Path, job: Transfe
             };
             let hash = hash_bytes(&bytes);
             // Content-addressed: skip the body if the server already has these bytes.
-            match ureq::head(&url(&hash)).call() {
+            match agent.head(&url(&hash)).call() {
                 Ok(_) => return TransferDone::Uploaded { path, hash },
                 Err(ureq::Error::StatusCode(404)) => {}
                 Err(e) => return TransferDone::Failed { path, upload: true, error: e.to_string() },
             }
             let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
-            match ureq::put(&url(&hash))
+            match agent
+                .put(&url(&hash))
                 .header("content-type", &mime_for_path(&path))
                 .header("x-filename", &name)
                 .send(&bytes[..])
@@ -251,7 +270,8 @@ fn run_transfer(base: &str, vault: VaultId, root: &std::path::Path, job: Transfe
             }
         }
         TransferJob::Download { path, hash } => {
-            let bytes = ureq::get(&url(&hash))
+            let bytes = agent
+                .get(&url(&hash))
                 .call()
                 .and_then(|mut r| r.body_mut().with_config().limit(MAX_ATTACHMENT_BYTES).read_to_vec());
             match bytes {
@@ -401,7 +421,11 @@ impl Engine {
             self.process_path(&path)?;
         }
         self.finalize_removals(true)?;
-        // Tracked attachments edited while we were not running: the local file wins.
+        // Referenced attachments whose upload never completed, or tracked attachments edited
+        // while we were not running: the local file wins.
+        for path in self.store.referenced_attachment_paths()? {
+            self.want_upload(&path)?;
+        }
         for (path, hash) in self.vault.attachment_entries() {
             if let Some(local) = self.local_hash(&path)?
                 && local != hash
@@ -455,9 +479,9 @@ impl Engine {
         let update = doc.set_text(&text);
         self.store.append_update(DocId::Note(id), &update, None)?;
         self.store.set_projected_text(DocId::Note(id), rel, &text)?;
-        self.index(id, rel, &text)?;
         self.by_path.insert(rel.to_owned(), id);
         self.notes.insert(id, NoteState { doc, path: rel.to_owned() });
+        self.index(id, rel, &text)?;
         let vu = self.vault.set_path(id, rel);
         self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
         self.handshake(DocId::Note(id));
@@ -564,10 +588,20 @@ impl Engine {
         let mut targets: Vec<(String, bool)> =
             ix.wikilinks.iter().filter(|w| w.embed).map(|w| (w.target.clone(), true)).collect();
         targets.extend(ix.links.iter().map(|l| (l.clone(), false)));
+        let mut paths: Vec<String> = Vec::new();
         for (target, wiki) in targets {
-            if let Some(path) = self.resolve_attachment(note_rel, &target, wiki)? {
-                self.want_upload(&path)?;
+            if let Some(path) = self.resolve_attachment(note_rel, &target, wiki)?
+                && !paths.contains(&path)
+            {
+                paths.push(path);
             }
+        }
+        let id = self.by_path.get(note_rel).copied();
+        if let Some(id) = id {
+            self.store.set_note_attachments(id, &paths)?;
+        }
+        for path in paths {
+            self.want_upload(&path)?;
         }
         Ok(())
     }
@@ -780,6 +814,7 @@ impl Engine {
     /// Drop a trashed note from memory and bookkeeping (its update log stays in the store).
     fn forget(&mut self, id: NoteId, path: &str) -> Result<()> {
         self.store.trash_note(id)?;
+        self.store.clear_note_attachments(id)?;
         self.store.delete_projection(DocId::Note(id))?;
         self.by_path.remove(path);
         self.notes.remove(&id);
@@ -1022,6 +1057,7 @@ mod tests {
             server_url: "http://x".into(),
             vault_id: None,
             once: true,
+            ca_cert: None,
         };
         let e = Engine::open(&base).unwrap();
         let id = e.vault_id;
@@ -1041,6 +1077,7 @@ mod tests {
             server_url: "http://x".into(),
             vault_id: None,
             once: true,
+            ca_cert: None,
         };
         let proj = Projection::new(dir.path());
         proj.write("a.md", "# A\n").unwrap();

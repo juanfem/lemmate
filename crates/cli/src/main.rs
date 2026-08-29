@@ -48,6 +48,9 @@ enum Cmd {
         /// Sync once and exit instead of watching for changes.
         #[arg(long)]
         once: bool,
+        /// PEM file of a private CA to trust for wss:// and https:// (default: public roots).
+        #[arg(long, env = "NOTES_CA_CERT")]
+        ca_cert: Option<PathBuf>,
     },
     /// Print versions and environment facts.
     Doctor,
@@ -122,10 +125,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Sync { vault, server, vault_id, once } => {
+        Cmd::Sync { vault, server, vault_id, once, ca_cert } => {
             let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
             std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
-            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once };
+            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once, ca_cert };
             let rt = tokio::runtime::Runtime::new()?;
             let report = rt.block_on(client::run(opts))?;
             if once {

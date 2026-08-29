@@ -20,6 +20,7 @@ pub mod markdown;
 pub mod projection;
 pub mod store;
 pub mod sync;
+pub mod tls;
 pub mod vault_doc;
 pub mod watcher;
 
