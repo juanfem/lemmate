@@ -17,10 +17,11 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tracing::{debug, info, warn};
 
+use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path};
 use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
 use crate::ids::{DocId, NoteId, VaultId};
-use crate::markdown;
+use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
 use crate::store::{RetentionPolicy, Store, now_ms};
 use crate::sync::{Frame, Message, SyncMessage};
@@ -35,6 +36,7 @@ pub const PROJECT_DEBOUNCE: Duration = Duration::from_millis(500);
 pub const RENAME_WINDOW: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(100);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+const UPLOAD_RETRY: Duration = Duration::from_secs(5);
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -75,6 +77,16 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     });
 
     let ws_url = ws_url(&opts.server_url)?;
+    let (job_tx, job_rx) = mpsc::unbounded_channel::<TransferJob>();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TransferDone>();
+    tokio::spawn(transfer_worker(
+        http_url(&opts.server_url)?,
+        engine.vault_id,
+        engine.proj.root().to_path_buf(),
+        job_rx,
+        done_tx,
+    ));
+    engine.transfers = Some(job_tx);
     let mut backoff = RECONNECT_MIN;
     loop {
         match connect_async(&ws_url).await {
@@ -102,8 +114,12 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
                             Some(Ok(_)) => {}
                         },
                         ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
+                        done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
                         _ = ticker.tick() => {
                             engine.tick()?;
+                            if let Some(msg) = engine.fatal.take() {
+                                return Err(Error::Sync(msg));
+                            }
                             if opts.once {
                                 if engine.is_idle() {
                                     let since = *idle_since.get_or_insert_with(Instant::now);
@@ -137,6 +153,7 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
         while Instant::now() < deadline {
             tokio::select! {
                 ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
+                done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
                 _ = tokio::time::sleep(TICK) => engine.tick()?,
             }
         }
@@ -156,6 +173,94 @@ fn ws_url(server: &str) -> Result<String> {
         return Err(Error::Sync(format!("server url must start with http(s):// or ws(s)://, got {server}")));
     };
     Ok(if ws.ends_with("/ws") { ws } else { format!("{ws}/ws") })
+}
+
+/// `http(s)://host[:port]` base for the REST API, derived from whatever URL form was given.
+fn http_url(server: &str) -> Result<String> {
+    let base = server.trim_end_matches('/');
+    let base = base.strip_suffix("/ws").unwrap_or(base);
+    if base.starts_with("http://") || base.starts_with("https://") {
+        Ok(base.to_owned())
+    } else if let Some(rest) = base.strip_prefix("wss://") {
+        Ok(format!("https://{rest}"))
+    } else if let Some(rest) = base.strip_prefix("ws://") {
+        Ok(format!("http://{rest}"))
+    } else {
+        Err(Error::Sync(format!("server url must start with http(s):// or ws(s)://, got {server}")))
+    }
+}
+
+// ---- Attachment transfers ----------------------------------------------------------------------
+
+#[derive(Debug)]
+enum TransferJob {
+    Upload { path: String },
+    Download { path: String, hash: String },
+}
+
+#[derive(Debug)]
+enum TransferDone {
+    Uploaded { path: String, hash: String },
+    Downloaded { path: String, hash: String, bytes: Vec<u8> },
+    Failed { path: String, upload: bool, error: String },
+}
+
+/// Runs attachment HTTP transfers off the engine's loop, one at a time, in blocking tasks.
+async fn transfer_worker(
+    base: String,
+    vault: VaultId,
+    root: PathBuf,
+    mut jobs: mpsc::UnboundedReceiver<TransferJob>,
+    done: mpsc::UnboundedSender<TransferDone>,
+) {
+    while let Some(job) = jobs.recv().await {
+        let (base, root) = (base.clone(), root.clone());
+        let result =
+            tokio::task::spawn_blocking(move || run_transfer(&base, vault, &root, job)).await.unwrap_or_else(
+                |e| TransferDone::Failed { path: String::new(), upload: false, error: e.to_string() },
+            );
+        if done.send(result).is_err() {
+            break;
+        }
+    }
+}
+
+fn run_transfer(base: &str, vault: VaultId, root: &std::path::Path, job: TransferJob) -> TransferDone {
+    let url = |hash: &str| format!("{base}/api/v1/vaults/{vault}/attachments/{hash}");
+    match job {
+        TransferJob::Upload { path } => {
+            let bytes = match std::fs::read(root.join(&path)) {
+                Ok(b) => b,
+                Err(e) => return TransferDone::Failed { path, upload: true, error: e.to_string() },
+            };
+            let hash = hash_bytes(&bytes);
+            // Content-addressed: skip the body if the server already has these bytes.
+            match ureq::head(&url(&hash)).call() {
+                Ok(_) => return TransferDone::Uploaded { path, hash },
+                Err(ureq::Error::StatusCode(404)) => {}
+                Err(e) => return TransferDone::Failed { path, upload: true, error: e.to_string() },
+            }
+            let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+            match ureq::put(&url(&hash))
+                .header("content-type", &mime_for_path(&path))
+                .header("x-filename", &name)
+                .send(&bytes[..])
+            {
+                Ok(_) => TransferDone::Uploaded { path, hash },
+                Err(e) => TransferDone::Failed { path, upload: true, error: e.to_string() },
+            }
+        }
+        TransferJob::Download { path, hash } => {
+            let bytes = ureq::get(&url(&hash))
+                .call()
+                .and_then(|mut r| r.body_mut().with_config().limit(MAX_ATTACHMENT_BYTES).read_to_vec());
+            match bytes {
+                Ok(bytes) if hash_bytes(&bytes) == hash => TransferDone::Downloaded { path, hash, bytes },
+                Ok(_) => TransferDone::Failed { path, upload: false, error: "hash mismatch".into() },
+                Err(e) => TransferDone::Failed { path, upload: false, error: e.to_string() },
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +298,18 @@ pub struct Engine {
     out: Option<mpsc::UnboundedSender<Vec<u8>>>,
     policy: RetentionPolicy,
     last_maintenance: Instant,
+    once: bool,
+    /// Set in `once` mode when something failed that a retry loop would otherwise hide.
+    fatal: Option<String>,
+    // Attachments (SPEC §6.3, §7)
+    transfers: Option<mpsc::UnboundedSender<TransferJob>>,
+    in_flight: HashSet<String>,
+    pending_uploads: HashMap<String, String>,
+    upload_retry_after: Option<Instant>,
+    /// Attachment paths touched on disk, awaiting the debounce.
+    pending_attachment_fs: HashMap<String, Instant>,
+    /// Cache of blake3 hashes of local attachment files; invalidated by watcher events.
+    local_hashes: HashMap<String, String>,
 }
 
 impl Engine {
@@ -235,6 +352,14 @@ impl Engine {
             out: None,
             policy: RetentionPolicy::default(),
             last_maintenance: Instant::now(),
+            once: opts.once,
+            fatal: None,
+            transfers: None,
+            in_flight: HashSet::new(),
+            pending_uploads: HashMap::new(),
+            upload_retry_after: None,
+            pending_attachment_fs: HashMap::new(),
+            local_hashes: HashMap::new(),
         })
     }
 
@@ -248,6 +373,9 @@ impl Engine {
             && self.dirty.is_empty()
             && self.pending_fs.is_empty()
             && self.pending_removals.is_empty()
+            && self.pending_attachment_fs.is_empty()
+            && self.in_flight.is_empty()
+            && self.pending_uploads.is_empty()
     }
 
     // ---- Startup reconciliation -------------------------------------------------------------
@@ -273,6 +401,14 @@ impl Engine {
             self.process_path(&path)?;
         }
         self.finalize_removals(true)?;
+        // Tracked attachments edited while we were not running: the local file wins.
+        for (path, hash) in self.vault.attachment_entries() {
+            if let Some(local) = self.local_hash(&path)?
+                && local != hash
+            {
+                self.pending_uploads.insert(path, local);
+            }
+        }
         Ok(())
     }
 
@@ -284,7 +420,12 @@ impl Engine {
         };
         if let Ok(rel) = abs.strip_prefix(self.proj.root()) {
             let rel = rel.to_string_lossy().replace('\\', "/");
-            self.pending_fs.insert(rel, Instant::now());
+            if Projection::is_note_path(&abs) {
+                self.pending_fs.insert(rel, Instant::now());
+            } else {
+                self.local_hashes.remove(&rel);
+                self.pending_attachment_fs.insert(rel, Instant::now());
+            }
         }
     }
 
@@ -411,7 +552,153 @@ impl Engine {
         let ix = markdown::index(text)?;
         let title = ix.title.clone().or_else(|| file_stem(rel));
         self.store.upsert_note(id, self.vault_id, rel, title.as_deref())?;
-        self.store.index_note(id, &ix)
+        self.store.index_note(id, &ix)?;
+        self.discover_attachments(rel, &ix)
+    }
+
+    // ---- Attachments ------------------------------------------------------------------------
+
+    /// Every local file a note references becomes an attachment: hashed, uploaded when the
+    /// server lacks it, and recorded in the vault doc so other replicas fetch it.
+    fn discover_attachments(&mut self, note_rel: &str, ix: &NoteIndex) -> Result<()> {
+        let mut targets: Vec<(String, bool)> =
+            ix.wikilinks.iter().filter(|w| w.embed).map(|w| (w.target.clone(), true)).collect();
+        targets.extend(ix.links.iter().map(|l| (l.clone(), false)));
+        for (target, wiki) in targets {
+            if let Some(path) = self.resolve_attachment(note_rel, &target, wiki)? {
+                self.want_upload(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Map a link target to an existing non-note file in the vault: relative to the note,
+    /// relative to the root, under `attachments/`, and (for `![[wikilinks]]`) by basename.
+    fn resolve_attachment(&self, note_rel: &str, target: &str, wiki: bool) -> Result<Option<String>> {
+        let t = target.split(['#', '?']).next().unwrap_or("").trim().replace("%20", " ");
+        if t.is_empty() || t.contains("://") || t.starts_with("mailto:") || t.starts_with("data:") {
+            return Ok(None);
+        }
+        let name = t.rsplit('/').next().unwrap_or(&t).to_owned();
+        let mut candidates = Vec::new();
+        candidates.extend(Projection::normalize_relative(note_rel, &t));
+        candidates.extend(Projection::normalize_relative("", &t));
+        candidates.push(format!("attachments/{name}"));
+        for c in &candidates {
+            if self.is_attachment_file(c)? {
+                return Ok(Some(c.clone()));
+            }
+        }
+        if wiki {
+            for f in self.proj.walk_files()? {
+                if f.rsplit('/').next() == Some(name.as_str()) {
+                    return Ok(Some(f));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn is_attachment_file(&self, rel: &str) -> Result<bool> {
+        let Ok(abs) = self.proj.resolve(rel) else { return Ok(false) };
+        Ok(abs.is_file() && !Projection::is_note_path(&abs) && !self.proj.is_ignored(&abs))
+    }
+
+    fn local_hash(&mut self, rel: &str) -> Result<Option<String>> {
+        if let Some(h) = self.local_hashes.get(rel) {
+            return Ok(Some(h.clone()));
+        }
+        if !self.is_attachment_file(rel)? {
+            return Ok(None);
+        }
+        let h = hash_bytes(&self.proj.read_bytes(rel)?);
+        self.local_hashes.insert(rel.to_owned(), h.clone());
+        Ok(Some(h))
+    }
+
+    fn want_upload(&mut self, rel: &str) -> Result<()> {
+        let Some(hash) = self.local_hash(rel)? else { return Ok(()) };
+        if self.vault.attachment_hash(rel).as_deref() == Some(hash.as_str()) || self.in_flight.contains(rel) {
+            return Ok(());
+        }
+        self.pending_uploads.insert(rel.to_owned(), hash);
+        Ok(())
+    }
+
+    fn flush_uploads(&mut self) {
+        if self.out.is_none() || self.upload_retry_after.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let Some(tx) = &self.transfers else { return };
+        for (path, _) in self.pending_uploads.drain() {
+            self.in_flight.insert(path.clone());
+            let _ = tx.send(TransferJob::Upload { path });
+        }
+    }
+
+    /// Fetch every vault-doc attachment whose local file is missing or has different content.
+    fn reconcile_attachments(&mut self) -> Result<()> {
+        if self.out.is_none() {
+            return Ok(());
+        }
+        for (path, hash) in self.vault.attachment_entries() {
+            if self.in_flight.contains(&path) || self.pending_uploads.contains_key(&path) {
+                continue;
+            }
+            if self.local_hash(&path)?.as_deref() == Some(hash.as_str()) {
+                continue;
+            }
+            if let Some(tx) = &self.transfers {
+                self.in_flight.insert(path.clone());
+                let _ = tx.send(TransferJob::Download { path, hash });
+            }
+        }
+        Ok(())
+    }
+
+    /// A tracked attachment file changed or vanished on disk.
+    fn process_attachment_path(&mut self, rel: &str) -> Result<()> {
+        self.local_hashes.remove(rel);
+        if self.vault.attachment_hash(rel).is_none() {
+            return Ok(()); // unreferenced file; picked up when a note references it
+        }
+        if self.is_attachment_file(rel)? {
+            self.want_upload(rel)
+        } else {
+            // Deleted locally while still referenced: content-addressed refs must resolve, so
+            // it is restored from the server (removing the reference is the way to drop it).
+            self.reconcile_attachments()
+        }
+    }
+
+    fn on_transfer_done(&mut self, done: TransferDone) -> Result<()> {
+        match done {
+            TransferDone::Uploaded { path, hash } => {
+                self.in_flight.remove(&path);
+                self.local_hashes.insert(path.clone(), hash.clone());
+                let u = self.vault.set_attachment(&path, &hash);
+                self.persist_and_send(DocId::Vault(self.vault_id), u)?;
+                info!(path = %path, "attachment uploaded");
+            }
+            TransferDone::Downloaded { path, hash, bytes } => {
+                self.in_flight.remove(&path);
+                self.proj.write_bytes(&path, &bytes)?;
+                self.local_hashes.insert(path.clone(), hash);
+                info!(path = %path, size = bytes.len(), "attachment downloaded");
+            }
+            TransferDone::Failed { path, upload, error } => {
+                self.in_flight.remove(&path);
+                warn!(path = %path, upload, %error, "attachment transfer failed");
+                if upload && let Some(h) = self.local_hashes.get(&path).cloned() {
+                    self.pending_uploads.insert(path.clone(), h);
+                    self.upload_retry_after = Some(Instant::now() + UPLOAD_RETRY);
+                }
+                if self.once {
+                    self.fatal = Some(format!("attachment transfer failed for {path}: {error}"));
+                }
+            }
+        }
+        Ok(())
     }
 
     // ---- Vault doc reconciliation -----------------------------------------------------------
@@ -487,7 +774,7 @@ impl Engine {
             self.proj.remove(&path)?;
             self.forget(id, &path)?;
         }
-        Ok(())
+        self.reconcile_attachments()
     }
 
     /// Drop a trashed note from memory and bookkeeping (its update log stays in the store).
@@ -510,6 +797,9 @@ impl Engine {
         let ids: Vec<NoteId> = self.notes.keys().copied().collect();
         for id in ids {
             self.handshake(DocId::Note(id));
+        }
+        if let Err(e) = self.reconcile_attachments() {
+            warn!(%e, "reconciling attachments");
         }
     }
 
@@ -653,6 +943,20 @@ impl Engine {
         }
         self.finalize_removals(false)?;
 
+        let due: Vec<String> = self
+            .pending_attachment_fs
+            .iter()
+            .filter(|(_, t)| now.duration_since(**t) >= FS_DEBOUNCE)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for rel in due {
+            self.pending_attachment_fs.remove(&rel);
+            if let Err(e) = self.process_attachment_path(&rel) {
+                warn!(path = %rel, %e, "processing attachment");
+            }
+        }
+        self.flush_uploads();
+
         let ready: Vec<NoteId> = self
             .dirty
             .iter()
@@ -693,6 +997,14 @@ mod tests {
         assert_eq!(ws_url("https://h/").unwrap(), "wss://h/ws");
         assert_eq!(ws_url("ws://h/ws").unwrap(), "ws://h/ws");
         assert!(ws_url("h:1").is_err());
+    }
+
+    #[test]
+    fn http_urls() {
+        assert_eq!(http_url("http://h:1/").unwrap(), "http://h:1");
+        assert_eq!(http_url("ws://h:1/ws").unwrap(), "http://h:1");
+        assert_eq!(http_url("wss://h").unwrap(), "https://h");
+        assert!(http_url("h").is_err());
     }
 
     #[test]

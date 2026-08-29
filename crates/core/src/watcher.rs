@@ -1,5 +1,6 @@
-//! Filesystem watcher for a projected vault (SPEC §6.3). Emits coarse events; debouncing and
-//! rename detection (content-hash within 2 s) are the caller's job in the sync loop.
+//! Filesystem watcher for a projected vault (SPEC §6.3). Emits coarse events for every
+//! non-ignored file (notes and attachments alike); debouncing, classification, and rename
+//! detection (content-hash within 2 s) are the caller's job in the sync loop.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -33,7 +34,7 @@ impl VaultWatcher {
                 _ => return,
             };
             for path in event.paths {
-                if projection.is_ignored(&path) || !Projection::is_note_path(&path) {
+                if projection.is_ignored(&path) || path.is_dir() {
                     continue;
                 }
                 let _ = tx.send(kind(path));
@@ -60,7 +61,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
 
         std::fs::write(p.sidecar_dir().join("local.db"), "x").unwrap();
-        std::fs::write(dir.path().join("ignored.txt"), "x").unwrap();
+        std::fs::write(dir.path().join(".hidden.txt"), "x").unwrap();
         p.write("note.md", "hello").unwrap();
 
         let mut saw_note = false;

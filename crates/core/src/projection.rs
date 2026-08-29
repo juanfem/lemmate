@@ -72,6 +72,74 @@ impl Projection {
         Ok(fs::read_to_string(self.resolve(rel)?)?)
     }
 
+    pub fn read_bytes(&self, rel: &str) -> Result<Vec<u8>> {
+        Ok(fs::read(self.resolve(rel)?)?)
+    }
+
+    /// Atomically write binary content (attachments).
+    pub fn write_bytes(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        let target = self.resolve(rel)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = target.with_file_name(format!(".{name}.tmp"));
+        fs::write(&tmp, bytes)?;
+        fs::rename(&tmp, &target)?;
+        Ok(())
+    }
+
+    /// Resolve `target` relative to the directory of `from` (a vault-relative file path),
+    /// collapsing `.`/`..`, and reject anything that escapes the vault.
+    pub fn normalize_relative(from: &str, target: &str) -> Option<String> {
+        let base = match from.rsplit_once('/') {
+            Some((dir, _)) => dir,
+            None => "",
+        };
+        let joined = if target.starts_with('/') {
+            target.trim_start_matches('/').to_owned()
+        } else if base.is_empty() {
+            target.to_owned()
+        } else {
+            format!("{base}/{target}")
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        for seg in joined.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                s => parts.push(s),
+            }
+        }
+        if parts.is_empty() { None } else { Some(parts.join("/")) }
+    }
+
+    /// Vault-relative paths of all non-note regular files (attachment candidates), sorted.
+    pub fn walk_files(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        self.walk_files_into(&self.root, &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+
+    fn walk_files_into(&self, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if self.is_ignored(&path) {
+                continue;
+            }
+            if path.is_dir() {
+                self.walk_files_into(&path, out)?;
+            } else if path.is_file() && !Self::is_note_path(&path) {
+                let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove(&self, rel: &str) -> Result<()> {
         match fs::remove_file(self.resolve(rel)?) {
             Ok(()) => Ok(()),
@@ -156,6 +224,28 @@ mod tests {
         assert!(p.resolve("/abs.md").is_err());
         p.remove("Daily/2026-08-29.md").unwrap();
         p.remove("Daily/2026-08-29.md").unwrap(); // idempotent
+    }
+
+    #[test]
+    fn relative_paths_and_files() {
+        assert_eq!(
+            Projection::normalize_relative("Projects/a.md", "../attachments/x.png").as_deref(),
+            Some("attachments/x.png")
+        );
+        assert_eq!(Projection::normalize_relative("a.md", "img/./x.png").as_deref(), Some("img/x.png"));
+        assert_eq!(Projection::normalize_relative("a.md", "/root.png").as_deref(), Some("root.png"));
+        assert_eq!(Projection::normalize_relative("a.md", "../escape.png"), None);
+        assert_eq!(Projection::normalize_relative("a.md", ""), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = Projection::new(dir.path());
+        p.write("n.md", "x").unwrap();
+        p.write_bytes("attachments/one.bin", &[1, 2, 3]).unwrap();
+        p.write_bytes("deep/two.bin", &[4]).unwrap();
+        fs::create_dir_all(p.sidecar_dir()).unwrap();
+        fs::write(p.sidecar_dir().join("local.db"), "x").unwrap();
+        assert_eq!(p.walk_files().unwrap(), vec!["attachments/one.bin", "deep/two.bin"]);
+        assert_eq!(p.read_bytes("attachments/one.bin").unwrap(), vec![1, 2, 3]);
     }
 
     #[test]

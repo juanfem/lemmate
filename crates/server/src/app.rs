@@ -4,13 +4,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use notes_core::store::now_ms;
+use notes_core::attachments::{
+    AttachmentStore, MAX_ATTACHMENT_BYTES, hash_bytes, is_valid_hash, mime_for_path,
+};
+use notes_core::store::{AttachmentRow, now_ms};
 use notes_core::sync::{Frame, Message, SyncMessage};
 use notes_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
@@ -19,14 +23,26 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use yrs::StateVector;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ServerOptions {
     pub policy: RetentionPolicy,
+    /// Root of the content-addressed blob store.
+    pub attachments_dir: std::path::PathBuf,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            policy: RetentionPolicy::default(),
+            attachments_dir: std::env::temp_dir().join("notes-attachments"),
+        }
+    }
 }
 
 pub struct AppState {
     pub store: Mutex<Store>,
     pub options: ServerOptions,
+    pub attachments: AttachmentStore,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
@@ -80,9 +96,11 @@ struct Outbound {
 
 pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
     let (bus, _) = broadcast::channel(1024);
+    let attachments = AttachmentStore::new(&options.attachments_dir);
     Arc::new(AppState {
         store: Mutex::new(store),
         options,
+        attachments,
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
@@ -96,6 +114,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes", get(list_notes))
         .route("/api/v1/vaults/{vault}/notes/{id}", get(get_note))
         .route("/api/v1/search", get(search))
+        .route("/api/v1/vaults/{vault}/attachments/{hash}", get(get_attachment).put(put_attachment))
+        .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -367,6 +387,57 @@ async fn search(
         hits.into_iter()
             .map(|h| SearchHitOut { note_id: h.note_id.to_string(), title: h.title, snippet: h.snippet })
             .collect(),
+    ))
+}
+
+/// Idempotent, content-addressed upload: the URL names the blake3 hash the body must have.
+async fn put_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((vault, hash)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !is_valid_hash(&hash) || hash_bytes(&body) != hash {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let filename_hint = headers.get("x-filename").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|m| !m.is_empty() && *m != "application/octet-stream")
+        .map(str::to_owned)
+        .or_else(|| filename_hint.as_deref().map(mime_for_path))
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let (_, created) = state.attachments.put(vault, &body).map_err(internal)?;
+    let row = AttachmentRow { hash, size: body.len() as u64, mime, filename_hint };
+    state.store.lock().await.upsert_attachment(vault, &row).map_err(internal)?;
+    Ok(if created { StatusCode::CREATED } else { StatusCode::OK })
+}
+
+async fn get_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((vault, hash)): Path<(String, String)>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !is_valid_hash(&hash) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let bytes = state.attachments.get(vault, &hash).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let mime = state
+        .store
+        .lock()
+        .await
+        .attachment(vault, &hash)
+        .map_err(internal)?
+        .map(|r| r.mime)
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_owned()),
+        ],
+        bytes,
     ))
 }
 

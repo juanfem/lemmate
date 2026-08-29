@@ -8,7 +8,7 @@ specification; this README covers the repository and the current milestone.
 | Crate | Path | What it is |
 |---|---|---|
 | `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, filesystem watcher, sync frame codec, markdown indexer, and the **client sync engine** (`client::run`). |
-| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence, derives notes/tags/FTS from the CRDT stream, minimal REST (`/api/v1`). **No auth yet.** |
+| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and snapshot/pruning policy, derives notes/tags/FTS from the CRDT stream, content-addressed attachment store, minimal REST (`/api/v1`). **No auth yet.** |
 | `notes-cli` | `crates/cli` | `notes` binary: `sync`, `index`, `search`, `doctor`. |
 | corpus | `corpus/` | Markdown conformance cases (`*.md` + expected `*.json`) that the Rust indexer and the future JS parser must both satisfy. |
 
@@ -19,8 +19,11 @@ projection loop (watch → debounce → ingest/create/rename/delete → WebSocke
 end-to-end test that drives two directories through a real server across create, edit,
 concurrent offline edits, rename, and delete.
 
-Still to do for M0: attachment upload, snapshot/pruning policy, TLS for `wss://`, and the JS
-side of the parser conformance test.
+Also done: attachments (referenced files are hashed, uploaded, recorded in the vault doc, and
+fetched by other replicas) and the snapshot/pruning policy for the update log.
+
+Still to do for M0: TLS for `wss://` sync (HTTP transfers already support `https://`), orphan
+attachment cleanup, and the JS side of the parser conformance test.
 
 ## `notes sync`
 
@@ -35,6 +38,16 @@ notes sync --vault ~/vault --server http://127.0.0.1:8080 --vault-id <ULID>
 Without `--once` the command runs until interrupted, reconnecting with backoff; while offline,
 edits are journaled in `<vault>/.notes/local.db` and reconciled on reconnect. Renames are
 detected by content hash within 2 s; deletions go to the trash (the note's history is kept).
+
+**Attachments.** Any local file a note references — `![[logo.png]]`, `![alt](img/x.png)`,
+`[pdf](../attachments/paper.pdf)` — is an attachment: it is uploaded (content-addressed, blake3)
+and recorded in the vault doc as *path → hash*, so other replicas fetch it to the same relative
+place. Unreferenced files are not synced. Editing an attachment re-uploads it; deleting one
+that is still referenced restores it (drop the reference to drop the file).
+
+**History.** Every update is journaled. A snapshot is taken after 500 updates or 10 minutes;
+updates older than 90 days that a snapshot makes redundant are pruned (server flags
+`--snapshot-every-updates`, `--snapshot-every-minutes`, `--retain-days`).
 
 ## Build and test
 

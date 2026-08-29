@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let store = Store::open(cfg.data_dir.join("notes.db")).context("opening notes.db")?;
 
     let options = ServerOptions {
+        attachments_dir: cfg.data_dir.join("attachments"),
         policy: RetentionPolicy {
             snapshot_every_updates: cfg.snapshot_every_updates,
             snapshot_interval: Duration::from_secs(cfg.snapshot_every_minutes * 60),

@@ -8,10 +8,13 @@ use crate::error::{Error, Result};
 use crate::ids::NoteId;
 
 pub const NOTES_FIELD: &str = "notes";
+/// Vault-relative attachment path → blake3 hash of its content (SPEC §6.3, §7).
+pub const ATTACHMENTS_FIELD: &str = "attachments";
 
 pub struct VaultDoc {
     doc: Doc,
     notes: MapRef,
+    attachments: MapRef,
 }
 
 impl Default for VaultDoc {
@@ -24,7 +27,8 @@ impl VaultDoc {
     pub fn new() -> Self {
         let doc = Doc::new();
         let notes = doc.get_or_insert_map(NOTES_FIELD);
-        Self { doc, notes }
+        let attachments = doc.get_or_insert_map(ATTACHMENTS_FIELD);
+        Self { doc, notes, attachments }
     }
 
     pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
@@ -105,6 +109,54 @@ impl VaultDoc {
     }
 }
 
+impl VaultDoc {
+    pub fn attachment_hash(&self, path: &str) -> Option<String> {
+        let txn = self.doc.transact();
+        match self.attachments.get(&txn, path) {
+            Some(Out::Any(Any::String(s))) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    /// All (path, hash) attachment entries, sorted by path.
+    pub fn attachment_entries(&self) -> Vec<(String, String)> {
+        let txn = self.doc.transact();
+        let mut v: Vec<(String, String)> = self
+            .attachments
+            .iter(&txn)
+            .filter_map(|(k, out)| match out {
+                Out::Any(Any::String(s)) => Some((k.to_owned(), s.to_string())),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    pub fn set_attachment(&self, path: &str, hash: &str) -> Vec<u8> {
+        if self.attachment_hash(path).as_deref() == Some(hash) {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            self.attachments.insert(&mut txn, path.to_owned(), Any::from(hash));
+        }
+        self.diff_since(&before)
+    }
+
+    pub fn remove_attachment(&self, path: &str) -> Vec<u8> {
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            if self.attachments.remove(&mut txn, path).is_none() {
+                return Vec::new();
+            }
+        }
+        self.diff_since(&before)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +185,20 @@ mod tests {
         assert!(a.remove(n1).is_empty());
         b.apply_update(&ur).unwrap();
         assert_eq!(b.entries(), vec![(n2, "b.md".to_owned())]);
+    }
+
+    #[test]
+    fn attachments_map() {
+        let a = VaultDoc::new();
+        assert!(!a.set_attachment("attachments/x.png", "h1").is_empty());
+        assert!(a.set_attachment("attachments/x.png", "h1").is_empty());
+        let b = VaultDoc::from_updates([a.encode_full().as_slice()]).unwrap();
+        assert_eq!(b.attachment_hash("attachments/x.png").as_deref(), Some("h1"));
+        let u = a.set_attachment("attachments/x.png", "h2");
+        b.apply_update(&u).unwrap();
+        assert_eq!(b.attachment_entries(), vec![("attachments/x.png".to_owned(), "h2".to_owned())]);
+        assert!(!b.remove_attachment("attachments/x.png").is_empty());
+        assert!(b.remove_attachment("attachments/x.png").is_empty());
+        assert!(b.attachment_entries().is_empty());
     }
 }

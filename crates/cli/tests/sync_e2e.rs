@@ -11,13 +11,15 @@ use notes_core::{Store, VaultId};
 use notes_server::{AppState, ServerOptions, build_state, router};
 use std::sync::Arc;
 
-async fn start_server() -> (String, Arc<AppState>) {
-    let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
+async fn start_server() -> (String, Arc<AppState>, tempfile::TempDir) {
+    let blobs = tempfile::tempdir().unwrap();
+    let options = ServerOptions { attachments_dir: blobs.path().to_path_buf(), ..ServerOptions::default() };
+    let state = build_state(Store::open_in_memory().unwrap(), options);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let app = router(state.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), state)
+    (format!("http://{addr}"), state, blobs)
 }
 
 fn opts(dir: &Path, server: &str, vault_id: Option<VaultId>) -> SyncOptions {
@@ -37,7 +39,7 @@ fn read(dir: &Path, rel: &str) -> String {
 
 #[tokio::test]
 async fn two_directories_round_trip_through_server() {
-    let (server, state) = start_server().await;
+    let (server, state, _blobs) = start_server().await;
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
 
@@ -96,6 +98,52 @@ async fn two_directories_round_trip_through_server() {
     let hits = store.search("fresh", 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_id, rows[0].id);
+}
+
+#[tokio::test]
+async fn attachments_follow_references() {
+    let (server, state, _blobs) = start_server().await;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let logo: Vec<u8> = (0..3000u32).map(|i| (i * 7 % 251) as u8).collect();
+
+    // A references a file two ways; only referenced files travel.
+    std::fs::create_dir_all(a.path().join("attachments")).unwrap();
+    std::fs::write(a.path().join("attachments/logo.png"), &logo).unwrap();
+    std::fs::write(a.path().join("attachments/unreferenced.bin"), b"nope").unwrap();
+    std::fs::write(a.path().join("pic.md"), "# Pic\n\n![[logo.png]] and ![again](attachments/logo.png)\n")
+        .unwrap();
+    let report = run(opts(a.path(), &server, None)).await.unwrap();
+    let vault_id = report.vault_id;
+
+    run(opts(b.path(), &server, Some(vault_id))).await.unwrap();
+    assert_eq!(std::fs::read(b.path().join("attachments/logo.png")).unwrap(), logo);
+    assert!(!b.path().join("attachments/unreferenced.bin").exists());
+    {
+        let store = state.store.lock().await;
+        let hash = notes_core::attachments::hash_bytes(&logo);
+        let row = store.attachment(vault_id, &hash).unwrap().expect("server row");
+        assert_eq!(
+            (row.size, row.mime.as_str(), row.filename_hint.as_deref()),
+            (3000, "image/png", Some("logo.png"))
+        );
+        assert!(state.attachments.exists(vault_id, &hash));
+    }
+
+    // A replaces the image bytes; B receives the new content at the same path.
+    let logo2: Vec<u8> = logo.iter().map(|b| b ^ 0xff).collect();
+    std::fs::write(a.path().join("attachments/logo.png"), &logo2).unwrap();
+    run(opts(a.path(), &server, None)).await.unwrap();
+    run(opts(b.path(), &server, None)).await.unwrap();
+    assert_eq!(std::fs::read(b.path().join("attachments/logo.png")).unwrap(), logo2);
+
+    // B adds a note with a note-relative link; A gets the file at the same relative place.
+    std::fs::create_dir_all(b.path().join("sub/img")).unwrap();
+    std::fs::write(b.path().join("sub/img/two.bin"), b"two").unwrap();
+    std::fs::write(b.path().join("sub/note.md"), "![x](img/two.bin)\n").unwrap();
+    run(opts(b.path(), &server, None)).await.unwrap();
+    run(opts(a.path(), &server, None)).await.unwrap();
+    assert_eq!(std::fs::read(a.path().join("sub/img/two.bin")).unwrap(), b"two");
 }
 
 #[tokio::test]
