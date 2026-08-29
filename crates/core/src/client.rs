@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown;
 use crate::projection::{Projection, ingest_external_edit};
-use crate::store::Store;
+use crate::store::{RetentionPolicy, Store, now_ms};
 use crate::sync::{Frame, Message, SyncMessage};
 use crate::vault_doc::VaultDoc;
 use crate::watcher::{FsEvent, VaultWatcher};
@@ -34,6 +34,7 @@ pub const PROJECT_DEBOUNCE: Duration = Duration::from_millis(500);
 /// A file that vanishes and a new file with identical content within this window is a rename.
 pub const RENAME_WINDOW: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(100);
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -60,6 +61,7 @@ pub struct SyncReport {
 pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     let mut engine = Engine::open(&opts)?;
     engine.reconcile_disk()?;
+    engine.maintain_all()?;
 
     let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<FsEvent>();
     let (std_tx, std_rx) = std::sync::mpsc::channel::<FsEvent>();
@@ -189,6 +191,8 @@ pub struct Engine {
     pending_removals: Vec<PendingRemoval>,
     handshakes: HashMap<String, Handshake>,
     out: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    policy: RetentionPolicy,
+    last_maintenance: Instant,
 }
 
 impl Engine {
@@ -229,6 +233,8 @@ impl Engine {
             pending_removals: Vec::new(),
             handshakes: HashMap::new(),
             out: None,
+            policy: RetentionPolicy::default(),
+            last_maintenance: Instant::now(),
         })
     }
 
@@ -601,8 +607,33 @@ impl Engine {
 
     // ---- Periodic work ----------------------------------------------------------------------
 
+    /// Apply the snapshot/pruning policy to every doc in the sidecar store.
+    pub fn maintain_all(&mut self) -> Result<()> {
+        self.last_maintenance = Instant::now();
+        let now = now_ms();
+        let mut snapshots = 0;
+        let mut pruned = 0;
+        let m = self
+            .store
+            .maintain(DocId::Vault(self.vault_id), &self.policy, now, || self.vault.encode_full())?;
+        snapshots += m.snapshotted as usize;
+        pruned += m.pruned_updates;
+        for (id, state) in &self.notes {
+            let m = self.store.maintain(DocId::Note(*id), &self.policy, now, || state.doc.encode_full())?;
+            snapshots += m.snapshotted as usize;
+            pruned += m.pruned_updates;
+        }
+        if snapshots > 0 || pruned > 0 {
+            info!(snapshots, pruned, "maintenance");
+        }
+        Ok(())
+    }
+
     fn tick(&mut self) -> Result<()> {
         let now = Instant::now();
+        if now.duration_since(self.last_maintenance) >= MAINTENANCE_INTERVAL {
+            self.maintain_all()?;
+        }
         let due: Vec<String> = self
             .pending_fs
             .iter()

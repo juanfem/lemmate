@@ -10,6 +10,7 @@ rust-version.workspace = true
 blake3 = "1"
 futures-util = "0.3"
 markdown = "1"
+mime_guess = "2"
 notify = "8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +22,7 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 tokio-tungstenite = "0.29"
 tracing = "0.1"
 ulid = "3"
+ureq = "3"
 yrs = { version = "0.27", features = ["sync"] }
 
 [dev-dependencies]

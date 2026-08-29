@@ -27,7 +27,7 @@ pub use error::{Error, Result};
 pub use ids::{DocId, NoteId, VaultId};
 pub use markdown::NoteIndex;
 pub use projection::Projection;
-pub use store::Store;
+pub use store::{RetentionPolicy, Store};
 pub use vault_doc::VaultDoc;
 
 /// Name of the Y.Text holding a note's markdown source (SPEC §4.2).

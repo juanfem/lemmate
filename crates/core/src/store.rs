@@ -2,6 +2,7 @@
 //! native clients (`<vault>/.notes/local.db`); clients simply leave the multi-user tables empty.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -11,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -19,15 +20,24 @@ CREATE TABLE IF NOT EXISTS doc_updates (
     seq        INTEGER NOT NULL,
     bytes      BLOB    NOT NULL,
     author_id  TEXT,
-    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_ms INTEGER NOT NULL,
     PRIMARY KEY (doc_id, seq)
 );
 CREATE TABLE IF NOT EXISTS doc_snapshots (
     doc_id     TEXT    NOT NULL,
     seq        INTEGER NOT NULL,
     bytes      BLOB    NOT NULL,
-    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_ms INTEGER NOT NULL,
     PRIMARY KEY (doc_id, seq)
+);
+CREATE TABLE IF NOT EXISTS attachments (
+    hash          TEXT    NOT NULL,
+    vault_id      TEXT    NOT NULL,
+    size          INTEGER NOT NULL,
+    mime          TEXT    NOT NULL,
+    filename_hint TEXT,
+    created_ms    INTEGER NOT NULL,
+    PRIMARY KEY (vault_id, hash)
 );
 CREATE TABLE IF NOT EXISTS notes (
     id         TEXT PRIMARY KEY,
@@ -57,6 +67,48 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 pub struct Store {
     conn: Connection,
+}
+
+/// Snapshot and pruning policy (SPEC §6.1, §9). Defaults: snapshot every 500 updates or 10
+/// minutes, keep raw updates for 90 days.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub snapshot_every_updates: u32,
+    pub snapshot_interval: Duration,
+    pub retain_updates: Duration,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            snapshot_every_updates: 500,
+            snapshot_interval: Duration::from_secs(10 * 60),
+            retain_updates: Duration::from_secs(90 * 24 * 60 * 60),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Maintenance {
+    pub snapshotted: bool,
+    pub pruned_updates: usize,
+    pub pruned_snapshots: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRow {
+    pub hash: String,
+    pub size: u64,
+    pub mime: String,
+    pub filename_hint: Option<String>,
+}
+
+/// Milliseconds since the Unix epoch.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +141,10 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > 0 && version < 3 {
+            // Pre-release schemas (v1/v2) stored ISO timestamps; nothing shipped, so rebuild.
+            conn.execute_batch("DROP TABLE IF EXISTS doc_updates; DROP TABLE IF EXISTS doc_snapshots;")?;
+        }
         if version < SCHEMA_VERSION {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -100,6 +156,16 @@ impl Store {
 
     /// Append one update to a doc's log; returns its sequence number.
     pub fn append_update(&mut self, doc_id: DocId, bytes: &[u8], author: Option<&str>) -> Result<i64> {
+        self.append_update_at(doc_id, bytes, author, now_ms())
+    }
+
+    pub fn append_update_at(
+        &mut self,
+        doc_id: DocId,
+        bytes: &[u8],
+        author: Option<&str>,
+        now_ms: i64,
+    ) -> Result<i64> {
         let id = doc_id.to_string();
         let tx = self.conn.transaction()?;
         let seq: i64 = tx.query_row(
@@ -108,8 +174,8 @@ impl Store {
             |r| r.get(0),
         )?;
         tx.execute(
-            "INSERT INTO doc_updates (doc_id, seq, bytes, author_id) VALUES (?1, ?2, ?3, ?4)",
-            params![id, seq, bytes, author],
+            "INSERT INTO doc_updates (doc_id, seq, bytes, author_id, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, seq, bytes, author, now_ms],
         )?;
         tx.commit()?;
         Ok(seq)
@@ -149,27 +215,113 @@ impl Store {
         VaultDoc::from_updates(updates.iter().map(Vec::as_slice))
     }
 
-    /// Persist the doc's full state as a snapshot at the current head. Retention/pruning of
-    /// older updates is a policy decision left to the caller (SPEC §9).
-    pub fn snapshot(&mut self, doc_id: DocId, doc: &NoteDoc) -> Result<i64> {
+    /// Persist a doc's full state (`encode_full()`) as a snapshot at the current head.
+    pub fn snapshot_at(&mut self, doc_id: DocId, full_state: &[u8], now_ms: i64) -> Result<i64> {
         let id = doc_id.to_string();
         let head: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM doc_updates WHERE doc_id = ?1",
+            "SELECT COALESCE(MAX(seq), 0) FROM (SELECT seq FROM doc_updates WHERE doc_id = ?1 UNION ALL SELECT seq FROM doc_snapshots WHERE doc_id = ?1)",
             params![id],
             |r| r.get(0),
         )?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO doc_snapshots (doc_id, seq, bytes) VALUES (?1, ?2, ?3)",
-            params![id, head, doc.encode_full()],
+            "INSERT OR REPLACE INTO doc_snapshots (doc_id, seq, bytes, created_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![id, head, full_state, now_ms],
         )?;
         Ok(head)
     }
 
-    pub fn prune_updates_before(&mut self, doc_id: DocId, seq: i64) -> Result<usize> {
-        Ok(self.conn.execute(
-            "DELETE FROM doc_updates WHERE doc_id = ?1 AND seq <= ?2",
-            params![doc_id.to_string(), seq],
-        )?)
+    /// Apply the snapshot/pruning policy (SPEC §6.1, §9) to one doc:
+    ///
+    /// 1. If the updates since the last snapshot number at least `snapshot_every_updates`, or the
+    ///    oldest of them is older than `snapshot_interval`, write a snapshot at the head.
+    /// 2. Find the newest snapshot older than `retain_updates`; every update at or before it, and
+    ///    every older snapshot, is redundant for reconstructing any state within the retention
+    ///    window, so delete them.
+    ///
+    /// `full_state` is only invoked when a snapshot is actually written.
+    pub fn maintain(
+        &mut self,
+        doc_id: DocId,
+        policy: &RetentionPolicy,
+        now_ms: i64,
+        full_state: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Maintenance> {
+        let id = doc_id.to_string();
+        let mut out = Maintenance::default();
+
+        let last_snap_seq: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM doc_snapshots WHERE doc_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        let (pending, oldest_ms): (i64, Option<i64>) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(created_ms) FROM doc_updates WHERE doc_id = ?1 AND seq > ?2",
+            params![id, last_snap_seq],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let stale = oldest_ms.is_some_and(|t| now_ms - t >= policy.snapshot_interval.as_millis() as i64);
+        if pending > 0 && (pending >= policy.snapshot_every_updates as i64 || stale) {
+            self.snapshot_at(doc_id, &full_state(), now_ms)?;
+            out.snapshotted = true;
+        }
+
+        let cutoff_ms = now_ms - policy.retain_updates.as_millis() as i64;
+        let cut: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM doc_snapshots WHERE doc_id = ?1 AND created_ms <= ?2",
+                params![id, cutoff_ms],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(cut) = cut {
+            out.pruned_updates = self
+                .conn
+                .execute("DELETE FROM doc_updates WHERE doc_id = ?1 AND seq <= ?2", params![id, cut])?;
+            out.pruned_snapshots = self
+                .conn
+                .execute("DELETE FROM doc_snapshots WHERE doc_id = ?1 AND seq < ?2", params![id, cut])?;
+        }
+        Ok(out)
+    }
+
+    /// Every doc id that has any journal rows.
+    pub fn doc_ids(&self) -> Result<Vec<DocId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doc_id FROM doc_updates UNION SELECT doc_id FROM doc_snapshots ORDER BY doc_id",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| r?.parse()).collect()
+    }
+
+    // ---- Attachments ------------------------------------------------------------------------
+
+    pub fn upsert_attachment(&mut self, vault_id: VaultId, a: &AttachmentRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO attachments (hash, vault_id, size, mime, filename_hint, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(vault_id, hash) DO UPDATE SET filename_hint = COALESCE(excluded.filename_hint, filename_hint)",
+            params![a.hash, vault_id.to_string(), a.size as i64, a.mime, a.filename_hint, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn attachment(&self, vault_id: VaultId, hash: &str) -> Result<Option<AttachmentRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hash, size, mime, filename_hint FROM attachments WHERE vault_id = ?1 AND hash = ?2",
+                params![vault_id.to_string(), hash],
+                |r| {
+                    Ok(AttachmentRow {
+                        hash: r.get(0)?,
+                        size: r.get::<_, i64>(1)? as u64,
+                        mime: r.get(2)?,
+                        filename_hint: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     // ---- Notes and derived metadata -------------------------------------------------------
@@ -368,9 +520,17 @@ mod tests {
         assert_eq!(store.append_update(id, &u2, Some("alice")).unwrap(), 2);
         assert_eq!(store.load_doc(id).unwrap().text(), "first second");
 
-        let head = store.snapshot(id, &doc).unwrap();
+        let head = store.snapshot_at(id, &doc.encode_full(), 1_000).unwrap();
         assert_eq!(head, 2);
-        store.prune_updates_before(id, head).unwrap();
+        let m = store
+            .maintain(
+                id,
+                &RetentionPolicy { retain_updates: Duration::ZERO, ..Default::default() },
+                1_000,
+                || unreachable!(),
+            )
+            .unwrap();
+        assert_eq!(m, Maintenance { snapshotted: false, pruned_updates: 2, pruned_snapshots: 0 });
         let u3 = doc.set_text("first second third");
         assert_eq!(store.append_update(id, &u3, None).unwrap(), 3);
         assert_eq!(store.load_doc(id).unwrap().text(), "first second third");
@@ -387,6 +547,69 @@ mod tests {
         store.meta_set("vault_id", &vault.to_string()).unwrap();
         store.meta_set("vault_id", &vault.to_string()).unwrap();
         assert_eq!(store.meta_get("vault_id").unwrap().as_deref(), Some(vault.to_string().as_str()));
+    }
+
+    #[test]
+    fn maintenance_policy() {
+        const MIN: i64 = 60_000;
+        const DAY: i64 = 24 * 60 * MIN;
+        let policy = RetentionPolicy {
+            snapshot_every_updates: 3,
+            snapshot_interval: Duration::from_millis(10 * MIN as u64),
+            retain_updates: Duration::from_millis(90 * DAY as u64),
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        let id = DocId::Note(NoteId::new());
+        let doc = NoteDoc::new();
+        let mut t = 0;
+        let push = |store: &mut Store, text: &str, t: i64| {
+            let u = doc.set_text(text);
+            store.append_update_at(id, &u, None, t).unwrap();
+        };
+
+        // Two updates: below the count threshold, not stale → nothing.
+        push(&mut store, "a", t);
+        push(&mut store, "a b", t);
+        assert_eq!(store.maintain(id, &policy, t, || doc.encode_full()).unwrap(), Maintenance::default());
+        // Third update reaches the count threshold → snapshot at seq 3, nothing pruned (too young).
+        push(&mut store, "a b c", t);
+        let m = store.maintain(id, &policy, t, || doc.encode_full()).unwrap();
+        assert!(m.snapshotted && m.pruned_updates == 0);
+        // One more update now; 11 minutes later it is stale → second snapshot.
+        push(&mut store, "a b c d", t);
+        assert!(!store.maintain(id, &policy, t, || unreachable!()).unwrap().snapshotted);
+        t += 11 * MIN;
+        assert!(store.maintain(id, &policy, t, || doc.encode_full()).unwrap().snapshotted);
+        // Same call again: nothing pending → no snapshot; `full_state` must not be invoked.
+        assert!(!store.maintain(id, &policy, t, || unreachable!()).unwrap().snapshotted);
+
+        // 89 days later: both snapshots are inside the window → no pruning.
+        t += 89 * DAY;
+        assert_eq!(store.maintain(id, &policy, t, || unreachable!()).unwrap().pruned_updates, 0);
+        // 91 days after the second snapshot: everything up to it is redundant.
+        t += 2 * DAY;
+        let m = store.maintain(id, &policy, t, || unreachable!()).unwrap();
+        assert_eq!((m.pruned_updates, m.pruned_snapshots), (4, 1));
+        // The doc is still fully reconstructible, and new updates keep working.
+        assert_eq!(store.load_doc(id).unwrap().text(), "a b c d");
+        push(&mut store, "a b c d e", t);
+        assert_eq!(store.load_doc(id).unwrap().text(), "a b c d e");
+        assert_eq!(store.doc_ids().unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn attachments_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        let v = VaultId::new();
+        let row =
+            AttachmentRow { hash: "abc".into(), size: 3, mime: "image/png".into(), filename_hint: None };
+        store.upsert_attachment(v, &row).unwrap();
+        store
+            .upsert_attachment(v, &AttachmentRow { filename_hint: Some("x.png".into()), ..row.clone() })
+            .unwrap();
+        let got = store.attachment(v, "abc").unwrap().unwrap();
+        assert_eq!(got.filename_hint.as_deref(), Some("x.png"));
+        assert_eq!(store.attachment(VaultId::new(), "abc").unwrap(), None);
     }
 
     #[test]

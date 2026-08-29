@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use futures_util::{SinkExt, StreamExt};
 use notes_core::sync::{Frame, Message, SyncMessage};
 use notes_core::{DocId, NoteDoc, NoteId, Store};
-use notes_server::{build_state, router};
+use notes_server::{ServerOptions, build_state, router};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as TMsg;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
@@ -13,7 +13,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn start() -> (SocketAddr, std::sync::Arc<notes_server::AppState>) {
-    let state = build_state(Store::open_in_memory().unwrap());
+    let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(state.clone());

@@ -10,16 +10,23 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use notes_core::store::now_ms;
 use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store, VaultDoc, VaultId, markdown};
+use notes_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use yrs::StateVector;
 
+#[derive(Debug, Clone, Default)]
+pub struct ServerOptions {
+    pub policy: RetentionPolicy,
+}
+
 pub struct AppState {
     pub store: Mutex<Store>,
+    pub options: ServerOptions,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
@@ -55,6 +62,12 @@ impl RoomDoc {
             RoomDoc::Vault(d) => d.apply_update(u),
         }
     }
+    fn encode_full(&self) -> Vec<u8> {
+        match self {
+            RoomDoc::Note(d) => d.encode_full(),
+            RoomDoc::Vault(d) => d.encode_full(),
+        }
+    }
 }
 
 /// A frame to fan out to every other connection subscribed to `doc_id`.
@@ -65,10 +78,11 @@ struct Outbound {
     bytes: Arc<Vec<u8>>,
 }
 
-pub fn build_state(store: Store) -> Arc<AppState> {
+pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
     let (bus, _) = broadcast::channel(1024);
     Arc::new(AppState {
         store: Mutex::new(store),
+        options,
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
@@ -190,8 +204,19 @@ async fn handle_frame(
                     Ok(true) => {}
                 }
             }
-            if let Err(e) = state.store.lock().await.append_update(room.id, &update, None) {
-                warn!(conn_id, %e, "persisting update");
+            {
+                let doc = room.doc.lock().await;
+                let mut store = state.store.lock().await;
+                if let Err(e) = store.append_update(room.id, &update, None) {
+                    warn!(conn_id, %e, "persisting update");
+                }
+                match store.maintain(room.id, &state.options.policy, now_ms(), || doc.encode_full()) {
+                    Ok(m) if m.snapshotted || m.pruned_updates > 0 => {
+                        info!(doc = %room.id, snapshotted = m.snapshotted, pruned = m.pruned_updates, "maintenance")
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(conn_id, %e, "maintenance"),
+                }
             }
             if let Err(e) = derive_metadata(state, &room).await {
                 warn!(conn_id, %e, "indexing");

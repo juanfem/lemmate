@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use notes_core::client::{SyncOptions, SyncReport};
 use notes_core::{Store, VaultId};
-use notes_server::{AppState, build_state, router};
+use notes_server::{AppState, ServerOptions, build_state, router};
 use std::sync::Arc;
 
 async fn start_server() -> (String, Arc<AppState>) {
-    let state = build_state(Store::open_in_memory().unwrap());
+    let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let app = router(state.clone());
