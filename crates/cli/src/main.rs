@@ -201,25 +201,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 Some(p) => p,
                 None => rpassword::prompt_password("Password: ").context("reading password")?,
             };
-            let agent = notes_core::tls::http_agent(ca_cert.as_deref())?;
             let base = credentials::key(&server);
-            let path = if register { "/api/v1/auth/register" } else { "/api/v1/auth/login" };
-            let body = serde_json::json!({ "email": email, "password": password, "device": hostname() });
-            let mut resp = agent
-                .post(format!("{base}{path}"))
-                .header("content-type", "application/json")
-                .send(body.to_string().as_bytes())
-                .map_err(|e| {
-                    anyhow::anyhow!("{}: {e}", if register { "registration failed" } else { "login failed" })
-                })?;
-            let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string()?)?;
-            let token = json["token"].as_str().context("server returned no token")?;
-            credentials::save(&base, token)?;
-            println!(
-                "signed in as {} on {base}; token saved to {}",
-                json["user"]["email"].as_str().unwrap_or(&email),
-                credentials::path().display()
-            );
+            credentials::login(&base, &email, &password, register, ca_cert.as_deref(), &hostname())?;
+            println!("signed in as {email} on {base}; token saved to {}", credentials::path().display());
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Logout { server } => {

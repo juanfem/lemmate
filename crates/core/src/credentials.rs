@@ -50,6 +50,34 @@ pub fn save(server: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sign in (or register) on a server and save the session token. Returns the token.
+pub fn login(
+    server: &str,
+    email: &str,
+    password: &str,
+    register: bool,
+    ca_cert: Option<&std::path::Path>,
+    device: &str,
+) -> Result<String> {
+    let agent = crate::tls::http_agent(ca_cert)?;
+    let base = key(server);
+    let path = if register { "/api/v1/auth/register" } else { "/api/v1/auth/login" };
+    let body = serde_json::json!({ "email": email, "password": password, "device": device });
+    let mut resp = agent
+        .post(format!("{base}{path}"))
+        .header("content-type", "application/json")
+        .send(body.to_string().as_bytes())
+        .map_err(|e| {
+            Error::Sync(format!("{}: {e}", if register { "registration failed" } else { "login failed" }))
+        })?;
+    let text = resp.body_mut().read_to_string().map_err(|e| Error::Sync(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| Error::Sync(e.to_string()))?;
+    let token =
+        json["token"].as_str().ok_or_else(|| Error::Sync("server returned no token".into()))?.to_owned();
+    save(&base, &token)?;
+    Ok(token)
+}
+
 pub fn forget(server: &str) -> Result<()> {
     let mut root = read();
     if let Some(servers) = root.get_mut("servers").and_then(|v| v.as_table_mut()) {

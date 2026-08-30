@@ -93,7 +93,55 @@ pub fn format_help(path: Option<&Path>) -> String {
     )
 }
 
+/// What the first-run setup screen needs when there is no usable configuration yet.
+pub struct SetupContext {
+    pub config_path: PathBuf,
+    pub web_dir: Option<PathBuf>,
+    pub suggested_vault_dir: PathBuf,
+}
+
 impl Config {
+    /// `Some` when neither the flags nor the config file name a vault and a server, i.e. the
+    /// app should open in setup mode instead of failing.
+    pub fn needs_setup(cli: &Cli) -> Option<SetupContext> {
+        if cli.vault_dir.is_some() || cli.server_url.is_some() {
+            return None;
+        }
+        let path = cli.config.clone().or_else(default_config_path)?;
+        let file = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| toml::from_str::<FileConfig>(&t).ok())
+            .unwrap_or_default();
+        if file.vault_dir.is_some() && file.server_url.is_some() {
+            return None;
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        Some(SetupContext {
+            config_path: path,
+            web_dir: cli.web_dir.clone().or(file.web_dir),
+            suggested_vault_dir: home.join("notes"),
+        })
+    }
+
+    /// Write the file the setup screen produced; `resolve` reads it back on the next start.
+    pub fn write_setup(path: &std::path::Path, req: &notes_core::local::SetupRequest) -> anyhow::Result<()> {
+        let mut table = toml::Table::new();
+        table.insert("vault_dir".into(), toml::Value::String(req.vault_dir.clone()));
+        table.insert("server_url".into(), toml::Value::String(req.server_url.clone()));
+        if let Some(v) = req.vault_id.as_deref().filter(|v| !v.trim().is_empty()) {
+            table.insert("vault_id".into(), toml::Value::String(v.trim().to_owned()));
+        }
+        if let Some(c) = req.ca_cert.as_deref().filter(|c| !c.trim().is_empty()) {
+            table.insert("ca_cert".into(), toml::Value::String(c.trim().to_owned()));
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, toml::to_string(&table)?)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
     /// Merge the file (if any) with the flags and validate. Flags win over the file.
     pub fn resolve(cli: Cli) -> anyhow::Result<Self> {
         let path = cli.config.clone().or_else(default_config_path);

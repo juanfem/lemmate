@@ -42,7 +42,17 @@ fn main() -> ExitCode {
         )
         .init();
 
-    let cfg = match config::Config::resolve(config::Cli::parse()) {
+    let cli = config::Cli::parse();
+    if let Some(ctx) = config::Config::needs_setup(&cli) {
+        return match run_setup(ctx) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let cfg = match config::Config::resolve(cli) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("{e:#}");
@@ -69,6 +79,99 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
         .build(tauri::generate_context!())
         .context("building the Tauri application")?;
 
+    app.run(|app, event| {
+        if let RunEvent::Exit = event
+            && let Some(relay) = app.try_state::<Relay>()
+        {
+            relay.abort();
+        }
+    });
+    Ok(())
+}
+
+/// First run: serve the UI in setup mode, wait for the form, write the config, sign in if
+/// asked, then start the real relay and point the same window at it.
+fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
+    let app = tauri::Builder::default()
+        .setup(move |app| {
+            let web_dir = resolve_web_dir(app, ctx.web_dir.as_deref())?;
+            let (addr, rx, setup_task) = tauri::async_runtime::block_on(notes_core::local::serve_setup(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                Some(web_dir.clone()),
+                ctx.config_path.clone(),
+                ctx.suggested_vault_dir.clone(),
+            ))
+            .context("starting the setup server")?;
+            let url: tauri::Url = format!("http://{addr}/").parse()?;
+            tracing::info!(%url, "opening setup window");
+            WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+                .title("notes — setup")
+                .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+                .build()
+                .context("creating the setup window")?;
+            app.manage(Relay(Mutex::new(None)));
+
+            let handle = app.handle().clone();
+            let config_path = ctx.config_path.clone();
+            tauri::async_runtime::spawn(async move {
+                let Ok(req) = rx.await else { return };
+                let result: anyhow::Result<()> = async {
+                    if let (Some(email), Some(password)) = (req.email.as_deref(), req.password.as_deref())
+                        && !email.is_empty()
+                    {
+                        let ca = req.ca_cert.as_deref().filter(|c| !c.is_empty()).map(Path::new);
+                        let device = std::fs::read_to_string("/etc/hostname")
+                            .map(|s| s.trim().to_owned())
+                            .unwrap_or_else(|_| "desktop".into());
+                        notes_core::credentials::login(
+                            &req.server_url,
+                            email,
+                            password,
+                            req.register,
+                            ca,
+                            &device,
+                        )
+                        .context("signing in")?;
+                    }
+                    config::Config::write_setup(&config_path, &req)?;
+                    let cfg = config::Config::resolve(config::Cli::parse())
+                        .context("re-reading the new configuration")?;
+                    let sync = SyncOptions {
+                        vault_dir: cfg.vault_dir.clone(),
+                        server_url: cfg.server_url.clone(),
+                        vault_id: cfg.vault_id,
+                        once: false,
+                        ca_cert: cfg.ca_cert.clone(),
+                        token: cfg.token.clone().or_else(|| notes_core::credentials::load(&cfg.server_url)),
+                    };
+                    let local = LocalOptions {
+                        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                        web_dir: Some(web_dir),
+                    };
+                    let relay = client::start(sync, local).await.context("starting the local sync relay")?;
+                    let url: tauri::Url = format!("http://{}/#/v/{}", relay.addr, relay.vault_id).parse()?;
+                    if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
+                        w.navigate(url).context("navigating to the relay")?;
+                        let _ = w.set_title("notes");
+                    }
+                    if let Some(state) = handle.try_state::<Relay>()
+                        && let Ok(mut guard) = state.0.lock()
+                    {
+                        *guard = Some(relay);
+                    }
+                    setup_task.abort();
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::error!(error = %format!("{e:#}"), "setup failed");
+                    eprintln!("setup failed: {e:#}");
+                }
+            });
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .context("building the Tauri application")?;
     app.run(|app, event| {
         if let RunEvent::Exit = event
             && let Some(relay) = app.try_state::<Relay>()

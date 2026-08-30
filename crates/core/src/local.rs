@@ -93,6 +93,7 @@ pub(crate) async fn serve(
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
+        .route("/api/v1/local/setup", get(configured))
         .route("/api/v1/vaults", get(vaults))
         .route("/api/v1/vaults/{vault}/notes", get(notes))
         .route("/api/v1/vaults/{vault}/notes/{id}", get(note))
@@ -387,4 +388,189 @@ impl From<LocalQuery> for LocalEvent {
 
 pub(crate) fn err_reply(e: Error) -> LocalReply {
     LocalReply::Error(e.to_string())
+}
+
+// ---- First-run setup (SPEC §14 desktop) -------------------------------------------------------
+
+/// What the desktop shell needs before it can start the engine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupRequest {
+    pub vault_dir: String,
+    pub server_url: String,
+    #[serde(default)]
+    pub vault_id: Option<String>,
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    /// Sign in (or register) on the server and save the token before starting.
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub register: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupStatus {
+    pub configured: bool,
+    pub config_path: String,
+    /// Suggested default vault directory for the form.
+    pub suggested_vault_dir: String,
+}
+
+pub(crate) struct SetupState {
+    config_path: PathBuf,
+    suggested: PathBuf,
+    done: tokio::sync::Mutex<Option<oneshot::Sender<SetupRequest>>>,
+}
+
+/// Serve the web client in "setup mode" on loopback: the UI sees `configured: false` on
+/// `GET /api/v1/local/setup`, shows its setup form, and `POST`s the answers; the request is
+/// handed back to the caller (which writes the config, logs in, and starts the real relay).
+pub async fn serve_setup(
+    bind: SocketAddr,
+    web_dir: Option<PathBuf>,
+    config_path: PathBuf,
+    suggested_vault_dir: PathBuf,
+) -> Result<(SocketAddr, oneshot::Receiver<SetupRequest>, tokio::task::JoinHandle<()>)> {
+    let (tx, rx) = oneshot::channel();
+    let state = Arc::new(SetupState {
+        config_path,
+        suggested: suggested_vault_dir,
+        done: tokio::sync::Mutex::new(Some(tx)),
+    });
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let addr = listener.local_addr()?;
+    let router = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/v1/local/setup", get(setup_status).post(setup_submit))
+        .route("/api/v1/auth/me", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/api/v1/vaults", get(|| async { axum::Json(Vec::<()>::new()) }));
+    let router = match web_dir {
+        Some(dir) => {
+            router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
+        }
+        None => router,
+    };
+    let app = router.with_state(state);
+    let task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::warn!(%e, "setup server stopped");
+        }
+    });
+    Ok((addr, rx, task))
+}
+
+async fn setup_status(State(s): State<Arc<SetupState>>) -> axum::Json<SetupStatus> {
+    axum::Json(SetupStatus {
+        configured: false,
+        config_path: s.config_path.display().to_string(),
+        suggested_vault_dir: s.suggested.display().to_string(),
+    })
+}
+
+async fn setup_submit(
+    State(s): State<Arc<SetupState>>,
+    axum::Json(req): axum::Json<SetupRequest>,
+) -> StatusCode {
+    if req.vault_dir.trim().is_empty()
+        || !(req.server_url.starts_with("http://") || req.server_url.starts_with("https://"))
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+    match s.done.lock().await.take() {
+        Some(tx) => {
+            let _ = tx.send(req);
+            StatusCode::ACCEPTED
+        }
+        None => StatusCode::CONFLICT,
+    }
+}
+
+/// On a configured relay, the UI asks the same endpoint and gets `configured: true`.
+pub(crate) async fn configured() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "configured": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn setup_mode_hands_the_form_back_once() {
+        let (addr, rx, task) = serve_setup(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            PathBuf::from("/tmp/x.toml"),
+            PathBuf::from("/home/me/notes"),
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{addr}");
+        let status: serde_json::Value = tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || {
+                serde_json::from_str(
+                    &ureq::get(format!("{base}/api/v1/local/setup"))
+                        .call()
+                        .unwrap()
+                        .body_mut()
+                        .read_to_string()
+                        .unwrap(),
+                )
+                .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status["configured"], false);
+        assert_eq!(status["suggested_vault_dir"], "/home/me/notes");
+        // The UI's usual probes must not break the shell while unconfigured.
+        let me = tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || {
+                ureq::get(format!("{base}/api/v1/auth/me"))
+                    .call()
+                    .map(|r| r.status().as_u16())
+                    .unwrap_or_else(|e| match e {
+                        ureq::Error::StatusCode(c) => c,
+                        _ => 0,
+                    })
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(me, 404);
+
+        let submit = |body: serde_json::Value| {
+            let base = base.clone();
+            tokio::task::spawn_blocking(move || {
+                match ureq::post(format!("{base}/api/v1/local/setup"))
+                    .header("content-type", "application/json")
+                    .send(body.to_string().as_bytes())
+                {
+                    Ok(r) => r.status().as_u16(),
+                    Err(ureq::Error::StatusCode(c)) => c,
+                    Err(e) => panic!("{e}"),
+                }
+            })
+        };
+        assert_eq!(submit(serde_json::json!({"vault_dir": "", "server_url": "x"})).await.unwrap(), 400);
+        assert_eq!(
+            submit(
+                serde_json::json!({"vault_dir": "/v", "server_url": "https://s.example", "register": true})
+            )
+            .await
+            .unwrap(),
+            202
+        );
+        let req = rx.await.unwrap();
+        assert_eq!(req.vault_dir, "/v");
+        assert!(req.register);
+        assert_eq!(
+            submit(serde_json::json!({"vault_dir": "/v", "server_url": "https://s.example"})).await.unwrap(),
+            409
+        );
+        task.abort();
+    }
 }
