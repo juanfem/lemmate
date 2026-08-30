@@ -29,6 +29,7 @@ fn opts(dir: &Path, server: &str, vault_id: Option<VaultId>) -> SyncOptions {
         vault_id,
         once: true,
         ca_cert: None,
+        token: None,
     }
 }
 

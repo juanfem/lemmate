@@ -30,6 +30,9 @@ pub struct Cli {
     /// PEM file of a private CA to trust for wss:// and https:// (default: public roots).
     #[arg(long, value_name = "FILE", env = "NOTES_CA_CERT")]
     pub ca_cert: Option<PathBuf>,
+    /// Access token (default: the one saved by `notes login` for this server).
+    #[arg(long, env = "NOTES_TOKEN")]
+    pub token: Option<String>,
     /// Directory of built web assets for the relay to serve (default: bundled, then `ui/dist`).
     #[arg(long, value_name = "DIR", env = "NOTES_WEB_DIR")]
     pub web_dir: Option<PathBuf>,
@@ -43,6 +46,7 @@ struct FileConfig {
     server_url: Option<String>,
     vault_id: Option<String>,
     ca_cert: Option<PathBuf>,
+    token: Option<String>,
     web_dir: Option<PathBuf>,
 }
 
@@ -53,6 +57,7 @@ pub struct Config {
     pub server_url: String,
     pub vault_id: Option<VaultId>,
     pub ca_cert: Option<PathBuf>,
+    pub token: Option<String>,
     /// `--web-dir` / `NOTES_WEB_DIR`; `None` means "discover it" (see `main::resolve_web_dir`).
     pub web_dir: Option<PathBuf>,
 }
@@ -123,6 +128,7 @@ impl Config {
             server_url,
             vault_id,
             ca_cert: cli.ca_cert.or(file.ca_cert),
+            token: cli.token.or(file.token),
             web_dir: cli.web_dir.or(file.web_dir),
         })
     }

@@ -40,7 +40,7 @@ async function json<T>(url: string): Promise<T> {
 test('relay serves a UI offline and forwards to the server', { skip: !SERVER || !CLI }, async () => {
   const data = mkdtempSync(join(tmpdir(), 'notes-relay-srv-'))
   const vaultDir = mkdtempSync(join(tmpdir(), 'notes-relay-vault-'))
-  const startServer = () => spawn(SERVER!, ['--bind', `127.0.0.1:${SERVER_PORT}`, '--data-dir', data], { stdio: 'ignore' })
+  const startServer = () => spawn(SERVER!, ['--bind', `127.0.0.1:${SERVER_PORT}`, '--data-dir', data, '--no-auth'], { stdio: 'ignore' })
   let server: ChildProcess = startServer()
   let relay: ChildProcess | undefined
   const clients: SyncClient[] = []

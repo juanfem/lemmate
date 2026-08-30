@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte'
-  import { api, type VaultInfo, type NoteSummary } from './lib/api.ts'
+  import { api, authState, type VaultInfo, type NoteSummary, type User } from './lib/api.ts'
+  import Login from './components/Login.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { ulid } from './lib/ulid.ts'
   import Tree from './components/Tree.svelte'
@@ -11,6 +12,29 @@
   import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
   import Modal from './components/Modal.svelte'
+
+  // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
+  let authRequired = $state(false)
+  let me = $state<User | null>(null)
+  authState.onUnauthorized = () => {
+    authRequired = true
+  }
+  api
+    .me()
+    .then((u) => (me = u))
+    .catch(() => {})
+  async function signedIn() {
+    authRequired = false
+    me = await api.me().catch(() => null)
+    vaultId = readHash()
+    if (!vaultId) api.vaults().then((v) => (vaults = v)).catch(() => (vaults = []))
+  }
+  async function signOut() {
+    await api.logout().catch(() => {})
+    me = null
+    location.hash = ''
+    authRequired = true
+  }
 
   // ---- vault selection: #/v/<ULID>
   let vaultId = $state<string | null>(readHash())
@@ -117,6 +141,7 @@
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
     { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => active && close(active) },
     { id: 'vault', label: 'Switch vault', run: () => (location.hash = '') },
+    ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   function close(id: string) {
     const i = tabs.indexOf(id)
@@ -232,7 +257,9 @@
 
 <svelte:window onkeydown={onKey} />
 
-{#if !session}
+{#if authRequired}
+  <Login onDone={signedIn} />
+{:else if !session}
   <main class="welcome">
     <h1>notes</h1>
     <p>Open a vault on this server, or create a new one.</p>

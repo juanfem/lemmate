@@ -90,6 +90,8 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
         vault_id: cfg.vault_id,
         once: false,
         ca_cert: cfg.ca_cert.clone(),
+        // Saved by `notes login`; a server with accounts refuses the sync without it.
+        token: cfg.token.clone().or_else(|| notes_core::credentials::load(&cfg.server_url)),
     };
     let local = LocalOptions { bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), web_dir: Some(web_dir) };
 

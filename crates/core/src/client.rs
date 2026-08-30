@@ -23,8 +23,8 @@ use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
 use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
-use crate::local::{LocalEvent, LocalQuery, LocalReply, err_reply};
 pub use crate::local::LocalOptions;
+use crate::local::{LocalEvent, LocalQuery, LocalReply, err_reply};
 use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
 use crate::store::{RetentionPolicy, Store, now_ms};
@@ -56,6 +56,8 @@ pub struct SyncOptions {
     pub once: bool,
     /// PEM file of a private CA to trust for `wss://` / `https://` instead of the public roots.
     pub ca_cert: Option<PathBuf>,
+    /// Session or personal access token for the server (`Authorization: Bearer`).
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +136,7 @@ async fn run_inner(
     tokio::spawn(transfer_worker(
         agent,
         http_url(&opts.server_url)?,
+        opts.token.clone(),
         engine.vault_id,
         engine.proj.root().to_path_buf(),
         job_rx,
@@ -144,7 +147,8 @@ async fn run_inner(
     let mut backoff = RECONNECT_MIN;
     loop {
         let connector = tls.clone().map(Connector::Rustls);
-        match connect_async_tls_with_config(&ws_url, None, false, connector).await {
+        let request = ws_request(&ws_url, opts.token.as_deref())?;
+        match connect_async_tls_with_config(request, None, false, connector).await {
             Ok((ws, _)) => {
                 info!(url = %ws_url, "connected");
                 backoff = RECONNECT_MIN;
@@ -224,6 +228,22 @@ async fn run_inner(
     }
 }
 
+/// The upgrade request, carrying the bearer token when we have one.
+fn ws_request(
+    url: &str,
+    token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request().map_err(|e| Error::Sync(e.to_string()))?;
+    if let Some(t) = token {
+        let value = format!("Bearer {t}")
+            .parse()
+            .map_err(|_| Error::Sync("token is not a valid header value".into()))?;
+        req.headers_mut().insert("authorization", value);
+    }
+    Ok(req)
+}
+
 fn ws_url(server: &str) -> Result<String> {
     let base = server.trim_end_matches('/');
     let ws = if let Some(rest) = base.strip_prefix("https://") {
@@ -272,20 +292,23 @@ enum TransferDone {
 async fn transfer_worker(
     agent: ureq::Agent,
     base: String,
+    token: Option<String>,
     vault: VaultId,
     root: PathBuf,
     mut jobs: mpsc::UnboundedReceiver<TransferJob>,
     done: mpsc::UnboundedSender<TransferDone>,
 ) {
     while let Some(job) = jobs.recv().await {
-        let (agent, base, root) = (agent.clone(), base.clone(), root.clone());
-        let result = tokio::task::spawn_blocking(move || run_transfer(&agent, &base, vault, &root, job))
-            .await
-            .unwrap_or_else(|e| TransferDone::Failed {
-                path: String::new(),
-                upload: false,
-                error: e.to_string(),
-            });
+        let (agent, base, token, root) = (agent.clone(), base.clone(), token.clone(), root.clone());
+        let result = tokio::task::spawn_blocking(move || {
+            run_transfer(&agent, &base, token.as_deref(), vault, &root, job)
+        })
+        .await
+        .unwrap_or_else(|e| TransferDone::Failed {
+            path: String::new(),
+            upload: false,
+            error: e.to_string(),
+        });
         if done.send(result).is_err() {
             break;
         }
@@ -295,11 +318,13 @@ async fn transfer_worker(
 fn run_transfer(
     agent: &ureq::Agent,
     base: &str,
+    token: Option<&str>,
     vault: VaultId,
     root: &std::path::Path,
     job: TransferJob,
 ) -> TransferDone {
     let url = |hash: &str| format!("{base}/api/v1/vaults/{vault}/attachments/{hash}");
+    let bearer = token.map(|t| format!("Bearer {t}"));
     match job {
         TransferJob::Upload { path } => {
             let bytes = match std::fs::read(root.join(&path)) {
@@ -308,25 +333,34 @@ fn run_transfer(
             };
             let hash = hash_bytes(&bytes);
             // Content-addressed: skip the body if the server already has these bytes.
-            match agent.head(&url(&hash)).call() {
+            let mut head = agent.head(&url(&hash));
+            if let Some(b) = &bearer {
+                head = head.header("authorization", b);
+            }
+            match head.call() {
                 Ok(_) => return TransferDone::Uploaded { path, hash },
                 Err(ureq::Error::StatusCode(404)) => {}
                 Err(e) => return TransferDone::Failed { path, upload: true, error: e.to_string() },
             }
             let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
-            match agent
+            let mut put = agent
                 .put(&url(&hash))
                 .header("content-type", &mime_for_path(&path))
-                .header("x-filename", &name)
-                .send(&bytes[..])
-            {
+                .header("x-filename", &name);
+            if let Some(b) = &bearer {
+                put = put.header("authorization", b);
+            }
+            match put.send(&bytes[..]) {
                 Ok(_) => TransferDone::Uploaded { path, hash },
                 Err(e) => TransferDone::Failed { path, upload: true, error: e.to_string() },
             }
         }
         TransferJob::Download { path, hash } => {
-            let bytes = agent
-                .get(&url(&hash))
+            let mut get = agent.get(&url(&hash));
+            if let Some(b) = &bearer {
+                get = get.header("authorization", b);
+            }
+            let bytes = get
                 .call()
                 .and_then(|mut r| r.body_mut().with_config().limit(MAX_ATTACHMENT_BYTES).read_to_vec());
             match bytes {
@@ -1384,6 +1418,7 @@ mod tests {
             vault_id: None,
             once: true,
             ca_cert: None,
+            token: None,
         };
         let e = Engine::open(&base).unwrap();
         let id = e.vault_id;
@@ -1404,6 +1439,7 @@ mod tests {
             vault_id: None,
             once: true,
             ca_cert: None,
+            token: None,
         };
         let proj = Projection::new(dir.path());
         proj.write("plain.md", "# Plain\n").unwrap();
@@ -1450,6 +1486,7 @@ mod tests {
             vault_id: None,
             once: true,
             ca_cert: None,
+            token: None,
         };
         let proj = Projection::new(dir.path());
         proj.write("a.md", "# A\n").unwrap();

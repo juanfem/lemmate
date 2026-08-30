@@ -29,7 +29,7 @@ async function waitFor(pred: () => Promise<boolean> | boolean, ms = 10_000): Pro
 
 test('browser client creates and edits notes through the relay', { skip: !SERVER || !CLI }, async () => {
   const data = mkdtempSync(join(tmpdir(), 'notes-web-'))
-  const server = spawn(SERVER!, ['--bind', `127.0.0.1:${PORT}`, '--data-dir', data], { stdio: 'ignore' })
+  const server = spawn(SERVER!, ['--bind', `127.0.0.1:${PORT}`, '--data-dir', data, '--no-auth'], { stdio: 'ignore' })
   const clients: SyncClient[] = []
   try {
     await waitFor(async () => {

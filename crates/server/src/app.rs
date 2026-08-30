@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::auth::{self, AuthMode, AuthUser};
 use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -14,7 +15,7 @@ use axum::{Json, Router};
 use notes_core::attachments::{
     AttachmentStore, MAX_ATTACHMENT_BYTES, hash_bytes, is_valid_hash, mime_for_path,
 };
-use notes_core::store::{AttachmentRow, now_ms};
+use notes_core::store::{AttachmentRow, Role, now_ms};
 use notes_core::sync::{Frame, Message, SyncMessage};
 use notes_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,7 @@ pub struct ServerOptions {
     pub attachment_grace: std::time::Duration,
     /// Built web client (`ui/dist`) to serve at `/`; none → API and sync only.
     pub web_dir: Option<std::path::PathBuf>,
+    pub auth: AuthMode,
 }
 
 impl Default for ServerOptions {
@@ -42,6 +44,7 @@ impl Default for ServerOptions {
             attachments_dir: std::env::temp_dir().join("notes-attachments"),
             attachment_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
             web_dir: None,
+            auth: AuthMode::Disabled,
         }
     }
 }
@@ -102,6 +105,9 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub options: ServerOptions,
     pub attachments: AttachmentStore,
+    /// Note docs seen before their vault entry exists, bound to the vault the creating
+    /// connection was working in (a UI writes the note text before the vault map entry).
+    pub note_vault_claims: Mutex<HashMap<NoteId, VaultId>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
@@ -160,6 +166,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         store: Mutex::new(store),
         options,
         attachments,
+        note_vault_claims: Mutex::new(HashMap::new()),
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
@@ -169,6 +176,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
 pub fn router(state: Arc<AppState>) -> Router {
     let web_dir = state.options.web_dir.clone();
     let router = Router::new()
+        .merge(auth::router())
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))
@@ -193,21 +201,34 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 // ---- Sync over WebSocket --------------------------------------------------------------------
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+/// Per-connection authorization state.
+struct Conn {
+    id: u64,
+    user: AuthUser,
+    /// The vault this connection last gained access to; new note docs are bound to it.
+    vault: Option<VaultId>,
+}
+
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, user: AuthUser) {
     let conn_id = state.next_conn.fetch_add(1, Ordering::Relaxed);
+    let mut conn = Conn { id: conn_id, user, vault: None };
     let mut rx = state.bus.subscribe();
     let mut subscribed: HashSet<String> = HashSet::new();
-    info!(conn_id, "ws connected");
+    info!(conn_id, user = %conn.user.email, "ws connected");
 
     loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Binary(bytes))) => {
-                    let replies = handle_frame(&state, conn_id, &bytes, &mut subscribed).await;
+                    let replies = handle_frame(&state, &mut conn, &bytes, &mut subscribed).await;
                     for reply in replies {
                         if socket.send(WsMessage::Binary(reply.into())).await.is_err() {
                             break;
@@ -233,13 +254,28 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     info!(conn_id, "ws disconnected");
 }
 
+/// Which vault a note doc belongs to: its row, a provisional claim, or the connection's vault.
+async fn vault_of_note(state: &AppState, id: NoteId, conn_vault: Option<VaultId>) -> Option<VaultId> {
+    if let Ok(Some(row)) = state.store.lock().await.note_by_id(id) {
+        return Some(row.vault_id);
+    }
+    let mut claims = state.note_vault_claims.lock().await;
+    if let Some(v) = claims.get(&id) {
+        return Some(*v);
+    }
+    let v = conn_vault?;
+    claims.insert(id, v);
+    Some(v)
+}
+
 /// Process one inbound frame; returns frames to send back to *this* connection.
 async fn handle_frame(
     state: &Arc<AppState>,
-    conn_id: u64,
+    conn: &mut Conn,
     bytes: &[u8],
     subscribed: &mut HashSet<String>,
 ) -> Vec<Vec<u8>> {
+    let conn_id = conn.id;
     let frame = match Frame::decode(bytes) {
         Ok(f) => f,
         Err(e) => {
@@ -261,6 +297,35 @@ async fn handle_frame(
             return Vec::new();
         }
     };
+    // Authorization (SPEC §11.2): reads need a viewer, writes an editor; a vault nobody owns
+    // is claimed by the first authenticated user who touches it.
+    let is_write =
+        matches!(msg, Message::Sync(SyncMessage::SyncStep2(_)) | Message::Sync(SyncMessage::Update(_)));
+    let allowed = if matches!(state.options.auth, AuthMode::Disabled) {
+        true
+    } else {
+        let vault = match doc_id {
+            DocId::Vault(v) => Some(v),
+            DocId::Note(id) => vault_of_note(state, id, conn.vault).await,
+        };
+        let role = match vault {
+            Some(v) => auth::role_or_claim(state, &conn.user, v, matches!(doc_id, DocId::Vault(_))).await,
+            None => None,
+        };
+        match role {
+            Some(r) if is_write => r >= Role::Editor,
+            Some(_) => true,
+            None => false,
+        }
+    };
+    if !allowed {
+        warn!(conn_id, doc = %frame.doc_id, user = %conn.user.email, write = is_write, "denied");
+        return vec![Frame::new(&frame.doc_id, &Message::Auth(Some("permission denied".into()))).encode()];
+    }
+    if let DocId::Vault(v) = doc_id {
+        conn.vault = Some(v);
+    }
+
     let room = match get_room(state, doc_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -470,16 +535,27 @@ struct SearchHitOut {
     snippet: String,
 }
 
-async fn list_vaults(State(state): State<Arc<AppState>>) -> Result<Json<Vec<VaultSummary>>, StatusCode> {
-    let rows = state.store.lock().await.vaults().map_err(internal)?;
+async fn list_vaults(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<VaultSummary>>, StatusCode> {
+    let store = state.store.lock().await;
+    let rows: Vec<(VaultId, u32)> = match state.options.auth {
+        AuthMode::Disabled => store.vaults().map_err(internal)?,
+        AuthMode::Enabled { .. } => {
+            store.vaults_of(&user.id).map_err(internal)?.into_iter().map(|(v, _, n)| (v, n)).collect()
+        }
+    };
     Ok(Json(rows.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect()))
 }
 
 async fn backlinks(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path((vault, id)): Path<(String, String)>,
 ) -> Result<Json<Vec<NoteSummary>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let store = state.store.lock().await;
     let note = store
@@ -503,9 +579,11 @@ struct TagCount {
 
 async fn tags(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(vault): Path<String>,
 ) -> Result<Json<Vec<TagCount>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let rows = state.store.lock().await.tags_in_vault(vault).map_err(internal)?;
     Ok(Json(rows.into_iter().map(|(tag, count)| TagCount { tag, count }).collect()))
 }
@@ -517,10 +595,12 @@ struct TagParams {
 
 async fn tagged(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(vault): Path<String>,
     Query(p): Query<TagParams>,
 ) -> Result<Json<Vec<NoteSummary>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let rows = state.store.lock().await.notes_with_tag(vault, &p.tag).map_err(internal)?;
     Ok(Json(
         rows.into_iter()
@@ -531,10 +611,12 @@ async fn tagged(
 
 async fn search_vault(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(vault): Path<String>,
     Query(p): Query<SearchParams>,
 ) -> Result<Json<Vec<SearchHitOut>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let hits = state
         .store
         .lock()
@@ -550,9 +632,11 @@ async fn search_vault(
 
 async fn list_notes(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(vault): Path<String>,
 ) -> Result<Json<Vec<NoteSummary>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let rows = state.store.lock().await.list_notes(vault).map_err(internal)?;
     Ok(Json(
         rows.into_iter()
@@ -563,9 +647,11 @@ async fn list_notes(
 
 async fn get_note(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path((vault, id)): Path<(String, String)>,
 ) -> Result<Json<NoteBody>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let row = state
         .store
@@ -586,10 +672,24 @@ async fn get_note(
 
 async fn search(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Query(p): Query<SearchParams>,
 ) -> Result<Json<Vec<SearchHitOut>>, StatusCode> {
-    let hits =
-        state.store.lock().await.search(&p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = state.store.lock().await;
+    let hits = match state.options.auth {
+        AuthMode::Disabled => store.search(&p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
+        AuthMode::Enabled { .. } => {
+            let mut all = Vec::new();
+            for (v, _, _) in store.vaults_of(&user.id).map_err(internal)? {
+                all.extend(
+                    store.search_in_vault(v, &p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
+                );
+            }
+            all.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+            all.truncate(p.limit.min(100) as usize);
+            all
+        }
+    };
     Ok(Json(
         hits.into_iter()
             .map(|h| SearchHitOut { note_id: h.note_id.to_string(), title: h.title, snippet: h.snippet })
@@ -600,11 +700,13 @@ async fn search(
 /// Idempotent, content-addressed upload: the URL names the blake3 hash the body must have.
 async fn put_attachment(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path((vault, hash)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
     if !is_valid_hash(&hash) || hash_bytes(&body) != hash {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -624,9 +726,11 @@ async fn put_attachment(
 
 async fn get_attachment(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path((vault, hash)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
     if !is_valid_hash(&hash) {
         return Err(StatusCode::BAD_REQUEST);
     }

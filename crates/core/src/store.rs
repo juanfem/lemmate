@@ -12,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -70,6 +70,30 @@ CREATE TABLE IF NOT EXISTS projection (
 );
 -- Small key/value facts about this database (e.g. `vault_id` in a client sidecar).
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Accounts and access (server only; SPEC §11).
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    display_name  TEXT NOT NULL,
+    password_hash TEXT,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    created_ms    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    device_name TEXT,
+    created_ms  INTEGER NOT NULL,
+    expires_ms  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
+CREATE TABLE IF NOT EXISTS memberships (
+    vault_id TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    role     TEXT NOT NULL,
+    PRIMARY KEY (vault_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS memberships_user ON memberships (user_id);
 "#;
 
 pub struct Store {
@@ -108,6 +132,41 @@ pub struct AttachmentRow {
     pub size: u64,
     pub mime: String,
     pub filename_hint: Option<String>,
+}
+
+/// Vault-level roles (SPEC §11.2). Ordered: a higher role includes the lower ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    Viewer,
+    Editor,
+    Owner,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Editor => "editor",
+            Role::Owner => "owner",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "viewer" => Some(Role::Viewer),
+            "editor" => Some(Role::Editor),
+            "owner" => Some(Role::Owner),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRow {
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+    pub password_hash: Option<String>,
+    pub is_admin: bool,
 }
 
 /// Milliseconds since the Unix epoch.
@@ -601,6 +660,148 @@ impl Store {
         Ok(())
     }
 
+    // ---- Users, sessions, memberships (server) ---------------------------------------------
+
+    pub fn create_user(
+        &mut self,
+        id: &str,
+        email: &str,
+        display_name: &str,
+        password_hash: Option<&str>,
+        is_admin: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO users (id, email, display_name, password_hash, is_admin, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, email.to_lowercase(), display_name, password_hash, is_admin as i32, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn user_count(&self) -> Result<u32> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
+    }
+
+    pub fn user_by_email(&self, email: &str) -> Result<Option<UserRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, email, display_name, password_hash, is_admin FROM users WHERE email = ?1",
+                params![email.to_lowercase()],
+                row_to_user,
+            )
+            .optional()?)
+    }
+
+    pub fn user_by_id(&self, id: &str) -> Result<Option<UserRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, email, display_name, password_hash, is_admin FROM users WHERE id = ?1",
+                params![id],
+                row_to_user,
+            )
+            .optional()?)
+    }
+
+    pub fn create_session(
+        &mut self,
+        token_hash: &str,
+        user_id: &str,
+        device: Option<&str>,
+        ttl_ms: i64,
+    ) -> Result<()> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, device_name, created_ms, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![token_hash, user_id, device, now, now + ttl_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The user behind a live (unexpired) session token hash.
+    pub fn session_user(&self, token_hash: &str) -> Result<Option<UserRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT u.id, u.email, u.display_name, u.password_hash, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+                 WHERE s.token_hash = ?1 AND s.expires_ms > ?2",
+                params![token_hash, now_ms()],
+                row_to_user,
+            )
+            .optional()?)
+    }
+
+    pub fn delete_session(&mut self, token_hash: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM sessions WHERE token_hash = ?1", params![token_hash])?;
+        Ok(())
+    }
+
+    pub fn set_membership(&mut self, vault_id: VaultId, user_id: &str, role: Role) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO memberships (vault_id, user_id, role) VALUES (?1, ?2, ?3) ON CONFLICT(vault_id, user_id) DO UPDATE SET role = excluded.role",
+            params![vault_id.to_string(), user_id, role.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_membership(&mut self, vault_id: VaultId, user_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM memberships WHERE vault_id = ?1 AND user_id = ?2",
+            params![vault_id.to_string(), user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn membership(&self, vault_id: VaultId, user_id: &str) -> Result<Option<Role>> {
+        let role: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT role FROM memberships WHERE vault_id = ?1 AND user_id = ?2",
+                params![vault_id.to_string(), user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(role.and_then(|r| Role::parse(&r)))
+    }
+
+    pub fn member_count(&self, vault_id: VaultId) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM memberships WHERE vault_id = ?1",
+            params![vault_id.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn members(&self, vault_id: VaultId) -> Result<Vec<(UserRow, Role)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.id, u.email, u.display_name, u.password_hash, u.is_admin, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+             WHERE m.vault_id = ?1 ORDER BY m.role DESC, u.email",
+        )?;
+        let rows =
+            stmt.query_map(params![vault_id.to_string()], |r| Ok((row_to_user(r)?, r.get::<_, String>(5)?)))?;
+        rows.map(|r| {
+            let (u, role) = r?;
+            Ok((u, Role::parse(&role).unwrap_or(Role::Viewer)))
+        })
+        .collect()
+    }
+
+    /// Vaults the user belongs to, with role and live note count.
+    pub fn vaults_of(&self, user_id: &str) -> Result<Vec<(VaultId, Role, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.vault_id, m.role, (SELECT COUNT(*) FROM notes n WHERE n.vault_id = m.vault_id AND n.deleted_at IS NULL)
+             FROM memberships m WHERE m.user_id = ?1 ORDER BY m.vault_id",
+        )?;
+        let rows = stmt.query_map(params![user_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u32>(2)?))
+        })?;
+        rows.map(|r| {
+            let (v, role, n) = r?;
+            Ok((v.parse()?, Role::parse(&role).unwrap_or(Role::Viewer), n))
+        })
+        .collect()
+    }
+
     // ---- Meta -------------------------------------------------------------------------------
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -626,6 +827,16 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn row_to_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRow> {
+    Ok(UserRow {
+        id: r.get(0)?,
+        email: r.get(1)?,
+        display_name: r.get(2)?,
+        password_hash: r.get(3)?,
+        is_admin: r.get::<_, i32>(4)? != 0,
+    })
 }
 
 fn row_to_note(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
@@ -762,6 +973,38 @@ mod tests {
         assert!(refs.contains("y.png") && !refs.contains("x.png"));
         store.clear_note_attachments(b).unwrap();
         assert!(store.referenced_attachment_paths().unwrap().is_empty());
+    }
+
+    #[test]
+    fn users_sessions_memberships() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.user_count().unwrap(), 0);
+        store.create_user("u1", "Ann@Example.org", "Ann", Some("hash"), true).unwrap();
+        store.create_user("u2", "bob@example.org", "Bob", Some("hash"), false).unwrap();
+        assert!(
+            store.create_user("u3", "ann@example.org", "Dup", None, false).is_err(),
+            "emails are unique, case-insensitively"
+        );
+        assert_eq!(store.user_by_email("ANN@example.org").unwrap().unwrap().id, "u1");
+        store.create_session("t1", "u1", Some("laptop"), 60_000).unwrap();
+        store.create_session("t2", "u2", None, -1).unwrap();
+        assert_eq!(store.session_user("t1").unwrap().unwrap().email, "ann@example.org");
+        assert_eq!(store.session_user("t2").unwrap(), None, "expired");
+        store.delete_session("t1").unwrap();
+        assert_eq!(store.session_user("t1").unwrap(), None);
+
+        let v = VaultId::new();
+        assert_eq!(store.member_count(v).unwrap(), 0);
+        store.set_membership(v, "u1", Role::Owner).unwrap();
+        store.set_membership(v, "u2", Role::Viewer).unwrap();
+        store.set_membership(v, "u2", Role::Editor).unwrap();
+        assert_eq!(store.membership(v, "u2").unwrap(), Some(Role::Editor));
+        assert_eq!(store.membership(VaultId::new(), "u2").unwrap(), None);
+        assert!(Role::Owner > Role::Editor && Role::Editor > Role::Viewer);
+        assert_eq!(store.members(v).unwrap().len(), 2);
+        assert_eq!(store.vaults_of("u2").unwrap(), vec![(v, Role::Editor, 0)]);
+        store.remove_membership(v, "u2").unwrap();
+        assert_eq!(store.member_count(v).unwrap(), 1);
     }
 
     #[test]

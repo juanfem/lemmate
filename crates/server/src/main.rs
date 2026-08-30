@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use notes_core::RetentionPolicy;
 use notes_core::Store;
-use notes_server::{ServerOptions, build_state, purge_orphans, router};
+use notes_server::{AuthMode, ServerOptions, build_state, purge_orphans, router};
 use std::time::Duration;
 use tracing::info;
 
@@ -35,6 +35,16 @@ struct Config {
     /// Directory with the built web client (ui/dist) to serve at /; omit for API + sync only.
     #[arg(long, env = "NOTES_WEB_DIR")]
     web_dir: Option<PathBuf>,
+    /// Disable accounts entirely (development only): every request acts as a local owner.
+    #[arg(long, env = "NOTES_NO_AUTH")]
+    no_auth: bool,
+    /// Let anyone register. Without it, only the first account (the admin) can register and
+    /// the admin creates further accounts.
+    #[arg(long, env = "NOTES_ALLOW_REGISTRATION")]
+    allow_registration: bool,
+    /// Mark session cookies Secure (set when the server is reached over HTTPS).
+    #[arg(long, env = "NOTES_SECURE_COOKIES")]
+    secure_cookies: bool,
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "NOTES_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
@@ -56,6 +66,14 @@ async fn main() -> anyhow::Result<()> {
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),
         web_dir: cfg.web_dir.clone(),
+        auth: if cfg.no_auth {
+            AuthMode::Disabled
+        } else {
+            AuthMode::Enabled {
+                allow_registration: cfg.allow_registration,
+                secure_cookies: cfg.secure_cookies,
+            }
+        },
         attachment_grace: Duration::from_secs(cfg.attachment_grace_days * 24 * 60 * 60),
         policy: RetentionPolicy {
             snapshot_every_updates: cfg.snapshot_every_updates,
@@ -80,7 +98,10 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
-    info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), "notes-server listening");
+    if cfg.no_auth {
+        tracing::warn!("authentication disabled (--no-auth): do not expose this server to a network");
+    }
+    info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), auth = !cfg.no_auth, "notes-server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

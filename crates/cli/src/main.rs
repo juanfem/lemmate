@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use notes_core::client::{self, SyncOptions};
+use notes_core::credentials;
 use notes_core::export;
 use notes_core::import::{self, ImportOptions};
 use notes_core::local::LocalOptions;
@@ -61,6 +62,30 @@ enum Cmd {
         /// Built web client to serve at / on the relay (ui/dist).
         #[arg(long, env = "NOTES_WEB_DIR")]
         web_dir: Option<PathBuf>,
+        /// Access token (default: the one saved by `notes login` for this server).
+        #[arg(long, env = "NOTES_TOKEN")]
+        token: Option<String>,
+    },
+    /// Sign in to a server and save the session token for `sync` and the desktop app.
+    Login {
+        /// Server base URL, e.g. https://notes.example.org
+        #[arg(long, env = "NOTES_SERVER")]
+        server: String,
+        #[arg(long)]
+        email: String,
+        /// Password (prompted when omitted).
+        #[arg(long, env = "NOTES_PASSWORD")]
+        password: Option<String>,
+        /// Create the account instead of signing in (first account, or when registration is open).
+        #[arg(long)]
+        register: bool,
+        #[arg(long, env = "NOTES_CA_CERT")]
+        ca_cert: Option<PathBuf>,
+    },
+    /// Forget the saved token for a server.
+    Logout {
+        #[arg(long, env = "NOTES_SERVER")]
+        server: String,
     },
     /// Import notes from another tool into a vault directory (SPEC §11.4).
     Import {
@@ -171,10 +196,42 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir } => {
+        Cmd::Login { server, email, password, register, ca_cert } => {
+            let password = match password {
+                Some(p) => p,
+                None => rpassword::prompt_password("Password: ").context("reading password")?,
+            };
+            let agent = notes_core::tls::http_agent(ca_cert.as_deref())?;
+            let base = credentials::key(&server);
+            let path = if register { "/api/v1/auth/register" } else { "/api/v1/auth/login" };
+            let body = serde_json::json!({ "email": email, "password": password, "device": hostname() });
+            let mut resp = agent
+                .post(format!("{base}{path}"))
+                .header("content-type", "application/json")
+                .send(body.to_string().as_bytes())
+                .map_err(|e| {
+                    anyhow::anyhow!("{}: {e}", if register { "registration failed" } else { "login failed" })
+                })?;
+            let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string()?)?;
+            let token = json["token"].as_str().context("server returned no token")?;
+            credentials::save(&base, token)?;
+            println!(
+                "signed in as {} on {base}; token saved to {}",
+                json["user"]["email"].as_str().unwrap_or(&email),
+                credentials::path().display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Logout { server } => {
+            credentials::forget(&server)?;
+            println!("forgot token for {}", credentials::key(&server));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir, token } => {
             let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
             std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
-            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once, ca_cert };
+            let token = token.or_else(|| credentials::load(&server));
+            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once, ca_cert, token };
             let rt = tokio::runtime::Runtime::new()?;
             let report = match serve {
                 Some(bind) => rt.block_on(async {
@@ -216,6 +273,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "cli".into())
 }
 
 fn rusqlite_version() -> String {

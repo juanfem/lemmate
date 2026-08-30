@@ -23,6 +23,7 @@ similar = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+toml = "1"
 tower-http = { version = "0.7", features = ["fs"] }
 tracing = "0.1"
 ulid = "3"
