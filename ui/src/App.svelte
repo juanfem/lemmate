@@ -10,6 +10,7 @@
   import TagsPane from './components/TagsPane.svelte'
   import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
+  import Modal from './components/Modal.svelte'
 
   // ---- vault selection: #/v/<ULID>
   let vaultId = $state<string | null>(readHash())
@@ -62,6 +63,28 @@
   let headings: OutlineItem[] = $state([])
   let jumpTo: ((pos: number) => void) | undefined = $state()
   let tagsVersion = $state(0)
+
+  // ---- in-app prompt/confirm (native dialogs are unreliable in the Tauri webview)
+  interface AskOptions {
+    kind: 'prompt' | 'confirm'
+    title: string
+    initial?: string
+    placeholder?: string
+    confirmLabel?: string
+    danger?: boolean
+  }
+  let modal = $state<(AskOptions & { settle: (value: string | null) => void }) | null>(null)
+  /** Show a modal dialog; resolves with the entered value ('' for confirms) or null when cancelled. */
+  function ask(opts: AskOptions): Promise<string | null> {
+    return new Promise((resolve) => {
+      modal = { ...opts, settle: resolve }
+    })
+  }
+  function closeModal(value: string | null) {
+    const m = modal
+    modal = null
+    m?.settle(value)
+  }
 
   function open(id: string) {
     if (!tabs.includes(id)) tabs = [...tabs, id]
@@ -149,19 +172,21 @@
     const existing = session.idOf(path)
     open(existing ?? session.createNote(path, await template('Daily', name, `# ${name}\n\n`)))
   }
-  function renameActive() {
+  async function renameActive() {
     if (!session || !active) return
-    const current = session.pathOf(active) ?? ''
-    const next = prompt('New path', current)?.trim()
-    if (next && next !== current) session.renameNote(active, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
+    const id = active
+    const current = session.pathOf(id) ?? ''
+    const next = (await ask({ kind: 'prompt', title: 'Rename / move note', initial: current, placeholder: 'folder/note.md' }))?.trim()
+    if (next && next !== current) session?.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
   }
-  function deleteActive() {
+  async function deleteActive() {
     if (!session || !active) return
-    const path = session.pathOf(active) ?? active
-    if (confirm(`Move “${path}” to trash?`)) {
-      session.deleteNote(active)
-      close(active)
-    }
+    const id = active
+    const path = session.pathOf(id) ?? id
+    const ok = await ask({ kind: 'confirm', title: `Move “${path}” to trash?`, confirmLabel: 'Move to trash', danger: true })
+    if (ok === null) return
+    session?.deleteNote(id)
+    close(id)
   }
   async function refreshBacklinks() {
     if (!session || !active) return (backlinks = [])
@@ -173,6 +198,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (modal) return
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
     if ((e.key === 'o' || e.key === 'p') && !e.shiftKey) {
@@ -295,6 +321,19 @@
   {#if palette}
     <CommandPalette {commands} onClose={() => (palette = false)} />
   {/if}
+{/if}
+
+{#if modal}
+  <Modal
+    title={modal.title}
+    kind={modal.kind}
+    initial={modal.initial}
+    placeholder={modal.placeholder}
+    confirmLabel={modal.confirmLabel}
+    danger={modal.danger}
+    onSubmit={(value) => closeModal(value)}
+    onCancel={() => closeModal(null)}
+  />
 {/if}
 
 <style>
