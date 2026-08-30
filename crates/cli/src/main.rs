@@ -642,7 +642,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor => {
-            println!("notes {}", env!("CARGO_PKG_VERSION"));
+            println!("lemmate {}", env!("CARGO_PKG_VERSION"));
             println!("schema version: {}", lemmate_core::store::SCHEMA_VERSION);
             println!("sqlite: {}", rusqlite_version());
             for tool in ["pandoc", "quarto"] {
@@ -695,7 +695,7 @@ fn edit_in_editor(initial: &str, hint: &str) -> anyhow::Result<Option<String>> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
-    let file = std::env::temp_dir().join(format!("notes-{}-{stem}", std::process::id()));
+    let file = std::env::temp_dir().join(format!("lemmate-{}-{stem}", std::process::id()));
     std::fs::write(&file, initial).with_context(|| format!("writing {}", file.display()))?;
     let mut words = editor.split_whitespace();
     let program = words.next().unwrap_or("vi");

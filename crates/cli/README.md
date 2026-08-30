@@ -1,6 +1,6 @@
 # lemmate-cli
 
-The `notes` binary: local commands over a vault directory, server-backed commands over the REST
+The `lemmate` binary: local commands over a vault directory, server-backed commands over the REST
 API, and an MCP server for agents. See [SPEC.md](../../SPEC.md) §13 for the contract.
 
 ## CLI and MCP
@@ -82,7 +82,7 @@ Point a client at it with:
 
 | File | What it is |
 |---|---|
-| `src/main.rs` | The `notes` binary: clap definitions and command handlers. |
+| `src/main.rs` | The `lemmate` binary: clap definitions and command handlers. |
 | `src/remote.rs` | Blocking REST client (`Remote`) and the `NotesApi` trait the commands and MCP tools are written against. |
 | `src/mcp.rs` | The MCP server: a dispatcher over `serde_json::Value` plus the stdio loop. |
 | `tests/sync_e2e.rs` | Two vault directories synced through a real server. |

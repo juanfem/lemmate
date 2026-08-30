@@ -1,6 +1,6 @@
-# notes — user guide
+# Lemmate — user guide
 
-`notes` is a self-hosted, multi-user markdown notebook: you write pandoc-flavoured markdown
+Lemmate is a self-hosted, multi-user markdown notebook: you write pandoc-flavoured markdown
 with wikilinks, tags, maths and attachments, and a small Rust server keeps every device and
 collaborator in sync in real time. Editing is CRDT-based, so offline edits, edits from two
 laptops, and edits from another person merge without conflict markers. There is no plugin
@@ -18,7 +18,7 @@ Three clients, one engine:
 |---|---|---|
 | **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: the sync engine runs on your machine, owns the vault folder, and serves the same web UI on loopback. | Yes — full local copy, local search, edits journalled and pushed on reconnect. |
 | **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | No. There is no IndexedDB cache yet, so a reload while disconnected loses unsent edits. |
-| **CLI** (`notes`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
+| **CLI** (`lemmate`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
 
 ---
 
@@ -360,7 +360,7 @@ notes <command>
 `LEMMATE_SERVER`, `LEMMATE_TOKEN`, `LEMMATE_CA_CERT`, `LEMMATE_PASSWORD` and `LEMMATE_WEB_DIR` back the
 corresponding flags.
 
-The remote commands from SPEC §13.2 (`lemmate ls|cat|new|mv|rm`, `lemmate daily`, `notes vault ls`)
+The remote commands from SPEC §13.2 (`lemmate ls|cat|new|mv|rm`, `lemmate daily`, `lemmate vault ls`)
 and the stdio MCP server (`lemmate mcp`, SPEC §13.3) are being wired up now; when they land, the
 CLI's own `crates/cli/README.md` documents the MCP tool surface.
 

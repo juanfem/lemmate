@@ -7,7 +7,7 @@ terminated in front of it** — a reverse proxy on a home server, or the platfor
 fly.io.
 
 Two deployment shapes are covered here. Both use the [`Dockerfile`](../Dockerfile) at the repo
-root, which builds the web client (`ui/dist`), `lemmate-server`, and the `notes` CLI, and ships
+root, which builds the web client (`ui/dist`), `lemmate-server`, and the `lemmate` CLI, and ships
 them on `debian:bookworm-slim` as uid `10001`.
 
 ## Flags and environment variables

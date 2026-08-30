@@ -18,7 +18,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 |---|---|
 | `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials, import/export, pandoc |
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
-| `crates/cli` | `notes` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
+| `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
 | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it |
 | `ui/` | Svelte 5 + CodeMirror 6 client; `src/lib/sync.ts` (frame protocol), `vault.svelte.ts`, `editor/`, `components/` |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |

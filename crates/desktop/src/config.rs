@@ -68,15 +68,25 @@ pub fn default_config_path() -> Option<PathBuf> {
     Some(lemmate_core::paths::config_dir()?.join("desktop.toml"))
 }
 
-/// The message printed when the configuration is missing or incomplete.
+/// The message printed when the configuration is incomplete.
+///
+/// Reaching this means a *partial* configuration: one of `--vault-dir` / `--server-url` was given
+/// without the other, so `needs_setup` stepped aside for the flags. With neither of them the app
+/// opens the setup screen instead of printing this.
 pub fn format_help(path: Option<&Path>) -> String {
     let shown = path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "desktop.toml in your configuration directory".into());
     format!(
-        "lemmate-desktop has no vault to open yet (there is no setup UI in this milestone).\n\
+        "lemmate-desktop needs both a vault folder and a server URL, and only one of them was \
+         given.\n\
          \n\
-         Write {shown} like this:\n\
+         Pass the other flag as well:\n\
+         \n\
+         \x20   lemmate-desktop --vault-dir /home/you/notes --server-url https://notes.example.org\n\
+         \n\
+         Or run it with neither flag and it opens a setup screen that writes {shown} for you.\n\
+         That file looks like this, if you would rather write it yourself:\n\
          \n\
          \x20   vault_dir  = \"/home/you/notes\"              # required\n\
          \x20   server_url = \"https://notes.example.org\"    # required\n\
@@ -84,9 +94,7 @@ pub fn format_help(path: Option<&Path>) -> String {
          \x20   ca_cert    = \"/etc/ssl/private-ca.pem\"      # optional: trust a private CA\n\
          \x20   web_dir    = \"/path/to/ui/dist\"             # optional: override the bundled web assets\n\
          \n\
-         Or pass the same values as flags, which take precedence over the file:\n\
-         \n\
-         \x20   lemmate-desktop --vault-dir /home/you/lemmate --server-url https://notes.example.org\n"
+         Flags take precedence over the file.\n"
     )
 }
 
