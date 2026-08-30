@@ -59,6 +59,13 @@ jobs:
         with:
           key: desktop
 
+      # tauri-build resolves bundle.resources ("../../ui/dist/") and fails the build script if the
+      # path is missing. ui/dist is gitignored and nothing here produces a bundle, so an empty
+      # directory is all the type-check needs; the real assets only matter to `cargo tauri build`.
+      - name: Placeholder for the bundled web assets
+        shell: bash
+        run: mkdir -p ui/dist
+
       - name: cargo check
         run: cargo check -p lemmate-desktop
 
@@ -81,6 +88,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross-${{ matrix.os }}
+
+      # tauri-build resolves bundle.resources ("../../ui/dist/") and fails the build script if the
+      # path is missing. ui/dist is gitignored and nothing here produces a bundle, so an empty
+      # directory is all the type-check needs; the real assets only matter to `cargo tauri build`.
+      - name: Placeholder for the bundled web assets
+        shell: bash
+        run: mkdir -p ui/dist
 
       - name: cargo check
         run: cargo check --workspace --all-targets

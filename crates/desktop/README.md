@@ -61,8 +61,11 @@ The relay needs a directory of built web assets. They are resolved in this order
 3. `<repo>/ui/dist` relative to `CARGO_MANIFEST_DIR` — dev mode, straight from the source tree.
 
 `ui/dist` is gitignored, so `npm run build` in `ui/` must have run before `cargo tauri build`
-packages it; `cargo check`/`cargo build`/`cargo run` do not need it (only the relay does, at
-startup, and then only if you have not passed `--web-dir`).
+packages it. `cargo check`/`cargo build`/`cargo run` do not need the *assets* — only the relay
+reads them, at startup, and then only if you have not passed `--web-dir` — but they do need the
+**directory to exist**: `tauri-build` resolves `bundle.resources` and fails the build script with
+"resource path `../../ui/dist` doesn't exist" otherwise. An empty `mkdir -p ui/dist` is enough,
+which is what CI does for its type-check jobs.
 
 `build.frontendDist` points at the small placeholder in `frontend/`, **not** at `ui/dist`.
 Tauri requires `frontendDist` to exist when the crate is compiled, and this shell never loads
