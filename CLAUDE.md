@@ -47,8 +47,9 @@ CI (`.github/workflows/ci.yml`) runs exactly the checks above; keep them green b
   client updates (`commit_change` in `app.rs`); on the relay they are file operations.
 - The UI creates note text before the vault-doc entry; the server/engine tolerate that order.
 - `apply_update` reports "changed" using state vector *and* delete set — deletions are changes.
-- Commit messages: short imperative title, body explaining why; end with the Co-Authored-By and
-  Claude-Session trailers.
+- Commit messages: short imperative title, body explaining why. **No `Co-Authored-By: Claude` or
+  `Claude-Session:` trailers** — Juan does not sign commits as Claude, and the history was
+  rewritten on 2026-08-30 to remove the ones that were there.
 
 ## Environment (this machine)
 
