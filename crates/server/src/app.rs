@@ -55,6 +55,7 @@ impl Default for ServerOptions {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PurgeReport {
     pub vaults: usize,
+    pub purged_notes: usize,
     pub newly_orphaned: usize,
     pub rescued: usize,
     pub purged: usize,
@@ -69,6 +70,9 @@ pub async fn purge_orphans(
 ) -> notes_core::Result<PurgeReport> {
     let mut report = PurgeReport::default();
     let mut store = state.store.lock().await;
+    // Notes trashed longer than the grace period go for good (SPEC §9).
+    let grace_days = (grace.as_secs() / 86_400) as u32;
+    report.purged_notes = store.purge_trash(grace_days)?;
     let vaults: Vec<VaultId> = store
         .doc_ids()?
         .into_iter()
@@ -189,6 +193,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_note).put(put_note).patch(patch_note).delete(delete_note),
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily_note))
+        .route("/api/v1/vaults/{vault}/trash", get(list_trash))
+        .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
@@ -707,6 +713,55 @@ async fn daily_note(
     )
     .await?;
     Ok(Json(body))
+}
+
+#[derive(Serialize)]
+struct TrashOut {
+    id: String,
+    path: String,
+    title: Option<String>,
+    deleted_at: String,
+}
+
+async fn list_trash(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+) -> Result<Json<Vec<TrashOut>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
+    let rows = state.store.lock().await.trashed_notes(vault).map_err(internal)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(n, d)| TrashOut { id: n.id.to_string(), path: n.path, title: n.title, deleted_at: d })
+            .collect(),
+    ))
+}
+
+/// Put a trashed note back into the vault doc (SPEC §9); its content never left the journal.
+async fn restore_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+) -> Result<Json<NoteSummary>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let row = state
+        .store
+        .lock()
+        .await
+        .restore_note(id)
+        .map_err(internal)?
+        .filter(|r| r.vault_id == vault)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let vroom = vault_room(&state, vault).await?;
+    let update = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.set_path(id, &row.path),
+        RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &vroom, update).await?;
+    Ok(Json(NoteSummary { id: row.id.to_string(), path: row.path, title: row.title }))
 }
 
 // ---- REST -------------------------------------------------------------------------------------

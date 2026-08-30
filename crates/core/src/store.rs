@@ -593,6 +593,65 @@ impl Store {
         Ok(())
     }
 
+    /// Notes in the trash (soft-deleted), newest first, with when they were deleted.
+    pub fn trashed_notes(&self, vault_id: VaultId) -> Result<Vec<(NoteRow, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, vault_id, path, title, deleted_at FROM notes WHERE vault_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+        )?;
+        let rows =
+            stmt.query_map(params![vault_id.to_string()], |r| Ok((row_to_note(r)?, r.get::<_, String>(4)?)))?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Bring a trashed note back (its journal never left). Fails if the path is taken.
+    pub fn restore_note(&mut self, id: NoteId) -> Result<Option<NoteRow>> {
+        let Some(row) = self.trashed_row(id)? else { return Ok(None) };
+        let taken = self.note_by_path(row.vault_id, &row.path)?.is_some();
+        let path = if taken {
+            format!("{} (restored).md", row.path.trim_end_matches(".md"))
+        } else {
+            row.path.clone()
+        };
+        self.conn.execute(
+            "UPDATE notes SET deleted_at = NULL, path = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            params![id.to_string(), path],
+        )?;
+        self.note_by_id(id)
+    }
+
+    fn trashed_row(&self, id: NoteId) -> Result<Option<NoteRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, vault_id, path, title FROM notes WHERE id = ?1 AND deleted_at IS NOT NULL",
+                params![id.to_string()],
+                row_to_note,
+            )
+            .optional()?)
+    }
+
+    /// Forget notes trashed more than `days` ago (SPEC §9: 30-day trash). Their journal rows
+    /// are removed too.
+    pub fn purge_trash(&mut self, days: u32) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![format!("-{days} days")], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(stmt);
+        for id in &ids {
+            self.conn.execute("DELETE FROM doc_updates WHERE doc_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM doc_snapshots WHERE doc_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM note_links WHERE note_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn note_by_path(&self, vault_id: VaultId, path: &str) -> Result<Option<NoteRow>> {
         Ok(self
             .conn
@@ -1380,5 +1439,21 @@ mod tests {
         store.trash_note(a).unwrap();
         assert!(store.search("quick fox", 10).unwrap().is_empty());
         assert_eq!(store.list_notes(vault).unwrap().len(), 1);
+        assert_eq!(store.trashed_notes(vault).unwrap().len(), 1);
+        let restored = store.restore_note(a).unwrap().unwrap();
+        assert_eq!(restored.path, "Projects/Alpha.md");
+        assert_eq!(store.list_notes(vault).unwrap().len(), 2);
+        assert_eq!(store.restore_note(a).unwrap(), None, "not trashed any more");
+        store.trash_note(a).unwrap();
+        assert_eq!(store.purge_trash(30).unwrap(), 0, "too fresh");
+        store
+            .conn
+            .execute(
+                "UPDATE notes SET deleted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+                params![a.to_string()],
+            )
+            .unwrap();
+        assert_eq!(store.purge_trash(30).unwrap(), 1);
+        assert_eq!(store.note_by_id(a).unwrap(), None);
     }
 }

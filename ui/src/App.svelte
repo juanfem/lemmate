@@ -13,6 +13,7 @@
   import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
   import HistoryPane from './components/HistoryPane.svelte'
+  import TrashPane from './components/TrashPane.svelte'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
   import type { SharedNote } from './lib/api.ts'
@@ -142,7 +143,7 @@
   let jumpers: Record<number, ((pos: number) => void) | undefined> = $state({})
   let layoutRestored = $state(false)
 
-  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' | 'history' = $state('files')
+  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' | 'history' | 'trash' = $state('files')
   let switcher = $state(false)
   let palette = $state(false)
   let tagsVersion = $state(0)
@@ -304,6 +305,7 @@
     { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
+    { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
     { id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) },
     { id: 'export-html', label: 'Export note as HTML', run: () => exportActive('html') },
     { id: 'export-docx', label: 'Export note as DOCX', run: () => exportActive('docx') },
@@ -505,6 +507,8 @@
         <TagsPane vault={session.id} version={tagsVersion} onOpen={open} />
       {:else if sidebar === 'outline'}
         <OutlinePane items={headings} onJump={(pos) => jumpers[focused.id]?.(pos)} />
+      {:else if sidebar === 'trash'}
+        <TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />
       {:else if sidebar === 'history'}
         <HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />
       {:else}

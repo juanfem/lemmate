@@ -61,6 +61,8 @@ pub enum LocalQuery {
     },
     DeleteNote(NoteId),
     Daily(String),
+    Trash,
+    Restore(NoteId),
     Export {
         id: NoteId,
         format: crate::pandoc::Format,
@@ -89,6 +91,7 @@ pub enum LocalReply {
     Conflict(String),
     Done,
     Exported(Vec<u8>, &'static str),
+    Trash(Vec<(NoteRow, String)>),
     Stored {
         path: String,
         hash: String,
@@ -129,6 +132,8 @@ pub(crate) async fn serve(
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
+        .route("/api/v1/vaults/{vault}/trash", get(trash))
+        .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at))
@@ -364,6 +369,39 @@ async fn daily(
         LocalReply::Written(Some((row, content))) => {
             Ok(axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }))
         }
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Serialize)]
+struct TrashOut {
+    id: String,
+    path: String,
+    title: Option<String>,
+    deleted_at: String,
+}
+
+async fn trash(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> Resp<Vec<TrashOut>> {
+    match ask(&s, LocalQuery::Trash).await? {
+        LocalReply::Trash(rows) => Ok(axum::Json(
+            rows.into_iter()
+                .map(|(n, d)| TrashOut { id: n.id.to_string(), path: n.path, title: n.title, deleted_at: d })
+                .collect(),
+        )),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn restore(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+) -> Resp<NoteSummary> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::Restore(id)).await? {
+        LocalReply::Written(Some((row, _))) => {
+            Ok(axum::Json(NoteSummary { id: row.id.to_string(), path: row.path, title: row.title }))
+        }
+        LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

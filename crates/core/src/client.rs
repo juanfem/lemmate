@@ -1302,6 +1302,20 @@ impl Engine {
                         Err(e) => LocalReply::Error(e.to_string()),
                     }
                 }
+                LocalQuery::Trash => LocalReply::Trash(self.store.trashed_notes(self.vault_id)?),
+                LocalQuery::Restore(id) => match self.store.restore_note(id)? {
+                    Some(row) => {
+                        let doc = self.store.load_doc(DocId::Note(id))?;
+                        self.by_path.insert(row.path.clone(), id);
+                        self.notes.insert(id, NoteState { doc, path: row.path.clone() });
+                        let vu = self.vault.set_path(id, &row.path);
+                        self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
+                        self.handshake(DocId::Note(id));
+                        self.dirty.insert(id, Instant::now() - PROJECT_DEBOUNCE);
+                        LocalReply::Written(Some((row, self.notes[&id].doc.text())))
+                    }
+                    None => LocalReply::Written(None),
+                },
                 LocalQuery::Daily(date) => {
                     let path = format!("Daily/{date}.md");
                     match self.by_path.get(&path).copied() {
