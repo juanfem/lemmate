@@ -8,3 +8,6 @@
 /.cargo/
 node_modules/
 ui/dist/
+
+# Tauri build output (crates/desktop)
+/crates/desktop/gen/

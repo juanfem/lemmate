@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, untrack } from 'svelte'
   import { api, type VaultInfo, type NoteSummary } from './lib/api.ts'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { ulid } from './lib/ulid.ts'
@@ -23,10 +23,14 @@
   window.addEventListener('hashchange', () => (vaultId = readHash()))
 
   $effect(() => {
-    session?.destroy()
-    session = vaultId ? new VaultSession(vaultId) : null
-    tabs = []
-    active = null
+    const id = vaultId
+    // Only `vaultId` is a dependency: everything else here is written, not tracked.
+    untrack(() => {
+      session?.destroy()
+      session = id ? new VaultSession(id) : null
+      tabs = []
+      active = null
+    })
     if (!vaultId)
       api
         .vaults()

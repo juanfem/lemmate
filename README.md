@@ -10,6 +10,7 @@ specification; this README covers the repository and the current milestone.
 | `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, filesystem watcher, sync frame codec, markdown indexer, and the **client sync engine** (`client::run`). |
 | `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and snapshot/pruning policy, derives notes/tags/FTS from the CRDT stream, content-addressed attachment store, minimal REST (`/api/v1`). **No auth yet.** |
 | `notes-cli` | `crates/cli` | `notes` binary: `sync`, `index`, `search`, `doctor`. |
+| `notes-desktop` | `crates/desktop` | Tauri 2 desktop shell: starts the engine's local relay for a vault and opens one window on it. See [its README](crates/desktop/README.md). |
 | `notes-ui` | `ui/` | TypeScript: markdown indexer sharing the corpus with `notes-core`; later CodeMirror 6 + Svelte 5 shell. |
 | corpus | `corpus/` | Markdown conformance cases (`*.md` + expected `*.json`) that both indexers must satisfy. |
 
@@ -73,6 +74,7 @@ cargo run -p notes-cli -- index corpus/basic.md --json
 cargo run -p notes-cli -- search /path/to/vault "quick fox"
 cargo run -p notes-cli -- sync --vault /path/to/vault --server http://127.0.0.1:8080 --once
 cargo run -p notes-server -- --data-dir ./data        # http://127.0.0.1:8080/healthz
+cargo run -p notes-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
 (cd ui && npm install && npm test)                    # TypeScript side of the corpus test
 ```
 
@@ -89,4 +91,4 @@ as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 
 ## Layout to come
 
-`crates/desktop`, `crates/mobile` (Tauri 2 shells), `ui/` (TypeScript: CodeMirror 6 + Yjs).
+`crates/mobile` (Tauri 2 shell for Android/iOS), and the CodeMirror 6 + Svelte 5 app in `ui/`.
