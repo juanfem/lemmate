@@ -37,8 +37,7 @@ Every key has a flag that overrides it, and most have an environment variable:
 | `--ca-cert FILE` | `NOTES_CA_CERT` | `ca_cert` |
 | `--web-dir DIR` | `NOTES_WEB_DIR` | `web_dir` |
 
-There is no setup UI yet: if `vault_dir` or `server_url` is missing from both the file and the
-flags, the app prints the format above and exits non-zero.
+Without a usable configuration the app opens a **setup screen** in the window (vault folder, server, optional account) and writes this file for you; the flags below still override it.
 
 ## Running in development
 

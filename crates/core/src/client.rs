@@ -27,7 +27,7 @@ pub use crate::local::LocalOptions;
 use crate::local::{LocalEvent, LocalQuery, LocalReply, err_reply};
 use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
-use crate::store::{RetentionPolicy, Store, now_ms};
+use crate::store::{NoteRow, RetentionPolicy, Store, now_ms};
 use crate::sync::{Frame, Message, SyncMessage};
 use crate::vault_doc::VaultDoc;
 use crate::watcher::{FsEvent, VaultWatcher};
@@ -702,6 +702,39 @@ impl Engine {
         Ok(())
     }
 
+    /// After a rename, fix `[[links]]` in every note that pointed at the old path (SPEC §4.4).
+    /// Done by the replica that performed or first observed the rename; the edits are ordinary
+    /// CRDT changes, so replicas that do it concurrently converge on the same text.
+    fn rewrite_links(&mut self, old: &str, new: &str) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        let referrers: Vec<NoteId> = self
+            .store
+            .note_by_path(self.vault_id, new)?
+            .map(|row| self.store.backlinks_to(&NoteRow { path: old.to_owned(), ..row }))
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        for rid in referrers {
+            let Some(state) = self.notes.get(&rid) else { continue };
+            let text = state.doc.text();
+            if let Some(fixed) = markdown::rewrite_wikilinks(&text, old, new) {
+                let path = state.path.clone();
+                let update = state.doc.set_text(&fixed);
+                self.store.append_update(DocId::Note(rid), &update, None)?;
+                self.send_update(DocId::Note(rid), update);
+                self.store.set_projected_text(DocId::Note(rid), &path, &fixed)?;
+                self.proj.write(&path, &fixed)?;
+                self.index(rid, &path, &fixed)?;
+                info!(note = %path, %old, %new, "links rewritten after rename");
+            }
+        }
+        Ok(())
+    }
+
     fn apply_local_rename(&mut self, id: NoteId, new_rel: &str) -> Result<()> {
         let old = self.notes[&id].path.clone();
         self.by_path.remove(&old);
@@ -713,7 +746,8 @@ impl Engine {
         let vu = self.vault.set_path(id, new_rel);
         self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
         // The file at the new path may also carry an edit relative to what we last projected.
-        self.local_edit(id, new_rel)
+        self.local_edit(id, new_rel)?;
+        self.rewrite_links(&old, new_rel)
     }
 
     /// Write a note's current text to disk (remote change or post-merge write-back).
@@ -1071,6 +1105,7 @@ impl Engine {
                     self.index(id, &path, &text)?;
                     self.dirty.insert(id, Instant::now());
                     info!(from = %old, to = %path, "moved by remote");
+                    self.rewrite_links(&old, &path)?;
                 }
                 Some(_) => {}
             }
@@ -1256,6 +1291,17 @@ impl Engine {
                 LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
                 LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
                 LocalQuery::DeleteNote(id) => self.api_delete(id)?,
+                LocalQuery::Export { id, format } => {
+                    let Some(doc) = self.doc_for(id) else { return Ok(LocalReply::Written(None)) };
+                    let opts = crate::pandoc::ExportOptions {
+                        resource_dir: Some(self.proj.root().to_path_buf()),
+                        ..Default::default()
+                    };
+                    match crate::pandoc::render(&doc.text(), format, &opts) {
+                        Ok((bytes, mime)) => LocalReply::Exported(bytes, mime),
+                        Err(e) => LocalReply::Error(e.to_string()),
+                    }
+                }
                 LocalQuery::Daily(date) => {
                     let path = format!("Daily/{date}.md");
                     match self.by_path.get(&path).copied() {

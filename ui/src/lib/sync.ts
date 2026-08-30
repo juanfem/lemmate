@@ -10,6 +10,7 @@ import { decodeFrame, encodeFrame } from './frames.ts'
 
 const MSG_SYNC = 0
 const MSG_AWARENESS = 1
+const MSG_AUTH = 2
 
 export type SyncStatus = 'connecting' | 'online' | 'offline'
 
@@ -29,6 +30,8 @@ export class SyncClient {
   status: SyncStatus = 'connecting'
   onStatus: (s: SyncStatus) => void = () => {}
   onSynced: (docId: string) => void = () => {}
+  /** The server refused a read or write on a doc (SPEC §11.2). */
+  onDenied: (docId: string, reason: string) => void = () => {}
   private url: string
 
   constructor(url: string) {
@@ -164,6 +167,12 @@ export class SyncClient {
       case MSG_AWARENESS:
         awarenessProtocol.applyAwarenessUpdate(entry.awareness, decoding.readVarUint8Array(decoder), this)
         break
+      case MSG_AUTH: {
+        // yrs: varint 0 = denied + reason string, 1 = granted
+        const kind = decoding.readVarUint(decoder)
+        if (kind === 0) this.onDenied(frame.docId, decoding.readVarString(decoder))
+        break
+      }
       default:
         break
     }

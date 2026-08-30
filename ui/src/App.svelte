@@ -515,6 +515,13 @@
           {#if session.bookmarks.length === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
         </nav>
       {/if}
+      {#if session.denied}
+        <div class="denied">
+          Permission denied by the server ({session.denied.reason}) — your last change was not saved.
+          <button class="link" onclick={() => location.reload()}>Reload</button>
+          <button class="link" onclick={() => (session!.denied = null)}>Dismiss</button>
+        </div>
+      {/if}
       <footer class="status" class:offline={session.status !== 'online'}>
         <span class="dot"></span>
         {session.status}{#if session.status === 'online' && !session.vaultSynced} · syncing…{/if}
@@ -611,7 +618,7 @@
     background: var(--panel);
     border-right: 1px solid var(--border);
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto 1fr auto auto;
     min-height: 0;
   }
   .side-tabs {
@@ -637,6 +644,13 @@
   }
   .spacer {
     flex: 1;
+  }
+  .denied {
+    font-size: 0.8rem;
+    background: #fee2e2;
+    color: #991b1b;
+    padding: 0.4rem 0.6rem;
+    border-top: 1px solid #fca5a5;
   }
   .status {
     font-size: 0.75rem;

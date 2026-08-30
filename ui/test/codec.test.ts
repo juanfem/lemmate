@@ -22,3 +22,13 @@ test('ulids are well-formed, unique, and time-ordered', () => {
   const many = new Set(Array.from({ length: 200 }, () => ulid()))
   assert.equal(many.size, 200)
 })
+
+test('wikilink rewrite mirrors the Rust rules', async () => {
+  const { rewriteWikilinks } = await import('../src/lib/links.ts')
+  assert.equal(
+    rewriteWikilinks('see [[Projects/Plan]] and [[Plan|the plan]] and [[Projects/Plan.md#Goals]] but not [[Planning]]', 'Projects/Plan.md', 'Archive/Roadmap.md'),
+    'see [[Archive/Roadmap]] and [[Roadmap|the plan]] and [[Archive/Roadmap#Goals]] but not [[Planning]]',
+  )
+  assert.equal(rewriteWikilinks('[[Plan]] [[Projects/Plan]]', 'Projects/Plan.md', 'Done/Plan.md'), '[[Plan]] [[Done/Plan]]')
+  assert.equal(rewriteWikilinks('nothing', 'a.md', 'b.md'), null)
+})

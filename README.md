@@ -22,6 +22,9 @@ Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + liv
 `NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for
 headless-Chrome smoke runs against a running server.
 
+User guide (writing, organising, sharing, shortcuts, CLI, export, Obsidian migration):
+[`docs/guide.md`](docs/guide.md).
+
 ## Accounts and access
 
 `notes-server` has accounts on by default. The first account to register becomes the admin;

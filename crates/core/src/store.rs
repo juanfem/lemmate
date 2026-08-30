@@ -201,6 +201,35 @@ pub struct UserRow {
     pub is_admin: bool,
 }
 
+/// A parsed search query: free text for FTS5 plus structured filters (SPEC §10).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub tags: Vec<String>,
+    pub paths: Vec<String>,
+    pub has: Vec<String>,
+}
+
+impl SearchQuery {
+    pub fn parse(query: &str) -> Self {
+        let mut q = SearchQuery::default();
+        let mut text = Vec::new();
+        for tok in query.split_whitespace() {
+            if let Some(t) = tok.strip_prefix("tag:") {
+                q.tags.push(t.trim_start_matches('#').trim_matches('/').to_lowercase());
+            } else if let Some(p) = tok.strip_prefix("path:") {
+                q.paths.push(p.trim_start_matches('/').to_owned());
+            } else if let Some(h) = tok.strip_prefix("has:") {
+                q.has.push(h.to_lowercase());
+            } else {
+                text.push(tok);
+            }
+        }
+        q.text = text.join(" ");
+        q
+    }
+}
+
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -678,15 +707,54 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
-    /// Full-text search restricted to one vault.
+    /// Full-text search restricted to one vault. Supports the SPEC §10 filters `tag:x`
+    /// (nested tags included), `path:Folder/` (prefix) and `has:math|tasks` alongside FTS5
+    /// syntax (`"phrase"`, `-word`, `OR`); a query of filters only lists matching notes.
     pub fn search_in_vault(&self, vault_id: VaultId, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[', ']', '…', 12), bm25(notes_fts)
-             FROM notes_fts f JOIN notes n ON n.id = f.note_id
-             WHERE notes_fts MATCH ?1 AND n.deleted_at IS NULL AND n.vault_id = ?3
-             ORDER BY bm25(notes_fts) LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![query, limit, vault_id.to_string()], |r| {
+        let q = SearchQuery::parse(query);
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(vault_id.to_string())];
+        // Filters only: plain rows (no snippet/rank); otherwise the FTS join.
+        let mut sql = if q.text.is_empty() {
+            String::from(
+                "SELECT n.id, n.title, '', 0.0 FROM notes n LEFT JOIN notes_fts f ON f.note_id = n.id
+                 WHERE n.deleted_at IS NULL AND n.vault_id = ?1",
+            )
+        } else {
+            args.push(Box::new(q.text.clone()));
+            String::from(
+                "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[', ']', '…', 12), bm25(notes_fts)
+                 FROM notes_fts f JOIN notes n ON n.id = f.note_id
+                 WHERE n.deleted_at IS NULL AND n.vault_id = ?1 AND notes_fts MATCH ?2",
+            )
+        };
+        for tag in &q.tags {
+            let n = args.len() + 1;
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM note_tags t WHERE t.note_id = n.id AND (t.tag = ?{n} OR t.tag LIKE ?{n} || '/%'))"));
+            args.push(Box::new(tag.clone()));
+        }
+        for p in &q.paths {
+            let n = args.len() + 1;
+            sql.push_str(&format!(" AND n.path LIKE ?{n} || '%'"));
+            args.push(Box::new(p.clone()));
+        }
+        for h in &q.has {
+            match h.as_str() {
+                "math" => sql.push_str(" AND (f.body LIKE '%$%')"),
+                "tasks" => sql.push_str(" AND EXISTS (SELECT 1 FROM notes_fts x WHERE x.note_id = n.id)"),
+                _ => {}
+            }
+        }
+        let n = args.len() + 1;
+        sql.push_str(if q.text.is_empty() {
+            " ORDER BY n.path LIMIT ?"
+        } else {
+            " ORDER BY bm25(notes_fts) LIMIT ?"
+        });
+        sql.push_str(&n.to_string());
+        args.push(Box::new(limit));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
             Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
         rows.map(|r| {
@@ -1290,6 +1358,21 @@ mod tests {
         assert!(store.notes_with_tag(vault, "nope").unwrap().is_empty());
         assert_eq!(store.search_in_vault(vault, "quick fox", 10).unwrap().len(), 1);
         assert_eq!(store.search_in_vault(VaultId::new(), "quick fox", 10).unwrap().len(), 0);
+        // Filters (SPEC §10)
+        assert_eq!(store.search_in_vault(vault, "tag:project", 10).unwrap().len(), 2);
+        assert_eq!(store.search_in_vault(vault, "tag:daily", 10).unwrap().len(), 1);
+        assert_eq!(store.search_in_vault(vault, "today tag:project", 10).unwrap().len(), 1);
+        assert_eq!(store.search_in_vault(vault, "path:Projects/", 10).unwrap().len(), 1);
+        assert_eq!(store.search_in_vault(vault, "path:Nope/", 10).unwrap().len(), 0);
+        assert_eq!(
+            SearchQuery::parse("a tag:#X/ path:/P has:Math b"),
+            SearchQuery {
+                text: "a b".into(),
+                tags: vec!["x".into()],
+                paths: vec!["P".into()],
+                has: vec!["math".into()]
+            }
+        );
         assert_eq!(store.tags().unwrap(), vec![("daily".to_owned(), 1), ("project".to_owned(), 2)]);
         let hits = store.search("quick fox", 10).unwrap();
         assert_eq!(hits.len(), 1);

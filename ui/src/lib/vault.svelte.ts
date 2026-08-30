@@ -3,7 +3,10 @@
 
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
+import { IndexeddbPersistence } from 'y-indexeddb'
 import { SyncClient, type SyncStatus } from './sync.ts'
+import { rewriteWikilinks } from './links.ts'
+export { rewriteWikilinks }
 import { ulid } from './ulid.ts'
 
 export interface NoteEntry {
@@ -32,6 +35,8 @@ export class VaultSession {
   bookmarks: Bookmark[] = $state([])
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
+  /** Last permission denial from the server, for the shell to show. */
+  denied: { docId: string; reason: string } | null = $state(null)
 
   /** Without the vault doc: for notes shared directly (SPEC §11.2), which grant only the note. */
   readonly noteOnly: boolean
@@ -45,6 +50,9 @@ export class VaultSession {
     this.client.onSynced = (docId) => {
       if (docId === this.vaultDocId) this.vaultSynced = true
     }
+    this.client.onDenied = (docId, reason) => {
+      this.denied = { docId, reason }
+    }
     this.notesMap = this.vaultDoc.getMap<string>('notes')
     this.attachmentsMap = this.vaultDoc.getMap<string>('attachments')
     this.bookmarksArr = this.vaultDoc.getArray<Bookmark>('bookmarks')
@@ -56,8 +64,19 @@ export class VaultSession {
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
     this.bookmarksArr.observe(refresh)
-    if (!this.noteOnly) this.client.open(this.vaultDocId, this.vaultDoc)
-    else this.vaultSynced = true
+    if (!this.noteOnly) {
+      this.cache(this.vaultDocId, this.vaultDoc)
+      this.client.open(this.vaultDocId, this.vaultDoc)
+    } else this.vaultSynced = true
+  }
+
+  /** Offline cache (SPEC §6.4): docs opened here stay readable/editable after a reload. */
+  private cache(docId: string, doc: Y.Doc) {
+    try {
+      new IndexeddbPersistence(`notes:${this.id}:${docId}`, doc)
+    } catch {
+      /* private mode or no IndexedDB: online-only */
+    }
   }
 
   get vaultDocId() {
@@ -88,6 +107,7 @@ export class VaultSession {
     let e = this.open.get(id)
     if (!e) {
       const doc = new Y.Doc()
+      this.cache(id, doc)
       const awareness = this.client.open(id, doc)
       e = { doc, awareness, refs: 0 }
       this.open.set(id, e)
@@ -118,8 +138,35 @@ export class VaultSession {
     return id
   }
 
-  renameNote(id: string, path: string) {
-    if (this.notesMap.get(id) !== path) this.notesMap.set(id, path)
+  /** Rename/move, then rewrite `[[links]]` in referring notes (SPEC §4.4). */
+  async renameNote(id: string, path: string) {
+    const old = this.notesMap.get(id)
+    if (old === path) return
+    this.notesMap.set(id, path)
+    if (!old) return
+    let referrers: { id: string }[] = []
+    try {
+      referrers = await (await fetch(`/api/v1/vaults/${this.id}/notes/${id}/backlinks`)).json()
+    } catch {
+      return
+    }
+    for (const r of referrers) {
+      if (r.id === id) continue
+      const { doc, release } = this.acquire(r.id)
+      try {
+        await new Promise<void>((resolve) => {
+          if (this.client.isSynced(r.id)) return resolve()
+          const t = setTimeout(resolve, 3000)
+          const once = () => (clearTimeout(t), doc.getText('content').unobserve(once), resolve())
+          doc.getText('content').observe(once)
+        })
+        const text = doc.getText('content')
+        const fixed = rewriteWikilinks(text.toString(), old, path)
+        if (fixed !== null) doc.transact(() => (text.delete(0, text.length), text.insert(0, fixed)))
+      } finally {
+        release()
+      }
+    }
   }
 
   deleteNote(id: string) {

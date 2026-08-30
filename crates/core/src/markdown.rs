@@ -220,6 +220,51 @@ fn parse_wikilink(inner: &str, embed: bool) -> WikiLink {
     WikiLink { target: target.trim().to_owned(), heading, label, embed }
 }
 
+/// Rewrite `[[old]]`-style links that resolve to `old_path` so they point at `new_path`
+/// (SPEC §4.4: renames update links in referring notes). Matches the same forms the resolver
+/// accepts — full path, path without extension, basename without extension — and keeps any
+/// `#heading` / `|label` suffix. Returns `None` when nothing changed.
+pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str) -> Option<String> {
+    let strip = |p: &str| p.trim_end_matches(".md").trim_end_matches(".qmd").to_owned();
+    let (old_stem, new_stem) = (strip(old_path), strip(new_path));
+    let old_base = old_stem.rsplit('/').next().unwrap_or(&old_stem).to_owned();
+    let new_base = new_stem.rsplit('/').next().unwrap_or(&new_stem).to_owned();
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut rest = text;
+    while let Some(i) = rest.find("[[") {
+        out.push_str(&rest[..i + 2]);
+        rest = &rest[i + 2..];
+        let Some(end) = rest.find("]]") else { break };
+        let inner = &rest[..end];
+        let (target, suffix) = match inner.find(['#', '|']) {
+            Some(k) => (&inner[..k], &inner[k..]),
+            None => (inner, ""),
+        };
+        let t = target.trim();
+        let replacement = if t == old_path || t == old_stem {
+            Some(new_stem.as_str())
+        } else if t == old_base && old_base != new_base {
+            // A bare basename keeps working only while the basename is unique; rewrite it to
+            // the new basename so the link still resolves.
+            Some(new_base.as_str())
+        } else {
+            None
+        };
+        match replacement {
+            Some(r) => {
+                out.push_str(r);
+                out.push_str(suffix);
+                changed = true;
+            }
+            None => out.push_str(inner),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
 fn push_tag(tags: &mut Vec<String>, tag: &str) {
     let t = tag.trim().trim_matches('/').to_lowercase();
     if !t.is_empty() && !tags.contains(&t) {
@@ -254,6 +299,22 @@ mod tests {
         assert_eq!(ix.headings.len(), 2);
         assert_eq!(ix.front_matter.as_ref().unwrap().aliases, vec!["nick"]);
         assert!(ix.plain_text.contains("Heading One"));
+    }
+
+    #[test]
+    fn rewrites_links_on_rename() {
+        let t = "see [[Projects/Plan]] and [[Plan|the plan]] and [[Projects/Plan.md#Goals]] but not [[Planning]] or `[[Plan]]`\n";
+        let r = rewrite_wikilinks(t, "Projects/Plan.md", "Archive/Roadmap.md").unwrap();
+        assert_eq!(
+            r,
+            "see [[Archive/Roadmap]] and [[Roadmap|the plan]] and [[Archive/Roadmap#Goals]] but not [[Planning]] or `[[Roadmap]]`\n"
+        );
+        assert_eq!(rewrite_wikilinks("nothing here", "a.md", "b.md"), None);
+        // Same basename, different folder: bare basenames stay.
+        assert_eq!(
+            rewrite_wikilinks("[[Plan]] [[Projects/Plan]]", "Projects/Plan.md", "Done/Plan.md").unwrap(),
+            "[[Plan]] [[Done/Plan]]"
+        );
     }
 
     #[test]

@@ -61,6 +61,10 @@ pub enum LocalQuery {
     },
     DeleteNote(NoteId),
     Daily(String),
+    Export {
+        id: NoteId,
+        format: crate::pandoc::Format,
+    },
     /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
     StoreAttachment {
         name: String,
@@ -84,6 +88,7 @@ pub enum LocalReply {
     Written(Option<(NoteRow, String)>),
     Conflict(String),
     Done,
+    Exported(Vec<u8>, &'static str),
     Stored {
         path: String,
         hash: String,
@@ -123,6 +128,7 @@ pub(crate) async fn serve(
             get(note).put(replace_note).patch(rename_note).delete(delete_note),
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
+        .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at))
@@ -359,6 +365,38 @@ async fn daily(
             Ok(axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }))
         }
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportIn {
+    format: String,
+}
+
+/// Export through pandoc with the vault's `export/` folder as resources (SPEC §12).
+async fn export_note(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<ExportIn>,
+) -> std::result::Result<impl IntoResponse, StatusCode> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let format = crate::pandoc::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    if !crate::pandoc::pandoc_available(None) {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    match ask(&s, LocalQuery::Export { id, format }).await? {
+        LocalReply::Exported(bytes, mime) => Ok((
+            [
+                (header::CONTENT_TYPE, mime.to_owned()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"note.{}\"", format.extension()),
+                ),
+            ],
+            bytes,
+        )),
+        LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
+        _ => Err(StatusCode::UNPROCESSABLE_ENTITY),
     }
 }
 

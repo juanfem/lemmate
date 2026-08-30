@@ -22,14 +22,14 @@ either way. From `crates/server/src/main.rs`:
 | `--web-dir <DIR>` | `NOTES_WEB_DIR` | unset (API + sync only, no web client) |
 | `--no-auth` | `NOTES_NO_AUTH` | off |
 | `--allow-registration` | `NOTES_ALLOW_REGISTRATION` | off |
+| `--pandoc PATH` | `NOTES_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
 | `--secure-cookies` | `NOTES_SECURE_COOKIES` | off |
 | `--snapshot-every-updates <N>` | `NOTES_SNAPSHOT_EVERY_UPDATES` | `500` |
 | `--snapshot-every-minutes <N>` | `NOTES_SNAPSHOT_EVERY_MINUTES` | `10` |
 | `--retain-days <N>` | `NOTES_RETAIN_DAYS` | `90` |
 | `--attachment-grace-days <N>` | `NOTES_ATTACHMENT_GRACE_DAYS` | `30` |
 
-The four boolean flags accept **only `true` or `false`** when set through the environment —
-`NOTES_NO_AUTH=1` is not a synonym for `true`, it is a startup error:
+The four boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
 
 ```
 error: invalid value '1' for '--no-auth'
