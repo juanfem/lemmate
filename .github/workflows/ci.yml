@@ -86,7 +86,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: cargo test (paths)
-        run: cargo test -p lemmate-core credentials::
+        run: "cargo test -p lemmate-core credentials::"
 
   # Svelte type-check plus the markdown corpus tests. ui/test also holds live end-to-end tests
   # that skip themselves unless LEMMATE_SERVER_BIN / LEMMATE_CLI_BIN point at built binaries, so
