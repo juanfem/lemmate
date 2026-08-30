@@ -1,8 +1,8 @@
 // Live preview (SPEC §8): the source is always the document; markup is hidden and rendered in
 // place, and revealed again on any line the selection touches. Lossless by construction.
 
-import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
-import { RangeSetBuilder, type EditorState } from '@codemirror/state'
+import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
+import { StateField, type EditorState } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
@@ -112,6 +112,51 @@ class CheckboxWidget extends WidgetType {
 
 const hide = Decoration.replace({})
 
+/** Collapsed front matter: a one-line summary of the properties (SPEC §8). */
+class FrontMatterWidget extends WidgetType {
+  readonly summary: string
+  constructor(summary: string) {
+    super()
+    this.summary = summary
+  }
+  eq(other: FrontMatterWidget) {
+    return other.summary === this.summary
+  }
+  toDOM() {
+    const el = document.createElement('div')
+    el.className = 'cm-frontmatter'
+    el.textContent = this.summary || 'properties'
+    el.title = 'Front matter — click to edit'
+    return el
+  }
+  ignoreEvent() {
+    return false
+  }
+}
+
+function frontMatterRange(state: EditorState): { from: number; to: number; body: string } | null {
+  const first = state.doc.line(1)
+  if (first.text.trim() !== '---') return null
+  for (let n = 2; n <= Math.min(state.doc.lines, 200); n++) {
+    const line = state.doc.line(n)
+    if (line.text.trim() === '---' || line.text.trim() === '...') {
+      return { from: first.from, to: line.to, body: state.sliceDoc(first.to + 1, line.from) }
+    }
+  }
+  return null
+}
+
+function frontMatterSummary(body: string): string {
+  const keys: string[] = []
+  for (const line of body.split('\n')) {
+    const m = /^([A-Za-z_][\w-]*):\s*(.*)$/u.exec(line)
+    if (!m) continue
+    const v = m[2]!.trim()
+    keys.push(v && m[1] !== 'id' ? `${m[1]}: ${v.length > 40 ? v.slice(0, 40) + '…' : v}` : m[1]!)
+  }
+  return keys.join('   ·   ')
+}
+
 /** Does any selection range touch the lines spanned by [from, to]? */
 function revealed(state: EditorState, from: number, to: number): boolean {
   const a = state.doc.lineAt(from).from
@@ -119,16 +164,17 @@ function revealed(state: EditorState, from: number, to: number): boolean {
   return state.selection.ranges.some((r) => r.from <= b && r.to >= a)
 }
 
-function build(view: EditorView, opts: LivePreviewOptions): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>()
-  const { state } = view
+function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
   const items: { from: number; to: number; deco: Decoration }[] = []
   const push = (from: number, to: number, deco: Decoration) => items.push({ from, to, deco })
 
-  for (const { from, to } of view.visibleRanges) {
+  const fm = frontMatterRange(state)
+  if (fm && !revealed(state, fm.from, fm.to)) {
+    push(fm.from, fm.to, Decoration.replace({ widget: new FrontMatterWidget(frontMatterSummary(fm.body)), block: true }))
+  }
+
+  {
     syntaxTree(state).iterate({
-      from,
-      to,
       enter: (node) => {
         const n = node.node
         switch (node.name) {
@@ -217,9 +263,16 @@ function build(view: EditorView, opts: LivePreviewOptions): DecorationSet {
             push(node.from, node.to, Decoration.replace({ widget: new CheckboxWidget(checked) }))
             break
           }
-          case 'Blockquote':
-            push(node.from, node.from, Decoration.line({ class: 'cm-blockquote' }))
+          case 'Blockquote': {
+            // One line class per line of the quote; hide the `> ` markers unless revealed.
+            const fromLine = state.doc.lineAt(node.from).number
+            const toLine = state.doc.lineAt(node.to).number
+            for (let ln = fromLine; ln <= toLine; ln++) push(state.doc.line(ln).from, state.doc.line(ln).from, Decoration.line({ class: 'cm-blockquote' }))
+            if (!revealed(state, node.from, node.to)) {
+              for (const m of n.getChildren('QuoteMark')) push(m.from, Math.min(m.to + 1, state.doc.lineAt(m.from).to), hide)
+            }
             break
+          }
           case 'FencedCode':
             push(node.from, node.from, Decoration.line({ class: 'cm-codeblock-start' }))
             break
@@ -229,15 +282,20 @@ function build(view: EditorView, opts: LivePreviewOptions): DecorationSet {
       },
     })
   }
-  // RangeSetBuilder requires sorted, non-overlapping input; sort by from then by "line before mark".
-  items.sort((a, b) => a.from - b.from || a.to - b.to || (a.deco.spec.class ? -1 : 1))
-  let last = -1
+  // Replacements may not overlap each other (nested markup: the outer one wins); marks and
+  // line decorations may. `Decoration.set(…, true)` sorts by position and side for us.
+  items.sort((a, b) => a.from - b.from || b.to - a.to)
+  const ranges = []
+  let replacedUntil = -1
   for (const it of items) {
-    if (it.from < last) continue // overlapping (nested markup); outer wins
-    builder.add(it.from, it.to, it.deco)
-    last = Math.max(last, it.to)
+    const isReplace = it.deco.spec.widget !== undefined || it.deco.spec.block !== undefined || it.deco === hide
+    if (isReplace) {
+      if (it.from < replacedUntil) continue
+      replacedUntil = Math.max(replacedUntil, it.to)
+    }
+    ranges.push(it.deco.range(it.from, it.to))
   }
-  return builder.finish()
+  return Decoration.set(ranges, true)
 }
 
 function hideMarks(n: SyntaxNode, push: (f: number, t: number, d: Decoration) => void) {
@@ -247,19 +305,15 @@ function hideMarks(n: SyntaxNode, push: (f: number, t: number, d: Decoration) =>
 }
 
 export function livePreview(opts: LivePreviewOptions) {
+  // A StateField rather than a ViewPlugin: block-level replacements (math blocks, folded
+  // front matter) are only allowed from fields. Recomputed on document or selection changes.
+  const field = StateField.define<DecorationSet>({
+    create: (state) => build(state, opts),
+    update: (deco, tr) => (tr.docChanged || tr.selection ? build(tr.state, opts) : deco),
+    provide: (f) => EditorView.decorations.from(f),
+  })
   return [
-    ViewPlugin.fromClass(
-      class {
-        decorations: DecorationSet
-        constructor(view: EditorView) {
-          this.decorations = build(view, opts)
-        }
-        update(u: ViewUpdate) {
-          if (u.docChanged || u.viewportChanged || u.selectionSet) this.decorations = build(u.view, opts)
-        }
-      },
-      { decorations: (v) => v.decorations },
-    ),
+    field,
     // Toggle task checkboxes by clicking the rendered box.
     EditorView.domEventHandlers({
       mousedown(event, view) {

@@ -28,6 +28,8 @@
     untrack(() => {
       session?.destroy()
       session = id ? new VaultSession(id) : null
+      // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
+      ;(window as unknown as { notes?: unknown }).notes = { session }
       tabs = []
       active = null
     })

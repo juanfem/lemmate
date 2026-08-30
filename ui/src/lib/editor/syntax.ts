@@ -12,16 +12,16 @@ const TAG_CHAR = /[\p{Alphabetic}\p{N}_\-/]/u
 const ALNUM = /[\p{Alphabetic}\p{N}]/u
 
 function parseWikiLink(cx: InlineContext, next: number, pos: number): number {
-  // "[["
-  if (next !== 91 || cx.char(pos + 1) !== 91) return -1
-  const close = cx.slice(pos + 2, cx.end).indexOf(']]')
+  // Triggered on "!" (so we beat the built-in Image parser to "![[") or on "[[".
+  const embed = next === 33
+  const open = embed ? pos + 1 : pos
+  if (cx.char(open) !== 91 || cx.char(open + 1) !== 91) return -1
+  const close = cx.slice(open + 2, cx.end).indexOf(']]')
   if (close <= 0) return -1
-  const inner = cx.slice(pos + 2, pos + 2 + close)
+  const inner = cx.slice(open + 2, open + 2 + close)
   if (inner.includes('[[') || inner.includes('\n')) return -1
-  const embed = pos > cx.offset && cx.char(pos - 1) === 33
-  const from = embed ? pos - 1 : pos
-  const to = pos + 2 + close + 2
-  return cx.addElement(cx.elt(embed ? 'WikiEmbed' : 'WikiLink', from, to))
+  const to = open + 2 + close + 2
+  return cx.addElement(cx.elt(embed ? 'WikiEmbed' : 'WikiLink', pos, to))
 }
 
 function parseTag(cx: InlineContext, next: number, pos: number): number {

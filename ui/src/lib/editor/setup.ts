@@ -40,6 +40,7 @@ const theme = EditorView.theme({
   '.cm-h3': { fontSize: '1.25em' },
   '.cm-h4': { fontSize: '1.1em' },
   '.cm-blockquote': { borderLeft: '3px solid var(--accent)', paddingLeft: '0.75em', color: 'var(--muted)' },
+  '.cm-frontmatter': { fontFamily: 'var(--ui)', fontSize: '0.8em', color: 'var(--muted)', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.3em 0.7em', margin: '0 0 1em', cursor: 'text' },
   '.cm-tag': { color: 'var(--accent)', background: 'var(--accent-bg)', borderRadius: '999px', padding: '0 0.4em' },
   '.cm-wikilink': { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer' },
   '.cm-wikilink:hover': { textDecoration: 'underline' },
@@ -55,8 +56,16 @@ export interface EditorOptions extends LivePreviewOptions {
 }
 
 export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Awareness, opts: EditorOptions): EditorView {
+  // Start after the front matter (if any) so it opens folded and the cursor lands on prose.
+  const initial = text.toString()
+  let cursor = 0
+  if (initial.startsWith('---\n')) {
+    const close = initial.indexOf('\n---', 4)
+    if (close !== -1) cursor = Math.min(initial.length, close + 4 + (initial[close + 4] === '\n' ? 1 : 0))
+  }
   const state = EditorState.create({
-    doc: text.toString(),
+    doc: initial,
+    selection: { anchor: cursor },
     extensions: [
       history(),
       drawSelection(),

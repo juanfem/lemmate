@@ -114,6 +114,23 @@
     })
     view.focus()
     reportHeadings(view)
+    // If the doc was still empty (not yet synced), move the cursor past the front matter once
+    // the content lands, so it opens folded rather than revealed by a cursor stuck at 0.
+    const ytext = acquired.doc.getText('content')
+    if (ytext.length === 0) {
+      const once = () => {
+        ytext.unobserve(once)
+        const v = view
+        if (!v || v.state.selection.main.head !== 0) return
+        const text = v.state.doc.toString()
+        if (!text.startsWith('---\n')) return
+        const close = text.indexOf('\n---', 4)
+        if (close === -1) return
+        const pos = Math.min(text.length, close + 4 + (text[close + 4] === '\n' ? 1 : 0))
+        v.dispatch({ selection: { anchor: pos } })
+      }
+      ytext.observe(once)
+    }
     jumpTo = (pos: number) => {
       if (!view) return
       view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 20 }) })
