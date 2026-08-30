@@ -14,6 +14,7 @@ import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { noteSyntax } from './syntax.ts'
 import { livePreview, type LivePreviewOptions } from './livePreview.ts'
+import { noteCompletions, type CompletionSources } from './complete.ts'
 
 const highlight = HighlightStyle.define([
   { tag: t.heading, fontWeight: '600' },
@@ -49,10 +50,19 @@ const theme = EditorView.theme({
   '.cm-embed-image': { maxWidth: '100%', display: 'block', margin: '0.5em 0' },
   '.cm-task-checkbox': { marginRight: '0.4em', verticalAlign: 'middle' },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },
+  '.cm-tooltip.cm-tooltip-autocomplete': { fontFamily: 'var(--ui)', fontSize: '0.85em', border: '1px solid var(--border)', background: 'var(--panel)', borderRadius: '6px' },
+  '.cm-tooltip-autocomplete ul li[aria-selected]': { background: 'var(--accent-bg)', color: 'inherit' },
+  '.cm-callout': { borderLeft: '3px solid var(--accent)', background: 'var(--accent-bg)', paddingLeft: '0.75em' },
+  '.cm-callout-title': { fontWeight: '600', fontFamily: 'var(--ui)', fontSize: '0.9em' },
+  '.cm-callout-fence': { color: 'var(--muted)', fontSize: '0.8em' },
+  '.cm-codeblock': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', paddingLeft: '0.75em', paddingRight: '0.75em' },
+  '.cm-codeblock-fence': { color: 'var(--muted)', fontSize: '0.8em' },
+  '.cm-table-row': { fontFamily: 'var(--mono)', fontSize: '0.9em' },
 })
 
 export interface EditorOptions extends LivePreviewOptions {
   extra?: Extension[]
+  complete?: CompletionSources
 }
 
 export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Awareness, opts: EditorOptions): EditorView {
@@ -80,6 +90,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       syntaxHighlighting(highlight),
       theme,
       livePreview(opts),
+      ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, indentWithTab]),
       ...(opts.extra ?? []),

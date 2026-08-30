@@ -111,6 +111,10 @@
       openLink,
       embedUrl,
       extra: [fileHandlers, headingWatcher],
+      complete: {
+        notes: () => session.notes.map((n) => n.path),
+        tags: async () => (await api.tags(session.id).catch(() => [])).map((t) => t.tag),
+      },
     })
     view.focus()
     reportHeadings(view)

@@ -100,17 +100,54 @@
     tabs = tabs.filter((t) => t !== id)
     if (active === id) active = tabs[Math.min(i, tabs.length - 1)] ?? null
   }
-  function create(path: string) {
-    if (!session) return
-    open(session.createNote(path, `# ${displayName(path)}\n\n`))
+  /** Templates (SPEC §9): `Templates/<name>.md` with {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. */
+  async function template(name: string, title: string, fallback: string): Promise<string> {
+    if (!session) return fallback
+    const id = session.idOf(`Templates/${name}.md`)
+    if (!id) return fallback
+    const { doc, release } = session.acquire(id)
+    try {
+      await new Promise<void>((resolve) => {
+        if (doc.getText('content').length > 0 || session!.client.isSynced(id)) return resolve()
+        const t = setTimeout(resolve, 3000)
+        doc.getText('content').observe(() => (clearTimeout(t), resolve()))
+      })
+      const raw = doc.getText('content').toString()
+      const body = raw.startsWith('---\n') ? raw.slice(raw.indexOf('\n---', 4) + 4).replace(/^\n/u, '') : raw
+      return fillTemplate(body, title)
+    } finally {
+      release()
+    }
   }
-  function daily() {
+  function fillTemplate(body: string, title: string): string {
+    const d = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const fmt = (f: string) =>
+      f
+        .replace(/YYYY/gu, String(d.getFullYear()))
+        .replace(/MM/gu, pad(d.getMonth() + 1))
+        .replace(/DD/gu, pad(d.getDate()))
+        .replace(/HH/gu, pad(d.getHours()))
+        .replace(/mm/gu, pad(d.getMinutes()))
+    return body
+      .replace(/\{\{date:([^}]+)\}\}/gu, (_, f: string) => fmt(f))
+      .replace(/\{\{date\}\}/gu, fmt('YYYY-MM-DD'))
+      .replace(/\{\{time\}\}/gu, fmt('HH:mm'))
+      .replace(/\{\{title\}\}/gu, title)
+      .replace(/\{\{cursor\}\}/gu, '')
+  }
+  async function create(path: string) {
+    if (!session) return
+    const title = displayName(path)
+    open(session.createNote(path, await template('Note', title, `# ${title}\n\n`)))
+  }
+  async function daily() {
     if (!session) return
     const d = new Date()
     const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     const path = `Daily/${name}.md`
     const existing = session.idOf(path)
-    open(existing ?? session.createNote(path, `# ${name}\n\n`))
+    open(existing ?? session.createNote(path, await template('Daily', name, `# ${name}\n\n`)))
   }
   function renameActive() {
     if (!session || !active) return

@@ -3,33 +3,25 @@
 Self-hosted, open-source, multi-user markdown notes. See [SPEC.md](SPEC.md) for the full
 specification; this README covers the repository and the current milestone.
 
-## Status: M0 — foundations (in progress)
+## Status: M1 — single-user desktop MVP (in progress)
 
-| Crate | Path | What it is |
+| Crate / package | Path | What it is |
 |---|---|---|
-| `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, filesystem watcher, sync frame codec, markdown indexer, and the **client sync engine** (`client::run`). |
-| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and snapshot/pruning policy, derives notes/tags/FTS from the CRDT stream, content-addressed attachment store, minimal REST (`/api/v1`). **No auth yet.** |
-| `notes-cli` | `crates/cli` | `notes` binary: `sync`, `index`, `search`, `doctor`. |
-| `notes-desktop` | `crates/desktop` | Tauri 2 desktop shell: starts the engine's local relay for a vault and opens one window on it. See [its README](crates/desktop/README.md). |
-| `notes-ui` | `ui/` | TypeScript: markdown indexer sharing the corpus with `notes-core`; later CodeMirror 6 + Svelte 5 shell. |
-| corpus | `corpus/` | Markdown conformance cases (`*.md` + expected `*.json`) that both indexers must satisfy. |
+| `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
+| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, REST (`/api/v1`), serves the web client. **No auth yet (M2).** |
+| `notes-cli` | `crates/cli` | `notes` binary: `sync` (with `--serve` relay), `index`, `search`, `import obsidian`, `export zip`, `doctor`. |
+| `notes-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
+| `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, daily notes + templates, paste/drop attachments. Also the markdown indexer sharing `corpus/` with `notes-core`. |
+| corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
-Done in M0 so far: CRDT doc model with merge tests, diff-to-CRDT edits, store schema and
-round-trip tests, projection write/ingest with a 3-way merge test, watcher, wire framing,
-markdown indexing, server relay with an end-to-end WebSocket test, and `notes sync` — the full
-projection loop (watch → debounce → ingest/create/rename/delete → WebSocket → project), with an
-end-to-end test that drives two directories through a real server across create, edit,
-concurrent offline edits, rename, and delete.
+M0 is complete. M1 so far: everything in the table. Remaining for M1: split panes, note
+version history UI, and a first-run setup screen for the desktop app (today it reads
+`~/.config/notes/desktop.toml`). M2 (accounts, sharing, presence UI, web deployment recipe)
+follows.
 
-Also done: attachments (referenced files are hashed, uploaded, recorded in the vault doc, and
-fetched by other replicas) and the snapshot/pruning policy for the update log.
-
-Also done: `wss://`/`https://` with a private-CA option, orphan attachment cleanup (client
-drops unreferenced vault entries; server purges blobs after a grace period), and the
-TypeScript indexer in `ui/` that passes the same corpus (`cd ui && npm test`).
-
-M0 is feature-complete against SPEC §16. Carry-overs into M1: write `id:` into front matter on
-note creation (SPEC §6.3, decided 2026-08-30) and per-note `NoteAttachment` rows on the server.
+Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
+`NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for
+headless-Chrome smoke runs against a running server.
 
 ## `notes sync`
 

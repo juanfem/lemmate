@@ -112,6 +112,23 @@ class CheckboxWidget extends WidgetType {
 
 const hide = Decoration.replace({})
 
+class CalloutTitle extends WidgetType {
+  readonly title: string
+  constructor(title: string) {
+    super()
+    this.title = title
+  }
+  eq(other: CalloutTitle) {
+    return other.title === this.title
+  }
+  toDOM() {
+    const el = document.createElement('span')
+    el.className = 'cm-callout-title'
+    el.textContent = this.title.charAt(0).toUpperCase() + this.title.slice(1)
+    return el
+  }
+}
+
 /** Collapsed front matter: a one-line summary of the properties (SPEC §8). */
 class FrontMatterWidget extends WidgetType {
   readonly summary: string
@@ -167,6 +184,28 @@ function revealed(state: EditorState, from: number, to: number): boolean {
 function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
   const items: { from: number; to: number; deco: Decoration }[] = []
   const push = (from: number, to: number, deco: Decoration) => items.push({ from, to, deco })
+
+  // Pandoc fenced divs / Quarto callouts (SPEC §5.3): `::: {.callout-note title="…"}` … `:::`
+  let inCallout = false
+  for (let ln = 1; ln <= state.doc.lines; ln++) {
+    const line = state.doc.line(ln)
+    const t = line.text.trim()
+    if (!inCallout && /^:{3,}\s*\{?\.?callout/u.test(t)) {
+      inCallout = true
+      push(line.from, line.from, Decoration.line({ class: 'cm-callout cm-callout-fence' }))
+      const title = /title="([^"]*)"/u.exec(t)?.[1] ?? /callout-([a-z]+)/u.exec(t)?.[1] ?? 'note'
+      if (!revealed(state, line.from, line.to)) push(line.from, line.to, Decoration.replace({ widget: new CalloutTitle(title) }))
+      continue
+    }
+    if (inCallout) {
+      const closing = /^:{3,}\s*$/u.test(t)
+      push(line.from, line.from, Decoration.line({ class: closing ? 'cm-callout cm-callout-fence' : 'cm-callout' }))
+      if (closing) {
+        if (!revealed(state, line.from, line.to)) push(line.from, line.to, hide)
+        inCallout = false
+      }
+    }
+  }
 
   const fm = frontMatterRange(state)
   if (fm && !revealed(state, fm.from, fm.to)) {
@@ -273,9 +312,22 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             }
             break
           }
-          case 'FencedCode':
-            push(node.from, node.from, Decoration.line({ class: 'cm-codeblock-start' }))
+          case 'FencedCode': {
+            const fromLine = state.doc.lineAt(node.from).number
+            const toLine = state.doc.lineAt(node.to).number
+            for (let ln = fromLine; ln <= toLine; ln++) {
+              const line = state.doc.line(ln)
+              const fence = ln === fromLine || (ln === toLine && /^\s*(```|~~~)/u.test(line.text))
+              push(line.from, line.from, Decoration.line({ class: fence ? 'cm-codeblock cm-codeblock-fence' : 'cm-codeblock' }))
+            }
             break
+          }
+          case 'Table': {
+            const fromLine = state.doc.lineAt(node.from).number
+            const toLine = state.doc.lineAt(node.to).number
+            for (let ln = fromLine; ln <= toLine; ln++) push(state.doc.line(ln).from, state.doc.line(ln).from, Decoration.line({ class: 'cm-table-row' }))
+            break
+          }
           default:
             break
         }
