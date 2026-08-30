@@ -114,7 +114,10 @@ async function main() {
   mkdirSync(outdir, { recursive: true });
   const port = 10000 + Math.floor(Math.random() * 40000);
   const profile = mkdtempSync(join(tmpdir(), 'cdp-profile-'));
-  const chrome = spawn('google-chrome-stable', ['--headless=new', '--disable-gpu', '--no-sandbox',
+  const chrome = spawn('google-chrome-stable', ['--headless=new',
+  '--password-store=basic',
+  '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,AutofillServerCommunication',
+  '--disable-save-password-bubble', '--disable-gpu', '--no-sandbox',
     `--remote-debugging-port=${port}`, '--window-size=1400,900', `--user-data-dir=${profile}`, 'about:blank'],
     { stdio: ['ignore', 'ignore', 'ignore'], detached: true });
   const cleanup = () => {

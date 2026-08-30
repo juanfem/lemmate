@@ -33,8 +33,13 @@ export class VaultSession {
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
 
-  constructor(id: string, wsUrl: string = SyncClient.wsUrl()) {
+  /** Without the vault doc: for notes shared directly (SPEC §11.2), which grant only the note. */
+  readonly noteOnly: boolean
+
+  constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string } = {}) {
     this.id = id
+    this.noteOnly = opts.noteOnly ?? false
+    const wsUrl = opts.wsUrl ?? SyncClient.wsUrl()
     this.client = new SyncClient(wsUrl)
     this.client.onStatus = (s) => (this.status = s)
     this.client.onSynced = (docId) => {
@@ -51,7 +56,8 @@ export class VaultSession {
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
     this.bookmarksArr.observe(refresh)
-    this.client.open(this.vaultDocId, this.vaultDoc)
+    if (!this.noteOnly) this.client.open(this.vaultDocId, this.vaultDoc)
+    else this.vaultSynced = true
   }
 
   get vaultDocId() {

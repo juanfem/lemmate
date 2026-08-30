@@ -14,12 +14,16 @@
     noteId,
     onOpen,
     onHeadings,
+    onPresence,
+    readOnly = false,
     jumpTo = $bindable(),
   }: {
     session: VaultSession
     noteId: string
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
+    onPresence?: (names: string[]) => void
+    readOnly?: boolean
     jumpTo?: (pos: number) => void
   } = $props()
 
@@ -106,11 +110,24 @@
   onMount(() => {
     const acquired = session.acquire(noteId)
     release = acquired.release
-    acquired.awareness.setLocalStateField('user', { name: localStorage.getItem('notes.user') ?? 'me', color: '#4c8bf5', colorLight: '#4c8bf533' })
+    const me = localStorage.getItem('notes.user') ?? (window as unknown as { notes?: { userName?: string } }).notes?.userName ?? 'me'
+    const hue = [...me].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)
+    acquired.awareness.setLocalStateField('user', { name: me, color: `hsl(${hue} 70% 45%)`, colorLight: `hsl(${hue} 70% 45% / 0.25)` })
+    const presence = () => {
+      const names: string[] = []
+      acquired.awareness.getStates().forEach((st, clientId) => {
+        if (clientId === acquired.doc.clientID) return
+        const u = (st as { user?: { name?: string } }).user
+        if (u?.name) names.push(u.name)
+      })
+      onPresence?.(names)
+    }
+    acquired.awareness.on('change', presence)
+    presence()
     view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
       openLink,
       embedUrl,
-      extra: [fileHandlers, headingWatcher],
+      extra: [fileHandlers, headingWatcher, ...(readOnly ? [EditorView.editable.of(false)] : [])],
       complete: {
         notes: () => session.notes.map((n) => n.path),
         tags: async () => (await api.tags(session.id).catch(() => [])).map((t) => t.tag),

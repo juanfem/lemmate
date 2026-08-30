@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get};
 use notes_core::attachments::hash_bytes;
 use notes_core::store::{Role, UserRow};
-use notes_core::{Store, VaultId};
+use notes_core::{NoteId, Store, VaultId};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
@@ -130,6 +130,21 @@ pub async fn role_or_claim(state: &AppState, user: &AuthUser, vault: VaultId, cl
     None
 }
 
+/// The role a user holds on one note: the vault role, or a direct share (SPEC §11.2 "overrides
+/// upward only"), whichever is higher.
+pub async fn note_role(state: &AppState, user: &AuthUser, vault: VaultId, note: NoteId) -> Option<Role> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Some(Role::Owner);
+    }
+    let store = state.store.lock().await;
+    let vault_role = store.membership(vault, &user.id).ok().flatten();
+    let share_role = store.note_share_role(note, &user.id).ok().flatten();
+    match (vault_role, share_role) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// 404 for non-members (no existence leak), 403 for an insufficient role.
 pub async fn require(
     state: &AppState,
@@ -154,6 +169,225 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/v1/auth/me", get(me))
         .route("/api/v1/vaults/{vault}/members", get(list_members).put(put_member))
         .route("/api/v1/vaults/{vault}/members/{user}", axum::routing::delete(delete_member))
+        .route(
+            "/api/v1/vaults/{vault}/notes/{id}/shares",
+            get(list_shares).put(put_share).delete(delete_share),
+        )
+        .route("/api/v1/shared-with-me", get(shared_with_me))
+        .route("/api/v1/shared/{token}", get(shared_note))
+}
+
+#[derive(Serialize)]
+pub struct ShareOut {
+    pub kind: String,
+    pub user_id: Option<String>,
+    pub email: Option<String>,
+    pub role: String,
+    pub expires_ms: Option<i64>,
+    /// Only returned once, when a link is created.
+    pub link: Option<String>,
+}
+
+fn share_out(s: notes_core::store::NoteShareRow) -> ShareOut {
+    ShareOut {
+        kind: if s.token_hash.is_some() { "link".into() } else { "user".into() },
+        user_id: s.user_id,
+        email: s.email,
+        role: s.role.as_str().to_owned(),
+        expires_ms: s.expires_ms,
+        link: None,
+    }
+}
+
+async fn note_in_vault(state: &AppState, vault: VaultId, id: NoteId) -> Result<(), StatusCode> {
+    match state.store.lock().await.note_by_id(id) {
+        Ok(Some(row)) if row.vault_id == vault => Ok(()),
+        _ => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn list_shares(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+) -> Result<Json<Vec<ShareOut>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    require(&state, &user, vault, Role::Editor).await?;
+    note_in_vault(&state, vault, id).await?;
+    let rows = state.store.lock().await.note_shares(id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(rows.into_iter().map(share_out).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct ShareIn {
+    /// `user` (needs `email`) or `link`.
+    pub kind: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default = "default_viewer")]
+    pub role: String,
+    /// For links: lifetime in days (default: no expiry).
+    #[serde(default)]
+    pub expires_days: Option<u32>,
+}
+
+fn default_viewer() -> String {
+    "viewer".into()
+}
+
+/// Share a note with a user (editor/viewer) or mint a public read-only link. Vault editors may
+/// share; links are always read-only.
+async fn put_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<ShareIn>,
+) -> Result<Json<ShareOut>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    require(&state, &user, vault, Role::Editor).await?;
+    note_in_vault(&state, vault, id).await?;
+    let role = Role::parse(&body.role).filter(|r| *r < Role::Owner).ok_or(StatusCode::BAD_REQUEST)?;
+    let mut store = state.store.lock().await;
+    match body.kind.as_str() {
+        "user" => {
+            let email = body.email.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+            let target = store
+                .user_by_email(email)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            store
+                .share_note_with_user(id, &target.id, role, &user.id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(ShareOut {
+                kind: "user".into(),
+                user_id: Some(target.id),
+                email: Some(target.email),
+                role: role.as_str().into(),
+                expires_ms: None,
+                link: None,
+            }))
+        }
+        "link" => {
+            let token = new_token();
+            let expires =
+                body.expires_days.map(|d| notes_core::store::now_ms() + i64::from(d) * 24 * 3600 * 1000);
+            store
+                .share_note_by_link(id, &token_hash(&token), Role::Viewer, &user.id, expires)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(ShareOut {
+                kind: "link".into(),
+                user_id: None,
+                email: None,
+                role: "viewer".into(),
+                expires_ms: expires,
+                link: Some(format!("/#/s/{token}")),
+            }))
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Unshare {
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Remove every link share of the note.
+    #[serde(default)]
+    pub links: bool,
+}
+
+async fn delete_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<Unshare>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    require(&state, &user, vault, Role::Editor).await?;
+    let mut store = state.store.lock().await;
+    if let Some(u) = body.user_id {
+        store.unshare_note_user(id, &u).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if body.links {
+        for s in store.note_shares(id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+            if let Some(h) = s.token_hash {
+                store.unshare_note_link(id, &h).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct SharedNoteOut {
+    pub id: String,
+    pub vault_id: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub role: String,
+}
+
+async fn shared_with_me(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<SharedNoteOut>>, StatusCode> {
+    let rows = state
+        .store
+        .lock()
+        .await
+        .notes_shared_with(&user.id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(n, r)| SharedNoteOut {
+                id: n.id.to_string(),
+                vault_id: n.vault_id.to_string(),
+                path: n.path,
+                title: n.title,
+                role: r.as_str().into(),
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct PublicNote {
+    pub id: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub content: String,
+}
+
+/// Anonymous read of a note through a link token (SPEC §11.2 public links).
+async fn shared_note(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Result<Json<PublicNote>, StatusCode> {
+    let (note, _) = state
+        .store
+        .lock()
+        .await
+        .note_for_link(&token_hash(&token))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let row = state
+        .store
+        .lock()
+        .await
+        .note_by_id(note)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let content = state
+        .store
+        .lock()
+        .await
+        .load_doc(notes_core::DocId::Note(note))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .text();
+    Ok(Json(PublicNote { id: note.to_string(), path: row.path, title: row.title, content }))
 }
 
 #[derive(Deserialize)]

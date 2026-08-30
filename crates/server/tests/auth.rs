@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store, VaultId};
+use notes_core::{DocId, NoteDoc, NoteId, Store, VaultDoc, VaultId};
 use notes_server::{AppState, AuthMode, ServerOptions, build_state, router};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as TMsg;
@@ -252,6 +252,92 @@ async fn accounts_and_roles() {
     };
     text_a.apply_update(&u).unwrap();
     assert_eq!(text_a.text(), "owner text (edited by bob)");
+
+    // Per-note shares (SPEC §11.2): Carol is no member, but a direct share lets her read the
+    // note (and nothing else); a public link needs no account at all.
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/register",
+        json!({"email": "carol@example.org", "password": "carol pass"}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let (_, body) = post(
+        addr,
+        "/api/v1/auth/login",
+        json!({"email": "carol@example.org", "password": "carol pass"}),
+        None,
+    )
+    .await;
+    let carol = body["token"].as_str().unwrap().to_owned();
+    let note_id = note.clone();
+    // The note needs a row (a vault entry) before it can be shared.
+    let entry = VaultDoc::new();
+    let vu = entry.set_path(note_id.parse().unwrap(), "shared.md");
+    send(&mut a, &vdoc, Message::Sync(SyncMessage::Update(vu))).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(get(addr, &format!("/api/v1/vaults/{vault}/notes/{note_id}"), Some(&carol)).await.0, 404);
+    let s = put(
+        addr,
+        &format!("/api/v1/vaults/{vault}/notes/{note_id}/shares"),
+        json!({"kind": "user", "email": "carol@example.org", "role": "viewer"}),
+        &ann,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, body) = get(addr, &format!("/api/v1/vaults/{vault}/notes/{note_id}"), Some(&carol)).await;
+    assert_eq!(s, 200, "shared note readable");
+    assert!(body["content"].as_str().unwrap().contains("edited by bob"));
+    assert_eq!(
+        get(addr, &format!("/api/v1/vaults/{vault}/notes"), Some(&carol)).await.0,
+        404,
+        "vault itself stays hidden"
+    );
+    let (_, mine) = get(addr, "/api/v1/shared-with-me", Some(&carol)).await;
+    assert_eq!(mine[0]["path"], "shared.md");
+    // ... including over the relay: the note doc syncs, the vault doc does not.
+    let mut c = connect(addr, &carol).await;
+    send(&mut c, &vdoc, Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector()))).await;
+    assert!(matches!(recv(&mut c).await, Some((_, Message::Auth(Some(_))))));
+    let nc = NoteDoc::new();
+    send(&mut c, &note_id, Message::Sync(SyncMessage::SyncStep1(nc.state_vector()))).await;
+    assert!(
+        matches!(recv(&mut c).await, Some((_, Message::Sync(SyncMessage::SyncStep2(_))))),
+        "direct share grants the note"
+    );
+    // Public link: anonymous read, revocable.
+    let (s, link) = {
+        let req = ureq::put(format!("http://{addr}/api/v1/vaults/{vault}/notes/{note_id}/shares"))
+            .header("content-type", "application/json")
+            .header("authorization", &format!("Bearer {ann}"));
+        let body = json!({"kind": "link"}).to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut r = req.send(body.as_bytes()).unwrap();
+            let v: Value = serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+            (r.status().as_u16(), v)
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(s, 200);
+    let token = link["link"].as_str().unwrap().rsplit('/').next().unwrap().to_owned();
+    let (s, public) = get(addr, &format!("/api/v1/shared/{token}"), None).await;
+    assert_eq!(s, 200);
+    assert_eq!(public["path"], "shared.md");
+    let del = ureq::delete(format!("http://{addr}/api/v1/vaults/{vault}/notes/{note_id}/shares"))
+        .header("content-type", "application/json")
+        .header("authorization", &format!("Bearer {ann}"));
+    let body = json!({"links": true}).to_string();
+    let s = tokio::task::spawn_blocking(move || match del.force_send_body().send(body.as_bytes()) {
+        Ok(r) => r.status().as_u16(),
+        Err(ureq::Error::StatusCode(c)) => c,
+        Err(e) => panic!("{e}"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(s, 204);
+    assert_eq!(get(addr, &format!("/api/v1/shared/{token}"), None).await.0, 404, "revoked");
 
     // Logout invalidates the session; the last owner cannot leave.
     assert_eq!(post(addr, "/api/v1/auth/logout", json!({}), Some(&bob)).await.0, 204);

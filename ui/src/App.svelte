@@ -12,6 +12,9 @@
   import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
   import HistoryPane from './components/HistoryPane.svelte'
+  import ShareDialog from './components/ShareDialog.svelte'
+  import SharedView from './components/SharedView.svelte'
+  import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
 
   // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
@@ -20,10 +23,15 @@
   authState.onUnauthorized = () => {
     authRequired = true
   }
-  api
-    .me()
-    .then((u) => (me = u))
-    .catch(() => {})
+  if (!readPublicToken())
+    api
+      .me()
+      .then((u) => (me = u))
+      .catch(() => {})
+  $effect(() => {
+    // The editor labels our cursor for others with this name.
+    if (me) (window as unknown as { notes?: { userName?: string } }).notes = { ...((window as unknown as { notes?: object }).notes ?? {}), userName: me.display_name }
+  })
   async function signedIn() {
     authRequired = false
     me = await api.me().catch(() => null)
@@ -44,21 +52,46 @@
 
   function readHash(): string | null {
     const m = /^#\/v\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+    if (m) return m[1]!
+    const n = /^#\/n\/([0-9A-HJKMNP-TV-Z]{26})\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+    return n ? n[1]! : null
+  }
+  function readNoteOnly(): string | null {
+    const n = /^#\/n\/([0-9A-HJKMNP-TV-Z]{26})\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+    return n ? n[2]! : null
+  }
+  function readPublicToken(): string | null {
+    const m = /^#\/s\/([0-9a-f]{64})/u.exec(location.hash)
     return m ? m[1]! : null
   }
-  window.addEventListener('hashchange', () => (vaultId = readHash()))
+  let publicToken = $state<string | null>(readPublicToken())
+  let noteOnly = $state<string | null>(readNoteOnly())
+  window.addEventListener('hashchange', () => {
+    publicToken = readPublicToken()
+    noteOnly = readNoteOnly()
+    vaultId = readHash()
+  })
+  let sharedWithMe: SharedNote[] = $state([])
+  let shareOpen = $state(false)
 
   $effect(() => {
     const id = vaultId
     // Only `vaultId` is a dependency: everything else here is written, not tracked.
+    const only = noteOnly
     untrack(() => {
       session?.destroy()
-      session = id ? new VaultSession(id) : null
+      session = id ? new VaultSession(id, { noteOnly: !!only }) : null
+      if (session && only) {
+        tabs = [only]
+        active = only
+        return
+      }
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
       ;(window as unknown as { notes?: unknown }).notes = { session }
       tabs = []
       active = null
     })
+    if (!id) api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
     if (!vaultId)
       api
         .vaults()
@@ -86,6 +119,7 @@
   let palette = $state(false)
   let backlinks: NoteSummary[] = $state([])
   let headings: OutlineItem[] = $state([])
+  let presence: string[] = $state([])
   let jumpTo: ((pos: number) => void) | undefined = $state()
   let tagsVersion = $state(0)
 
@@ -138,6 +172,7 @@
     { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
+    { id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
@@ -254,12 +289,14 @@
     }
   }
 
-  let activePath = $derived(session && active ? (session.pathOf(active) ?? '(deleted)') : '')
+  let activePath = $derived(session && active ? (session.pathOf(active) ?? (session.noteOnly ? 'shared note' : '(deleted)')) : '')
 </script>
 
 <svelte:window onkeydown={onKey} />
 
-{#if authRequired}
+{#if publicToken}
+  <SharedView token={publicToken} />
+{:else if authRequired}
   <Login onDone={signedIn} />
 {:else if !session}
   <main class="welcome">
@@ -271,6 +308,14 @@
       {/each}
     </ul>
     <button class="primary" onclick={newVault}>New vault</button>
+    {#if sharedWithMe.length}
+      <h2>Shared with me</h2>
+      <ul>
+        {#each sharedWithMe as n (n.id)}
+          <li><button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)}>{n.title ?? displayName(n.path)} <span class="muted">({n.role})</span></button></li>
+        {/each}
+      </ul>
+    {/if}
   </main>
 {:else}
   <div class="layout">
@@ -286,7 +331,9 @@
         <button title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
         <button title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
       </div>
-      {#if sidebar === 'files'}
+      {#if session.noteOnly}
+        <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
+      {:else if sidebar === 'files'}
         <Tree notes={session.notes} activeId={active} onOpen={open} />
       {:else if sidebar === 'search'}
         <SearchPane vault={session.id} onOpen={open} />
@@ -323,13 +370,17 @@
         {#key active}
           <div class="note-head">
             <span class="path">{activePath}</span>
+            {#if presence.length}
+              <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
+            {/if}
             <span class="spacer"></span>
             <button onclick={bookmarkActive} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
+            {#if !session.noteOnly}<button onclick={() => (shareOpen = true)} title="Share">Share</button>{/if}
             <button onclick={renameActive} title="Rename / move">Rename</button>
             <button onclick={deleteActive} title="Move to trash">Delete</button>
           </div>
           <div class="editor-wrap">
-            <Editor {session} noteId={active} onOpen={open} onHeadings={(h) => (headings = h)} bind:jumpTo />
+            <Editor {session} noteId={active} onOpen={open} onHeadings={(h) => (headings = h)} onPresence={(p) => (presence = p)} bind:jumpTo />
           </div>
           {#if backlinks.length}
             <div class="backlinks">
@@ -352,6 +403,9 @@
   {/if}
   {#if palette}
     <CommandPalette {commands} onClose={() => (palette = false)} />
+  {/if}
+  {#if shareOpen && active}
+    <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />
   {/if}
 {/if}
 
@@ -496,6 +550,17 @@
     font-size: 0.8rem;
     color: var(--muted);
     border-bottom: 1px solid var(--border);
+  }
+  .link {
+    font: inherit;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+  }
+  .presence {
+    color: var(--accent);
   }
   .editor-wrap {
     min-height: 0;

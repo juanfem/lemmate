@@ -12,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -96,6 +96,19 @@ CREATE TABLE IF NOT EXISTS memberships (
     PRIMARY KEY (vault_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS memberships_user ON memberships (user_id);
+-- Per-note access (SPEC §11.2): to a user, or to anyone holding a link token (hashed here).
+CREATE TABLE IF NOT EXISTS note_shares (
+    note_id    TEXT NOT NULL,
+    user_id    TEXT,
+    token_hash TEXT,
+    role       TEXT NOT NULL,
+    created_by TEXT,
+    created_ms INTEGER NOT NULL,
+    expires_ms INTEGER,
+    UNIQUE (note_id, user_id),
+    UNIQUE (token_hash)
+);
+CREATE INDEX IF NOT EXISTS note_shares_user ON note_shares (user_id);
 "#;
 
 pub struct Store {
@@ -126,6 +139,15 @@ pub struct Maintenance {
     pub snapshotted: bool,
     pub pruned_updates: usize,
     pub pruned_snapshots: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteShareRow {
+    pub user_id: Option<String>,
+    pub email: Option<String>,
+    pub token_hash: Option<String>,
+    pub role: Role,
+    pub expires_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -866,6 +888,115 @@ impl Store {
         .collect()
     }
 
+    // ---- Note shares ------------------------------------------------------------------------
+
+    pub fn share_note_with_user(
+        &mut self,
+        note_id: NoteId,
+        user_id: &str,
+        role: Role,
+        by: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO note_shares (note_id, user_id, role, created_by, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(note_id, user_id) DO UPDATE SET role = excluded.role",
+            params![note_id.to_string(), user_id, role.as_str(), by, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn share_note_by_link(
+        &mut self,
+        note_id: NoteId,
+        token_hash: &str,
+        role: Role,
+        by: &str,
+        expires_ms: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO note_shares (note_id, token_hash, role, created_by, created_ms, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![note_id.to_string(), token_hash, role.as_str(), by, now_ms(), expires_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn unshare_note_user(&mut self, note_id: NoteId, user_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM note_shares WHERE note_id = ?1 AND user_id = ?2",
+            params![note_id.to_string(), user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn unshare_note_link(&mut self, note_id: NoteId, token_hash: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM note_shares WHERE note_id = ?1 AND token_hash = ?2",
+            params![note_id.to_string(), token_hash],
+        )?;
+        Ok(())
+    }
+
+    /// The role a user holds on a note through a direct share.
+    pub fn note_share_role(&self, note_id: NoteId, user_id: &str) -> Result<Option<Role>> {
+        let role: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT role FROM note_shares WHERE note_id = ?1 AND user_id = ?2 AND (expires_ms IS NULL OR expires_ms > ?3)",
+                params![note_id.to_string(), user_id, now_ms()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(role.and_then(|r| Role::parse(&r)))
+    }
+
+    /// The note (and role) a public link token grants, if it is live.
+    pub fn note_for_link(&self, token_hash: &str) -> Result<Option<(NoteId, Role)>> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT note_id, role FROM note_shares WHERE token_hash = ?1 AND (expires_ms IS NULL OR expires_ms > ?2)",
+                params![token_hash, now_ms()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((id, role)) => Some((id.parse()?, Role::parse(&role).unwrap_or(Role::Viewer))),
+            None => None,
+        })
+    }
+
+    pub fn note_shares(&self, note_id: NoteId) -> Result<Vec<NoteShareRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.user_id, u.email, s.token_hash, s.role, s.expires_ms FROM note_shares s LEFT JOIN users u ON u.id = s.user_id
+             WHERE s.note_id = ?1 ORDER BY s.created_ms",
+        )?;
+        let rows = stmt.query_map(params![note_id.to_string()], |r| {
+            Ok(NoteShareRow {
+                user_id: r.get(0)?,
+                email: r.get(1)?,
+                token_hash: r.get(2)?,
+                role: Role::parse(&r.get::<_, String>(3)?).unwrap_or(Role::Viewer),
+                expires_ms: r.get(4)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Live notes shared directly with a user, with the vault they live in.
+    pub fn notes_shared_with(&self, user_id: &str) -> Result<Vec<(NoteRow, Role)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.vault_id, n.path, n.title, s.role FROM note_shares s JOIN notes n ON n.id = s.note_id
+             WHERE s.user_id = ?1 AND n.deleted_at IS NULL AND (s.expires_ms IS NULL OR s.expires_ms > ?2) ORDER BY n.path",
+        )?;
+        let rows =
+            stmt.query_map(params![user_id, now_ms()], |r| Ok((row_to_note(r)?, r.get::<_, String>(4)?)))?;
+        rows.map(|r| {
+            let (n, role) = r?;
+            Ok((n, Role::parse(&role).unwrap_or(Role::Viewer)))
+        })
+        .collect()
+    }
+
     // ---- Meta -------------------------------------------------------------------------------
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -1010,6 +1141,33 @@ mod tests {
         push(&mut store, "a b c d e", t);
         assert_eq!(store.load_doc(id).unwrap().text(), "a b c d e");
         assert_eq!(store.doc_ids().unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn note_shares() {
+        let mut store = Store::open_in_memory().unwrap();
+        let v = VaultId::new();
+        let (n1, n2) = (NoteId::new(), NoteId::new());
+        store.create_user("u1", "a@x", "A", None, false).unwrap();
+        store.create_user("u2", "b@x", "B", None, false).unwrap();
+        store.upsert_note(n1, v, "one.md", Some("One")).unwrap();
+        store.upsert_note(n2, v, "two.md", None).unwrap();
+        store.share_note_with_user(n1, "u2", Role::Viewer, "u1").unwrap();
+        store.share_note_with_user(n1, "u2", Role::Editor, "u1").unwrap();
+        assert_eq!(store.note_share_role(n1, "u2").unwrap(), Some(Role::Editor));
+        assert_eq!(store.note_share_role(n2, "u2").unwrap(), None);
+        store.share_note_by_link(n2, "h1", Role::Viewer, "u1", None).unwrap();
+        store.share_note_by_link(n2, "h2", Role::Viewer, "u1", Some(1)).unwrap();
+        assert_eq!(store.note_for_link("h1").unwrap(), Some((n2, Role::Viewer)));
+        assert_eq!(store.note_for_link("h2").unwrap(), None, "expired");
+        assert_eq!(store.note_shares(n2).unwrap().len(), 2);
+        let shared = store.notes_shared_with("u2").unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].0.path, "one.md");
+        store.unshare_note_user(n1, "u2").unwrap();
+        store.unshare_note_link(n2, "h1").unwrap();
+        assert!(store.notes_shared_with("u2").unwrap().is_empty());
+        assert_eq!(store.note_for_link("h1").unwrap(), None);
     }
 
     #[test]

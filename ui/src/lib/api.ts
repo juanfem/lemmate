@@ -9,6 +9,21 @@ export interface NoteSummary {
   path: string
   title: string | null
 }
+export interface Share {
+  kind: 'user' | 'link'
+  user_id: string | null
+  email: string | null
+  role: string
+  expires_ms: number | null
+  link: string | null
+}
+export interface SharedNote {
+  id: string
+  vault_id: string
+  path: string
+  title: string | null
+  role: string
+}
 export interface Version {
   seq: number
   created_ms: number
@@ -68,6 +83,18 @@ export const api = {
     const r = await fetch(`/api/v1/vaults/${vault}/members/${userId}`, { method: 'DELETE' })
     if (!r.ok) throw new ApiError(r.status, `${r.status} for members`)
   },
+  shares: (vault: string, id: string) => get<Share[]>(`/vaults/${vault}/notes/${id}/shares`),
+  share: async (vault: string, id: string, body: { kind: 'user' | 'link'; email?: string; role?: string; expires_days?: number }) => {
+    const r = await fetch(`/api/v1/vaults/${vault}/notes/${id}/shares`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) throw new ApiError(r.status, `${r.status} for share`)
+    return (await r.json()) as Share
+  },
+  unshare: async (vault: string, id: string, body: { user_id?: string; links?: boolean }) => {
+    const r = await fetch(`/api/v1/vaults/${vault}/notes/${id}/shares`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) throw new ApiError(r.status, `${r.status} for unshare`)
+  },
+  sharedWithMe: () => get<SharedNote[]>('/shared-with-me'),
+  publicNote: (token: string) => get<{ id: string; path: string; title: string | null; content: string }>(`/shared/${token}`),
   versions: (vault: string, id: string) => get<Version[]>(`/vaults/${vault}/notes/${id}/versions`),
   versionAt: (vault: string, id: string, seq: number) => get<{ seq: number; content: string }>(`/vaults/${vault}/notes/${id}/versions/${seq}`),
   saveVersion: (vault: string, id: string, label: string) => post<Version>(`/vaults/${vault}/notes/${id}/versions`, { label }),

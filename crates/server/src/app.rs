@@ -310,9 +310,10 @@ async fn handle_frame(
             DocId::Vault(v) => Some(v),
             DocId::Note(id) => vault_of_note(state, id, conn.vault).await,
         };
-        let role = match vault {
-            Some(v) => auth::role_or_claim(state, &conn.user, v, matches!(doc_id, DocId::Vault(_))).await,
-            None => None,
+        let role = match (vault, doc_id) {
+            (Some(v), DocId::Vault(_)) => auth::role_or_claim(state, &conn.user, v, true).await,
+            (Some(v), DocId::Note(id)) => auth::note_role(state, &conn.user, v, id).await,
+            (None, _) => None,
         };
         match role {
             Some(r) if is_write => r >= Role::Editor,
@@ -724,8 +725,10 @@ async fn get_note(
     Path((vault, id)): Path<(String, String)>,
 ) -> Result<Json<NoteBody>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    auth::require(&state, &user, vault, Role::Viewer).await?;
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::note_role(&state, &user, vault, id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let row = state
         .store
         .lock()
