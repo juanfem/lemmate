@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use notes_core::client::{self, SyncOptions};
+use notes_core::local::LocalOptions;
 use notes_core::{NoteId, Projection, Store, VaultId, markdown};
 
 #[derive(Parser)]
@@ -51,6 +52,13 @@ enum Cmd {
         /// PEM file of a private CA to trust for wss:// and https:// (default: public roots).
         #[arg(long, env = "NOTES_CA_CERT")]
         ca_cert: Option<PathBuf>,
+        /// Also run the local relay on this address (e.g. 127.0.0.1:8081): serves the sync
+        /// socket and API from the local copy, so a UI keeps working offline.
+        #[arg(long)]
+        serve: Option<std::net::SocketAddr>,
+        /// Built web client to serve at / on the relay (ui/dist).
+        #[arg(long, env = "NOTES_WEB_DIR")]
+        web_dir: Option<PathBuf>,
     },
     /// Print versions and environment facts.
     Doctor,
@@ -125,12 +133,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Sync { vault, server, vault_id, once, ca_cert } => {
+        Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir } => {
             let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
             std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
             let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once, ca_cert };
             let rt = tokio::runtime::Runtime::new()?;
-            let report = rt.block_on(client::run(opts))?;
+            let report = match serve {
+                Some(bind) => rt.block_on(async {
+                    let handle = client::start(opts, LocalOptions { bind, web_dir }).await?;
+                    println!("local relay: http://{}/#/v/{}", handle.addr, handle.vault_id);
+                    handle.wait().await
+                })?,
+                None => rt.block_on(client::run(opts))?,
+            };
             if once {
                 println!("in sync: vault {} ({} notes)", report.vault_id, report.notes);
             }

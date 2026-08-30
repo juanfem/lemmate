@@ -24,7 +24,15 @@
     session = vaultId ? new VaultSession(vaultId) : null
     tabs = []
     active = null
-    if (!vaultId) api.vaults().then((v) => (vaults = v)).catch(() => (vaults = []))
+    if (!vaultId)
+      api
+        .vaults()
+        .then((v) => {
+          vaults = v
+          // A local relay serves exactly one vault: go straight in.
+          if (v.length === 1) openVault(v[0]!.id)
+        })
+        .catch(() => (vaults = []))
   })
   onDestroy(() => session?.destroy())
 

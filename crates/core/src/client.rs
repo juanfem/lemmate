@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
@@ -22,6 +23,7 @@ use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
 use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
+use crate::local::{LocalEvent, LocalOptions, LocalQuery, LocalReply, err_reply};
 use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
 use crate::store::{RetentionPolicy, Store, now_ms};
@@ -65,7 +67,49 @@ pub struct SyncReport {
 /// cancelled (it reconnects forever).
 pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     crate::tls::install_crypto_provider();
-    let mut engine = Engine::open(&opts)?;
+    let engine = Engine::open(&opts)?;
+    let (_tx, rx) = mpsc::unbounded_channel();
+    run_inner(engine, opts, rx).await
+}
+
+/// A running engine with its local relay (SPEC §3.2): the address to point a UI at, and the
+/// task to await or abort.
+pub struct LocalHandle {
+    pub addr: SocketAddr,
+    pub vault_id: VaultId,
+    task: tokio::task::JoinHandle<Result<SyncReport>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl LocalHandle {
+    pub async fn wait(self) -> Result<SyncReport> {
+        let r = self.task.await.map_err(|e| Error::Sync(e.to_string()))?;
+        self.server.abort();
+        r
+    }
+    pub fn abort(&self) {
+        self.task.abort();
+        self.server.abort();
+    }
+}
+
+/// Bind the local relay, start the engine in a background task, and return once the listener
+/// is up. The relay keeps working while the real server is unreachable.
+pub async fn start(opts: SyncOptions, local: LocalOptions) -> Result<LocalHandle> {
+    crate::tls::install_crypto_provider();
+    let engine = Engine::open(&opts)?;
+    let vault_id = engine.vault_id;
+    let (addr, rx, server) = crate::local::serve(&local).await?;
+    info!(%addr, "local relay listening");
+    let task = tokio::spawn(run_inner(engine, opts, rx));
+    Ok(LocalHandle { addr, vault_id, task, server })
+}
+
+async fn run_inner(
+    mut engine: Engine,
+    opts: SyncOptions,
+    mut local_rx: mpsc::UnboundedReceiver<LocalEvent>,
+) -> Result<SyncReport> {
     engine.reconcile_disk()?;
     engine.maintain_all()?;
 
@@ -95,6 +139,7 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
         done_tx,
     ));
     engine.transfers = Some(job_tx);
+    let mut local_alive = true;
     let mut backoff = RECONNECT_MIN;
     loop {
         let connector = tls.clone().map(Connector::Rustls);
@@ -118,12 +163,16 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
                 let finished = loop {
                     tokio::select! {
                         msg = stream.next() => match msg {
-                            Some(Ok(WsMsg::Binary(b))) => engine.handle_frame(&b),
+                            Some(Ok(WsMsg::Binary(b))) => engine.handle_frame(Origin::Server, &b),
                             Some(Ok(WsMsg::Close(_))) | None | Some(Err(_)) => break false,
                             Some(Ok(_)) => {}
                         },
                         ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
                         done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
+                        ev = local_rx.recv(), if local_alive => match ev {
+                            Some(ev) => engine.on_local_event(ev),
+                            None => local_alive = false,
+                        },
                         _ = ticker.tick() => {
                             engine.tick()?;
                             if let Some(msg) = engine.fatal.take() {
@@ -157,12 +206,16 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
                 warn!(%e, "connect failed; retrying in {backoff:?}");
             }
         }
-        // Keep the projection alive while offline: local edits are journaled and written back.
+        // Offline: local peers, the projection, and the journal keep working.
         let deadline = Instant::now() + backoff;
         while Instant::now() < deadline {
             tokio::select! {
                 ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
                 done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
+                ev = local_rx.recv(), if local_alive => match ev {
+                    Some(ev) => engine.on_local_event(ev),
+                    None => local_alive = false,
+                },
                 _ = tokio::time::sleep(TICK) => engine.tick()?,
             }
         }
@@ -284,6 +337,18 @@ fn run_transfer(
     }
 }
 
+/// Where a frame came from: the real server, or a local UI connected to the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Server,
+    Peer(u64),
+}
+
+struct Peer {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    subs: HashSet<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Handshake {
     Sent,
@@ -333,6 +398,10 @@ pub struct Engine {
     local_hashes: HashMap<String, String>,
     /// Something changed that may have orphaned an attachment entry; checked once idle.
     orphan_check_due: bool,
+    // Local relay (SPEC §3.2)
+    peers: HashMap<u64, Peer>,
+    /// Note docs a local UI created that have no vault entry yet (the UI writes text first).
+    pending_docs: HashMap<NoteId, NoteDoc>,
 }
 
 impl Engine {
@@ -384,6 +453,8 @@ impl Engine {
             pending_attachment_fs: HashMap::new(),
             local_hashes: HashMap::new(),
             orphan_check_due: true,
+            peers: HashMap::new(),
+            pending_docs: HashMap::new(),
         })
     }
 
@@ -821,7 +892,10 @@ impl Engine {
         for (id, path) in entries {
             match self.notes.get(&id) {
                 None => {
-                    let doc = self.store.load_doc(DocId::Note(id))?;
+                    let doc = match self.pending_docs.remove(&id) {
+                        Some(doc) => doc,
+                        None => self.store.load_doc(DocId::Note(id))?,
+                    };
                     self.store.upsert_note(id, self.vault_id, &path, file_stem(&path).as_deref())?;
                     self.by_path.insert(path.clone(), id);
                     self.notes.insert(id, NoteState { doc, path: path.clone() });
@@ -882,7 +956,7 @@ impl Engine {
         self.out = Some(out);
         self.handshakes.clear();
         self.handshake(DocId::Vault(self.vault_id));
-        let ids: Vec<NoteId> = self.notes.keys().copied().collect();
+        let ids: Vec<NoteId> = self.notes.keys().chain(self.pending_docs.keys()).copied().collect();
         for id in ids {
             self.handshake(DocId::Note(id));
         }
@@ -896,31 +970,59 @@ impl Engine {
         self.handshakes.clear();
     }
 
+    fn doc_for(&self, id: NoteId) -> Option<&NoteDoc> {
+        self.notes.get(&id).map(|s| &s.doc).or_else(|| self.pending_docs.get(&id))
+    }
+
+    fn state_vector_of(&self, doc: DocId) -> Option<yrs::StateVector> {
+        match doc {
+            DocId::Vault(_) => Some(self.vault.state_vector()),
+            DocId::Note(id) => self.doc_for(id).map(|d| d.state_vector()),
+        }
+    }
+
+    fn diff_of(&self, doc: DocId, sv: &yrs::StateVector) -> Option<Vec<u8>> {
+        match doc {
+            DocId::Vault(_) => Some(self.vault.diff_since(sv)),
+            DocId::Note(id) => self.doc_for(id).map(|d| d.diff_since(sv)),
+        }
+    }
+
     fn handshake(&mut self, doc: DocId) {
         if self.out.is_none() {
             return;
         }
-        let sv = match doc {
-            DocId::Vault(_) => self.vault.state_vector(),
-            DocId::Note(id) => match self.notes.get(&id) {
-                Some(s) => s.doc.state_vector(),
-                None => return,
-            },
-        };
+        let Some(sv) = self.state_vector_of(doc) else { return };
         self.send(doc, Message::Sync(SyncMessage::SyncStep1(sv)));
         self.handshakes.insert(doc.to_string(), Handshake::Sent);
     }
 
+    /// To the real server only.
     fn send(&self, doc: DocId, msg: Message) {
         if let Some(out) = &self.out {
             let _ = out.send(Frame::new(doc.to_string(), &msg).encode());
         }
     }
 
-    fn send_update(&self, doc: DocId, update: Vec<u8>) {
-        if !update.is_empty() {
-            self.send(doc, Message::Sync(SyncMessage::Update(update)));
+    /// To local peers subscribed to `doc_id`, except `except`.
+    fn broadcast_local(&self, doc_id: &str, bytes: &[u8], except: Option<u64>) {
+        for (id, peer) in &self.peers {
+            if Some(*id) != except && peer.subs.contains(doc_id) {
+                let _ = peer.tx.send(bytes.to_vec());
+            }
         }
+    }
+
+    /// An update produced here (disk edit, create, normalisation): everyone needs it.
+    fn send_update(&self, doc: DocId, update: Vec<u8>) {
+        if update.is_empty() {
+            return;
+        }
+        let frame = Frame::new(doc.to_string(), &Message::Sync(SyncMessage::Update(update))).encode();
+        if let Some(out) = &self.out {
+            let _ = out.send(frame.clone());
+        }
+        self.broadcast_local(&doc.to_string(), &frame, None);
     }
 
     fn persist_and_send(&mut self, doc: DocId, update: Vec<u8>) -> Result<()> {
@@ -932,39 +1034,128 @@ impl Engine {
         Ok(())
     }
 
-    fn handle_frame(&mut self, bytes: &[u8]) {
-        if let Err(e) = self.try_handle_frame(bytes) {
-            warn!(%e, "dropping frame");
+    fn on_local_event(&mut self, ev: LocalEvent) {
+        match ev {
+            LocalEvent::PeerConnected { id, tx } => {
+                self.peers.insert(id, Peer { tx, subs: HashSet::new() });
+            }
+            LocalEvent::PeerFrame { id, bytes } => self.handle_frame(Origin::Peer(id), &bytes),
+            LocalEvent::PeerGone { id } => {
+                self.peers.remove(&id);
+            }
+            LocalEvent::Query { query, reply } => {
+                let _ = reply.send(self.answer(query));
+            }
         }
     }
 
-    fn try_handle_frame(&mut self, bytes: &[u8]) -> Result<()> {
+    fn answer(&mut self, q: LocalQuery) -> LocalReply {
+        let r: Result<LocalReply> = (|| {
+            Ok(match q {
+                LocalQuery::Vaults => LocalReply::Vaults(vec![(self.vault_id, self.notes.len() as u32)]),
+                LocalQuery::Notes => LocalReply::Notes(self.store.list_notes(self.vault_id)?),
+                LocalQuery::Note(id) => {
+                    LocalReply::Note(match (self.store.note_by_id(id)?, self.doc_for(id)) {
+                        (Some(row), Some(doc)) => Some((row, doc.text())),
+                        _ => None,
+                    })
+                }
+                LocalQuery::Search { q, limit } => {
+                    LocalReply::Search(self.store.search_in_vault(self.vault_id, &q, limit)?)
+                }
+                LocalQuery::Backlinks(id) => LocalReply::Backlinks(match self.store.note_by_id(id)? {
+                    Some(row) => self.store.backlinks_to(&row)?,
+                    None => Vec::new(),
+                }),
+                LocalQuery::Tags => LocalReply::Tags(self.store.tags_in_vault(self.vault_id)?),
+                LocalQuery::Attachment(hash) => {
+                    let path =
+                        self.vault.attachment_entries().into_iter().find(|(_, h)| *h == hash).map(|(p, _)| p);
+                    LocalReply::Attachment(match path {
+                        Some(p) if self.is_attachment_file(&p)? => {
+                            Some((self.proj.read_bytes(&p)?, mime_for_path(&p)))
+                        }
+                        _ => None,
+                    })
+                }
+            })
+        })();
+        r.unwrap_or_else(err_reply)
+    }
+
+    fn handle_frame(&mut self, origin: Origin, bytes: &[u8]) {
+        if let Err(e) = self.try_handle_frame(origin, bytes) {
+            warn!(%e, ?origin, "dropping frame");
+        }
+    }
+
+    fn try_handle_frame(&mut self, origin: Origin, bytes: &[u8]) -> Result<()> {
         let frame = Frame::decode(bytes)?;
         let doc: DocId = frame.doc_id.parse()?;
         let msg = frame.message()?;
         let is_vault = doc == DocId::Vault(self.vault_id);
-        if !is_vault && !matches!(doc, DocId::Note(id) if self.notes.contains_key(&id)) {
-            return Ok(()); // not ours
+        match doc {
+            DocId::Vault(v) if v != self.vault_id => return Ok(()),
+            DocId::Note(id) if self.doc_for(id).is_none() => match origin {
+                // A local UI creating a note: hold the doc until its vault entry arrives.
+                Origin::Peer(_) => {
+                    self.pending_docs.insert(id, NoteDoc::new());
+                    self.handshake(DocId::Note(id));
+                }
+                Origin::Server => return Ok(()),
+            },
+            _ => {}
+        }
+        let peer_id = match origin {
+            Origin::Peer(p) => Some(p),
+            Origin::Server => None,
+        };
+        if let Some(p) = peer_id
+            && let Some(peer) = self.peers.get_mut(&p)
+        {
+            peer.subs.insert(frame.doc_id.clone());
         }
         match msg {
             Message::Sync(SyncMessage::SyncStep1(sv)) => {
-                let diff = match doc {
-                    DocId::Vault(_) => self.vault.diff_since(&sv),
-                    DocId::Note(id) => self.notes[&id].doc.diff_since(&sv),
-                };
-                self.send(doc, Message::Sync(SyncMessage::SyncStep2(diff)));
-                self.handshakes.insert(frame.doc_id, Handshake::Done);
-                if is_vault {
-                    self.reconcile_vault()?;
+                let Some(diff) = self.diff_of(doc, &sv) else { return Ok(()) };
+                let step2 = Frame::new(&frame.doc_id, &Message::Sync(SyncMessage::SyncStep2(diff))).encode();
+                match origin {
+                    Origin::Server => {
+                        if let Some(out) = &self.out {
+                            let _ = out.send(step2);
+                        }
+                        self.handshakes.insert(frame.doc_id, Handshake::Done);
+                        if is_vault {
+                            self.reconcile_vault()?;
+                        }
+                    }
+                    Origin::Peer(p) => {
+                        // Reply with our state and ask for theirs, like the server does.
+                        let sv = self.state_vector_of(doc).expect("doc exists");
+                        let step1 =
+                            Frame::new(&frame.doc_id, &Message::Sync(SyncMessage::SyncStep1(sv))).encode();
+                        if let Some(peer) = self.peers.get(&p) {
+                            let _ = peer.tx.send(step2);
+                            let _ = peer.tx.send(step1);
+                        }
+                    }
                 }
             }
             Message::Sync(SyncMessage::SyncStep2(update)) | Message::Sync(SyncMessage::Update(update)) => {
                 let changed = match doc {
                     DocId::Vault(_) => self.vault.apply_update(&update)?,
-                    DocId::Note(id) => self.notes[&id].doc.apply_update(&update)?,
+                    DocId::Note(id) => self.doc_for(id).expect("checked above").apply_update(&update)?,
                 };
                 if changed {
                     self.store.append_update(doc, &update, None)?;
+                    let fanout =
+                        Frame::new(&frame.doc_id, &Message::Sync(SyncMessage::Update(update))).encode();
+                    if origin != Origin::Server
+                        && let Some(out) = &self.out
+                    {
+                        let _ = out.send(fanout.clone());
+                    }
+                    self.broadcast_local(&frame.doc_id, &fanout, peer_id);
                     match doc {
                         DocId::Vault(_) => {
                             self.reconcile_vault()?;
@@ -975,13 +1166,23 @@ impl Engine {
                         }
                     }
                 }
-                if let Some(h) = self.handshakes.get_mut(&frame.doc_id)
+                if origin == Origin::Server
+                    && let Some(h) = self.handshakes.get_mut(&frame.doc_id)
                     && *h == Handshake::Sent
                 {
                     *h = Handshake::Step2Received;
                 }
             }
-            Message::Awareness(_) | Message::AwarenessQuery | Message::Auth(_) | Message::Custom(..) => {}
+            Message::Awareness(_) => {
+                // Presence is relayed verbatim in both directions.
+                if origin != Origin::Server
+                    && let Some(out) = &self.out
+                {
+                    let _ = out.send(bytes.to_vec());
+                }
+                self.broadcast_local(&frame.doc_id, bytes, peer_id);
+            }
+            Message::AwarenessQuery | Message::Auth(_) | Message::Custom(..) => {}
         }
         Ok(())
     }

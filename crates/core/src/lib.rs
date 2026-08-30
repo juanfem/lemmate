@@ -17,6 +17,7 @@ pub mod doc;
 pub mod error;
 pub mod frontmatter;
 pub mod ids;
+pub mod local;
 pub mod markdown;
 pub mod projection;
 pub mod store;

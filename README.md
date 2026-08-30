@@ -40,6 +40,11 @@ notes sync --vault ~/vault --server http://127.0.0.1:8080 --once
 notes sync --vault ~/vault --server http://127.0.0.1:8080 --vault-id <ULID>
 ```
 
+Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the **local relay**: the engine
+serves the sync socket, the API (from the local store), and the web client on loopback, so a UI
+at `http://127.0.0.1:8081/` keeps working with the server unreachable; edits are journaled and
+pushed when it returns. This is what the desktop app embeds.
+
 Without `--once` the command runs until interrupted, reconnecting with backoff; while offline,
 edits are journaled in `<vault>/.notes/local.db` and reconciled on reconnect. Renames are
 detected by content hash within 2 s; deletions go to the trash (the note's history is kept).
