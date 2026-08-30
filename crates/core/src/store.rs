@@ -12,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -109,6 +109,18 @@ CREATE TABLE IF NOT EXISTS note_shares (
     UNIQUE (token_hash)
 );
 CREATE INDEX IF NOT EXISTS note_shares_user ON note_shares (user_id);
+-- Single-use registration invites (SPEC §11.1). Like a public link share, the token itself is
+-- never stored — only its BLAKE3 hash — so a stolen database yields no usable invite. Redeeming
+-- sets `used_ms`/`used_by` rather than deleting the row, which keeps a record of who each invite
+-- let in.
+CREATE TABLE IF NOT EXISTS invites (
+    token_hash TEXT PRIMARY KEY,
+    created_by TEXT,
+    created_ms INTEGER NOT NULL,
+    expires_ms INTEGER,
+    used_ms    INTEGER,
+    used_by    TEXT
+);
 "#;
 
 pub struct Store {
@@ -199,6 +211,25 @@ pub struct UserRow {
     pub display_name: String,
     pub password_hash: Option<String>,
     pub is_admin: bool,
+}
+
+/// One registration invite. `token_hash` doubles as its id — it is a hash, not a credential, so
+/// it is safe to list and to name in a revoke request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteRow {
+    pub token_hash: String,
+    pub created_by: Option<String>,
+    pub created_ms: i64,
+    pub expires_ms: Option<i64>,
+    pub used_ms: Option<i64>,
+    pub used_by: Option<String>,
+}
+
+impl InviteRow {
+    /// Still redeemable: never used, and either no expiry or one still in the future.
+    pub fn usable_at(&self, now: i64) -> bool {
+        self.used_ms.is_none() && self.expires_ms.is_none_or(|e| e > now)
+    }
 }
 
 /// A parsed search query: free text for FTS5 plus structured filters (SPEC §10).
@@ -949,6 +980,113 @@ impl Store {
         Ok(())
     }
 
+    /// Replace a user's password hash. Callers are expected to follow with
+    /// [`Store::delete_sessions_of`] — a password change that leaves old sessions alive does not
+    /// lock anyone out.
+    pub fn set_password_hash(&mut self, user_id: &str, password_hash: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE users SET password_hash = ?2 WHERE id = ?1", params![user_id, password_hash])?;
+        Ok(())
+    }
+
+    /// Drop every session of a user, optionally sparing one token hash (the caller's own, so a
+    /// self-service password change does not sign the user out of the tab they are using).
+    /// Returns how many were dropped.
+    pub fn delete_sessions_of(&mut self, user_id: &str, keep: Option<&str>) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?1 AND (?2 IS NULL OR token_hash <> ?2)",
+            params![user_id, keep],
+        )?)
+    }
+
+    // ---- Registration invites (SPEC §11.1) -------------------------------------------------
+
+    pub fn create_invite(
+        &mut self,
+        token_hash: &str,
+        created_by: &str,
+        expires_ms: Option<i64>,
+    ) -> Result<InviteRow> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO invites (token_hash, created_by, created_ms, expires_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![token_hash, created_by, now, expires_ms],
+        )?;
+        Ok(InviteRow {
+            token_hash: token_hash.to_owned(),
+            created_by: Some(created_by.to_owned()),
+            created_ms: now,
+            expires_ms,
+            used_ms: None,
+            used_by: None,
+        })
+    }
+
+    /// Every invite, newest first — used and expired ones included, since an admin auditing who
+    /// got in needs exactly those.
+    pub fn invites(&self) -> Result<Vec<InviteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT token_hash, created_by, created_ms, expires_ms, used_ms, used_by
+             FROM invites ORDER BY created_ms DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_invite)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn invite(&self, token_hash: &str) -> Result<Option<InviteRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT token_hash, created_by, created_ms, expires_ms, used_ms, used_by
+                 FROM invites WHERE token_hash = ?1",
+                params![token_hash],
+                row_to_invite,
+            )
+            .optional()?)
+    }
+
+    /// Revoke an unused invite. Returns false when there is no such invite; a *used* one is left
+    /// alone, because deleting it would erase the record of the account it created.
+    pub fn revoke_invite(&mut self, token_hash: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM invites WHERE token_hash = ?1 AND used_ms IS NULL", params![token_hash])?;
+        Ok(n == 1)
+    }
+
+    /// Create a user and redeem an invite in one transaction. Returns `false` — creating nothing —
+    /// when the invite is unknown, expired, or already spent.
+    ///
+    /// Single use is enforced by the `used_ms IS NULL` clause of the UPDATE rather than by a
+    /// read-then-write in the caller, so two registrations racing on the same link cannot both
+    /// win: SQLite serialises the writes and the loser's UPDATE matches no row.
+    pub fn create_user_with_invite(
+        &mut self,
+        token_hash: &str,
+        id: &str,
+        email: &str,
+        display_name: &str,
+        password_hash: Option<&str>,
+    ) -> Result<bool> {
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        let claimed = tx.execute(
+            "UPDATE invites SET used_ms = ?2, used_by = ?3
+             WHERE token_hash = ?1 AND used_ms IS NULL AND (expires_ms IS NULL OR expires_ms > ?2)",
+            params![token_hash, now, id],
+        )?;
+        if claimed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO users (id, email, display_name, password_hash, is_admin, created_ms) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            params![id, email.to_lowercase(), display_name, password_hash, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn set_membership(&mut self, vault_id: VaultId, user_id: &str, role: Role) -> Result<()> {
         self.conn.execute(
             "INSERT INTO memberships (vault_id, user_id, role) VALUES (?1, ?2, ?3) ON CONFLICT(vault_id, user_id) DO UPDATE SET role = excluded.role",
@@ -1158,6 +1296,17 @@ fn row_to_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRow> {
         display_name: r.get(2)?,
         password_hash: r.get(3)?,
         is_admin: r.get::<_, i32>(4)? != 0,
+    })
+}
+
+fn row_to_invite(r: &rusqlite::Row<'_>) -> rusqlite::Result<InviteRow> {
+    Ok(InviteRow {
+        token_hash: r.get(0)?,
+        created_by: r.get(1)?,
+        created_ms: r.get(2)?,
+        expires_ms: r.get(3)?,
+        used_ms: r.get(4)?,
+        used_by: r.get(5)?,
     })
 }
 
@@ -1455,5 +1604,63 @@ mod tests {
             .unwrap();
         assert_eq!(store.purge_trash(30).unwrap(), 1);
         assert_eq!(store.note_by_id(a).unwrap(), None);
+    }
+
+    #[test]
+    fn an_invite_is_redeemable_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_user("admin", "ann@example.org", "Ann", Some("x"), true).unwrap();
+        let row = store.create_invite("hash-a", "admin", None).unwrap();
+        assert!(row.usable_at(now_ms()));
+        assert_eq!(store.invites().unwrap().len(), 1);
+
+        assert!(store.create_user_with_invite("hash-a", "u1", "Bob@Example.org", "Bob", Some("h")).unwrap());
+        let bob = store.user_by_email("bob@example.org").unwrap().expect("created");
+        assert!(!bob.is_admin, "an invited account is never an admin");
+
+        // Second redemption of the same invite creates nothing at all.
+        assert!(
+            !store.create_user_with_invite("hash-a", "u2", "cara@example.org", "Cara", Some("h")).unwrap()
+        );
+        assert_eq!(store.user_by_email("cara@example.org").unwrap(), None);
+        assert_eq!(store.user_count().unwrap(), 2);
+        let spent = store.invite("hash-a").unwrap().unwrap();
+        assert_eq!(spent.used_by.as_deref(), Some("u1"));
+        assert!(!spent.usable_at(now_ms()));
+        assert!(!store.revoke_invite("hash-a").unwrap(), "a spent invite is kept as a record");
+
+        // Expiry is enforced by the redeem itself, not by the caller reading the row first.
+        store.create_invite("hash-b", "admin", Some(now_ms() - 1)).unwrap();
+        assert!(!store.invite("hash-b").unwrap().unwrap().usable_at(now_ms()));
+        assert!(!store.create_user_with_invite("hash-b", "u3", "dan@example.org", "Dan", Some("h")).unwrap());
+        assert_eq!(store.user_count().unwrap(), 2);
+
+        // An unused invite can be revoked and is then gone.
+        store.create_invite("hash-c", "admin", None).unwrap();
+        assert!(store.revoke_invite("hash-c").unwrap());
+        assert_eq!(store.invite("hash-c").unwrap(), None);
+        assert!(!store.create_user_with_invite("hash-c", "u4", "eve@example.org", "Eve", Some("h")).unwrap());
+    }
+
+    #[test]
+    fn a_password_change_can_spare_one_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_user("u1", "ann@example.org", "Ann", Some("old"), true).unwrap();
+        store.create_user("u2", "bob@example.org", "Bob", Some("bob"), false).unwrap();
+        for t in ["t-a", "t-b", "t-c"] {
+            store.create_session(t, "u1", None, 60_000).unwrap();
+        }
+        store.create_session("t-bob", "u2", None, 60_000).unwrap();
+
+        store.set_password_hash("u1", "new").unwrap();
+        assert_eq!(store.user_by_id("u1").unwrap().unwrap().password_hash.as_deref(), Some("new"));
+        assert_eq!(store.delete_sessions_of("u1", Some("t-a")).unwrap(), 2);
+        assert!(store.session_user("t-a").unwrap().is_some(), "the caller's own session survives");
+        assert!(store.session_user("t-b").unwrap().is_none());
+        assert!(store.session_user("t-bob").unwrap().is_some(), "another account is untouched");
+
+        // No `keep` (an admin reset) takes the last one too.
+        assert_eq!(store.delete_sessions_of("u1", None).unwrap(), 1);
+        assert!(store.session_user("t-a").unwrap().is_none());
     }
 }

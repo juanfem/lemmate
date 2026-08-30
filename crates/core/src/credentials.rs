@@ -51,18 +51,25 @@ pub fn save(server: &str, token: &str) -> Result<()> {
 }
 
 /// Sign in (or register) on a server and save the session token. Returns the token.
+///
+/// `invite` is a registration invite (SPEC §11.1) and only means anything with `register`: it is
+/// what gets an account created on a server where registration is otherwise closed.
 pub fn login(
     server: &str,
     email: &str,
     password: &str,
     register: bool,
+    invite: Option<&str>,
     ca_cert: Option<&std::path::Path>,
     device: &str,
 ) -> Result<String> {
     let agent = crate::tls::http_agent(ca_cert)?;
     let base = key(server);
     let path = if register { "/api/v1/auth/register" } else { "/api/v1/auth/login" };
-    let body = serde_json::json!({ "email": email, "password": password, "device": device });
+    let mut body = serde_json::json!({ "email": email, "password": password, "device": device });
+    if let Some(t) = invite.map(invite_token).filter(|t| !t.is_empty()) {
+        body["invite"] = t.into();
+    }
     let mut resp = agent
         .post(format!("{base}{path}"))
         .header("content-type", "application/json")
@@ -76,6 +83,14 @@ pub fn login(
         json["token"].as_str().ok_or_else(|| Error::Sync("server returned no token".into()))?.to_owned();
     save(&base, &token)?;
     Ok(token)
+}
+
+/// The token out of an invite the admin sent, which may be the whole URL
+/// (`https://notes.example.org/#/invite/<token>`) or just the token. Pasting the link is what
+/// people actually do, so accept both rather than making them edit it.
+pub fn invite_token(invite: &str) -> String {
+    let s = invite.trim();
+    s.rsplit_once("/#/invite/").map_or(s, |(_, t)| t).trim().to_owned()
 }
 
 pub fn forget(server: &str) -> Result<()> {
@@ -104,5 +119,13 @@ mod tests {
         forget("https://x.example").unwrap();
         assert_eq!(load("https://x.example"), None);
         assert_eq!(load("https://y.example").as_deref(), Some("tok2"));
+    }
+
+    #[test]
+    fn an_invite_may_be_pasted_as_a_url_or_a_bare_token() {
+        assert_eq!(invite_token("  abc123 "), "abc123");
+        assert_eq!(invite_token("https://notes.example.org/#/invite/abc123"), "abc123");
+        assert_eq!(invite_token("http://127.0.0.1:8080/#/invite/abc123\n"), "abc123");
+        assert_eq!(invite_token(""), "");
     }
 }

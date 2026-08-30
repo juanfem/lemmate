@@ -217,7 +217,58 @@ losing fine-grained history older than that window.
 
 ---
 
-## (d) Security notes
+## (d) Letting people in, and changing passwords
+
+Both of these exist because a self-hosted server has no mail: there is no confirmation email and
+no reset-by-email link, and none is planned (SPEC §15).
+
+### Invites
+
+An admin mints a **single-use registration link**. It carries a random token — the server keeps
+only its BLAKE3 hash — and creates exactly one non-admin account before it stops working:
+
+```sh
+lemmate invite --server https://notes.example.org
+# https://notes.example.org/#/invite/<token>
+# single use; send it however you like. Revoke with `lemmate invite --revoke <id>`
+
+lemmate invite --server … --expires-days 7   # optional deadline; still single-use
+lemmate invite --server … --list             # id, and whether each is unused, expired, or spent
+lemmate invite --server … --revoke <id>      # unused ones only
+```
+
+The same thing lives in the web client under **Account, password and invites…** (the command
+palette, or the link on the vault-picker screen).
+
+Opening the link shows the sign-up form; the recipient picks their own email and password. A few
+consequences worth being deliberate about:
+
+- **The link is a credential.** It is not bound to an email address, so whoever holds it can
+  register — send it over a channel you would send a password over, and prefer `--expires-days`
+  for anything that might sit in an inbox.
+- **It cannot be reused or replayed.** Redeeming happens in the same transaction that creates the
+  account, so two people opening one link at the same moment still produce exactly one account.
+- **A spent invite is kept, not deleted**, and `--list` names the account it created. That is the
+  record of how each person got in, which is why `--revoke` refuses a used one (`409`).
+- An invited account is **never an admin**.
+
+### Passwords
+
+There is no reset-by-email flow, so an admin is the recovery path:
+
+```sh
+lemmate passwd --server https://notes.example.org                       # your own; asks for the current one
+lemmate passwd --server … --email someone@example.org                   # admin reset; asks for nothing else
+```
+
+Either way **every other session of that account is revoked** — a password change that left old
+sessions alive would not actually revoke anything. Changing your own password keeps the session
+you did it from; an admin reset signs the target out everywhere, including any `lemmate sync`
+running on their machines, which then need `lemmate login` again.
+
+---
+
+## (e) Security notes
 
 **Never run `--no-auth` on a network.** It is a development switch: it sets
 `AuthMode::Disabled`, and every request — REST, relay frames, attachment uploads — is then
@@ -226,20 +277,21 @@ The server logs a warning at startup when it is on. The same applies to `LEMMATE
 is the same switch by another name; keep it out of Compose files and `fly secrets`.
 
 **The first registered account is the admin.** Registration is allowed when *any* of these hold
-(`crates/server/src/auth.rs`): the user table is empty, `--allow-registration` is set, or the
-request carries the session of an existing admin. So on a fresh server the very first
-`POST /api/v1/auth/register` — i.e. `lemmate login --register` — succeeds without credentials and
-creates an admin; every later attempt is `403` unless one of the other two conditions applies.
+(`crates/server/src/auth.rs`): the user table is empty, `--allow-registration` is set, the
+request carries the session of an existing admin, or it carries a valid invite. So on a fresh
+server the very first `POST /api/v1/auth/register` — i.e. `lemmate login --register` — succeeds
+without credentials and creates an admin; every later attempt is `403` unless one of the other
+three conditions applies.
 
 Deploy and register immediately. Between `fly deploy` and your first `lemmate login --register`,
 whoever reaches the URL first becomes the admin.
 
 **`--allow-registration` opens self-service signup to the whole internet.** Leave it off for a
-personal or small-team server and have the admin create accounts (an admin's
-`POST /api/v1/auth/register` creates the user without logging the admin out of their own
-session). Turn it on only behind something else that restricts who can reach the server. There
-is no invite or domain allowlist; the only validation on a new account is that the email
-contains `@` and the password is at least 8 characters.
+personal or small-team server and let people in one at a time, either by having the admin create
+the account outright (an admin's `POST /api/v1/auth/register` creates the user without logging
+the admin out of their own session) or with an invite (§d above). Turn the flag on only behind
+something else that restricts who can reach the server. The only validation on a new account is
+that the email contains `@` and the password is at least 8 characters.
 
 **Other things worth doing:**
 

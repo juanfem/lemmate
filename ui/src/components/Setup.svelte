@@ -9,6 +9,7 @@
   let email = $state('')
   let password = $state('')
   let register = $state(false)
+  let invite = $state('')
   let error = $state('')
   let busy = $state(false)
 
@@ -27,6 +28,7 @@
           email: email.trim() || null,
           password: password || null,
           register,
+          invite: invite.trim() || null,
         }),
       })
       if (!r.ok) throw new Error(`${r.status}`)
@@ -52,6 +54,9 @@
       <label>Email <input type="email" bind:value={email} autocomplete="username" /></label>
       <label>Password <input type="password" bind:value={password} autocomplete="current-password" /></label>
       <label class="check"><input type="checkbox" bind:checked={register} /> Create this account (first account on a new server)</label>
+      {#if register}
+        <label>Invite <input bind:value={invite} placeholder="paste the invite link, if you were sent one" /></label>
+      {/if}
       <p class="hint">Leave empty for a server started with <code>--no-auth</code>.</p>
     </fieldset>
     {#if error}<p class="error">{error}</p>{/if}

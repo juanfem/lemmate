@@ -65,6 +65,24 @@ pub struct TagCount {
     pub count: u32,
 }
 
+/// A registration invite as the server reports it (SPEC §11.1). `link` is only ever set on the
+/// response that mints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invite {
+    pub id: String,
+    pub created_ms: i64,
+    #[serde(default)]
+    pub expires_ms: Option<i64>,
+    #[serde(default)]
+    pub used_ms: Option<i64>,
+    #[serde(default)]
+    pub used_by: Option<String>,
+    #[serde(default)]
+    pub usable: bool,
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
 // ---- Errors ----------------------------------------------------------------------------------
 
 /// A non-2xx answer, keeping the status so callers can branch on it (404 → create instead).
@@ -76,16 +94,28 @@ pub struct HttpError {
 }
 
 impl HttpError {
+    /// The account endpoints (`/auth/…`, `/invites/…`) share status codes with the note ones but
+    /// mean quite different things by them, so the wording follows the path rather than assuming
+    /// every 403 is about vault rights.
+    fn is_account(&self) -> bool {
+        self.request.contains("/auth/") || self.request.contains("/invites")
+    }
+
     fn explain(&self) -> &'static str {
-        match self.status {
-            400 => "the server rejected the request",
-            401 => "not signed in: run `lemmate login`",
-            403 => "no access: you need editor rights on this vault",
-            404 => "not found or no access",
-            409 => "conflict: a note already exists at that path",
-            413 => "too large",
-            501 => "the server does not support this operation",
-            s if s >= 500 => "the server failed",
+        match (self.status, self.is_account()) {
+            (400, true) => "the server rejected it: the new password must be at least 8 characters",
+            (400, false) => "the server rejected the request",
+            (401, true) => "wrong password, or the session expired: run `lemmate login`",
+            (401, false) => "not signed in: run `lemmate login`",
+            (403, true) => "no access: this needs an admin, or the invite is spent, expired or unknown",
+            (403, false) => "no access: you need editor rights on this vault",
+            (404, true) => "no such account on this server",
+            (404, false) => "not found or no access",
+            (409, true) => "already taken: that email has an account, or that invite has been used",
+            (409, false) => "conflict: a note already exists at that path",
+            (413, _) => "too large",
+            (501, _) => "the server does not support this operation",
+            (s, _) if s >= 500 => "the server failed",
             _ => "the request failed",
         }
     }
@@ -200,6 +230,43 @@ impl Remote {
     fn send_note(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<Note> {
         let text = self.send_json(method, path, body)?;
         serde_json::from_str(&text).with_context(|| format!("parsing the response to {method} {path}"))
+    }
+
+    // ---- Accounts (SPEC §11.1). Not on `NotesApi`: the MCP tools have no business here. ----
+
+    /// Set a password. `email` is `None` for your own (which needs `current`), or another user's
+    /// for an admin reset (which does not). Returns how many sessions the change signed out.
+    pub fn change_password(&self, email: Option<&str>, current: Option<&str>, new: &str) -> Result<u32> {
+        let mut body = serde_json::json!({ "new_password": new });
+        if let Some(e) = email {
+            body["email"] = e.into();
+        }
+        if let Some(c) = current {
+            body["current_password"] = c.into();
+        }
+        let text = self.send_json("POST", "/auth/password", &body)?;
+        let v: serde_json::Value = serde_json::from_str(&text).context("parsing the password response")?;
+        Ok(v["sessions_revoked"].as_u64().unwrap_or(0) as u32)
+    }
+
+    pub fn create_invite(&self, expires_days: Option<u32>) -> Result<Invite> {
+        let body = match expires_days {
+            Some(d) => serde_json::json!({ "expires_days": d }),
+            None => serde_json::json!({}),
+        };
+        let text = self.send_json("POST", "/invites", &body)?;
+        serde_json::from_str(&text).context("parsing the response to POST /invites")
+    }
+
+    pub fn invites(&self) -> Result<Vec<Invite>> {
+        self.get_json("/invites", &[])
+    }
+
+    pub fn revoke_invite(&self, id: &str) -> Result<()> {
+        let path = format!("/invites/{id}");
+        let what = format!("DELETE {path}");
+        self.auth(self.agent.delete(self.url(&path))).call().map_err(|e| transport_error(e, &what))?;
+        Ok(())
     }
 }
 

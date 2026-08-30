@@ -397,6 +397,19 @@ Editing features:
   Server config can disable password login or registration.
 - Sessions are opaque tokens; native clients store them in the OS keychain.
 - Personal access tokens for the CLI, API, and MCP, scoped to vaults.
+- **Registration has four doors** and no others: the user table is empty (that account becomes
+  the admin), `--allow-registration` is on, an admin makes the request, or the request carries a
+  valid invite.
+- **Invites** are single-use registration links minted by an admin: a random token, stored only
+  as its BLAKE3 hash, with an optional expiry. Redeeming one creates a non-admin account, and
+  redeem-and-create is a single transaction so a link that two people open at once still yields
+  one account. They are not bound to an email — whoever holds the link picks their own address —
+  so a link is a credential and is handed out like one. Spent invites are kept, not deleted:
+  they record which account each link created.
+- **Passwords are changed, never mailed.** A user changes their own by proving the current one;
+  an admin sets another user's without it. Either way every *other* session of that account is
+  revoked. There is deliberately no reset-by-email flow: a self-hosted server has no mail (§15),
+  so the admin reset is the recovery path.
 
 ### 11.2 Permissions
 
@@ -450,6 +463,12 @@ Server-side (or local when the binary is installed) pandoc/quarto:
 ### 13.1 REST API (`/api/v1`)
 
 ```
+POST   /auth/register     {email, password, invite?}   create an account
+POST   /auth/login | /auth/logout | GET /auth/me
+POST   /auth/password  {new_password, current_password?, email?}  change or (admin) reset
+GET    /invites                                list invites (admin)
+POST   /invites        {expires_days?}          mint a single-use invite (admin)
+DELETE /invites/:id                            revoke an unused invite (admin)
 GET    /vaults                                 list vaults
 GET    /vaults/:v/notes?path=&tag=&q=          list / search
 POST   /vaults/:v/notes        {path, content}  create
@@ -471,9 +490,11 @@ applies the result as CRDT edits, so API writes merge with concurrent editors.
 
 ### 13.2 CLI
 
-`lemmate login`, `notes vault ls`, `lemmate ls|cat|new|edit|mv|rm`, `lemmate search`,
-`lemmate daily [date]`, `lemmate export`, `lemmate import obsidian`, `lemmate sync` (native
-projection folder without the GUI). JSON output with `--json` for scripting.
+`lemmate login` (`--invite <link>` to redeem one), `notes vault ls`,
+`lemmate ls|cat|new|edit|mv|rm`, `lemmate search`, `lemmate daily [date]`, `lemmate export`,
+`lemmate import obsidian`, `lemmate passwd` (own, or `--email` to reset another as admin),
+`lemmate invite` (`--list`, `--revoke`), `lemmate sync` (native projection folder without the
+GUI). JSON output with `--json` for scripting.
 
 ### 13.3 MCP
 

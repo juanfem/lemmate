@@ -2,6 +2,7 @@
   import { onDestroy, untrack } from 'svelte'
   import { api, authState, type VaultInfo, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
+  import AccountDialog from './components/AccountDialog.svelte'
   import Setup from './components/Setup.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { ulid } from './lib/ulid.ts'
@@ -47,6 +48,11 @@
   })
   async function signedIn() {
     authRequired = false
+    // The invite is spent now; leaving it in the URL would only re-show the register form.
+    if (invite) {
+      invite = null
+      location.hash = ''
+    }
     me = await api.me().catch(() => null)
     vaultId = readHash()
     if (!vaultId) api.vaults().then((v) => (vaults = v)).catch(() => (vaults = []))
@@ -77,15 +83,23 @@
     const m = /^#\/s\/([0-9a-f]{64})/u.exec(location.hash)
     return m ? m[1]! : null
   }
+  /** #/invite/<token>: a single-use registration link an admin handed out (SPEC §11.1). */
+  function readInvite(): string | null {
+    const m = /^#\/invite\/([0-9a-f]{64})/u.exec(location.hash)
+    return m ? m[1]! : null
+  }
+  let invite = $state<string | null>(readInvite())
   let publicToken = $state<string | null>(readPublicToken())
   let noteOnly = $state<string | null>(readNoteOnly())
   window.addEventListener('hashchange', () => {
     publicToken = readPublicToken()
     noteOnly = readNoteOnly()
+    invite = readInvite()
     vaultId = readHash()
   })
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
+  let accountOpen = $state(false)
 
   $effect(() => {
     const id = vaultId
@@ -321,6 +335,7 @@
     { id: 'closepane', label: 'Close pane', run: () => closePane() },
     { id: 'nextpane', label: 'Focus next pane', shortcut: 'Ctrl+Alt+→', run: () => focusPane(1) },
     { id: 'vault', label: 'Switch vault', run: () => (location.hash = '') },
+    ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password and invites…', run: () => (accountOpen = true) }] : []),
     ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   /** Templates (SPEC §9): `Templates/<name>.md` with {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. */
@@ -486,8 +501,8 @@
   <Setup status={setup} onDone={() => (setupStarting = true)} />
 {:else if setupStarting}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
-{:else if authRequired}
-  <Login onDone={signedIn} />
+{:else if authRequired || (invite && !me)}
+  <Login {invite} onDone={signedIn} />
 {:else if !session}
   <main class="welcome">
     <h1>Lemmate</h1>
@@ -498,6 +513,9 @@
       {/each}
     </ul>
     <button class="primary" onclick={newVault}>New vault</button>
+    {#if me && me.id !== 'local'}
+      <p class="muted"><button class="link" onclick={() => (accountOpen = true)}>Account, password and invites…</button></p>
+    {/if}
     {#if sharedWithMe.length}
       <h2>Shared with me</h2>
       <ul>
@@ -594,6 +612,10 @@
   {#if shareOpen && active}
     <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />
   {/if}
+{/if}
+
+{#if accountOpen && me}
+  <AccountDialog {me} onClose={() => (accountOpen = false)} />
 {/if}
 
 {#if modal}

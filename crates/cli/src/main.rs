@@ -84,6 +84,47 @@ enum Cmd {
         /// Create the account instead of signing in (first account, or when registration is open).
         #[arg(long)]
         register: bool,
+        /// Registration invite. Either the token or the whole URL an admin sent you; implies
+        /// --register.
+        #[arg(long)]
+        invite: Option<String>,
+        #[arg(long, env = "LEMMATE_CA_CERT")]
+        ca_cert: Option<PathBuf>,
+    },
+    /// Change a password: your own, or (as an admin) someone else's.
+    Passwd {
+        /// Server base URL, e.g. https://notes.example.org
+        #[arg(long, env = "LEMMATE_SERVER")]
+        server: String,
+        /// Reset this account instead of your own. Admin only, and no current password is asked.
+        #[arg(long)]
+        email: Option<String>,
+        /// Access token (default: the one saved by `lemmate login` for this server).
+        #[arg(long, env = "LEMMATE_TOKEN")]
+        token: Option<String>,
+        #[arg(long, env = "LEMMATE_CA_CERT")]
+        ca_cert: Option<PathBuf>,
+    },
+    /// Mint, list, or revoke single-use registration invites (admin only).
+    Invite {
+        /// Server base URL, e.g. https://notes.example.org
+        #[arg(long, env = "LEMMATE_SERVER")]
+        server: String,
+        /// List existing invites instead of minting one.
+        #[arg(long, conflicts_with_all = ["revoke", "expires_days"])]
+        list: bool,
+        /// Revoke an unused invite by the id `--list` shows.
+        #[arg(long, conflicts_with = "expires_days")]
+        revoke: Option<String>,
+        /// Expire the new invite after this many days (default: never, but still single-use).
+        #[arg(long)]
+        expires_days: Option<u32>,
+        /// Emit JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+        /// Access token (default: the one saved by `lemmate login` for this server).
+        #[arg(long, env = "LEMMATE_TOKEN")]
+        token: Option<String>,
         #[arg(long, env = "LEMMATE_CA_CERT")]
         ca_cert: Option<PathBuf>,
     },
@@ -337,14 +378,86 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Login { server, email, password, register, ca_cert } => {
+        Cmd::Login { server, email, password, register, invite, ca_cert } => {
             let password = match password {
                 Some(p) => p,
                 None => rpassword::prompt_password("Password: ").context("reading password")?,
             };
             let base = credentials::key(&server);
-            credentials::login(&base, &email, &password, register, ca_cert.as_deref(), &hostname())?;
+            // An invite is only meaningful when creating the account, so it implies --register
+            // rather than erroring on the combination people will actually type.
+            let register = register || invite.is_some();
+            credentials::login(
+                &base,
+                &email,
+                &password,
+                register,
+                invite.as_deref(),
+                ca_cert.as_deref(),
+                &hostname(),
+            )?;
             println!("signed in as {email} on {base}; token saved to {}", credentials::path().display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Passwd { server, email, token, ca_cert } => {
+            let remote = Remote::from_args(&server, token, ca_cert.as_deref())?;
+            // Resetting someone else is the admin path and deliberately asks for nothing but the
+            // new password — the whole point is that the old one is unknown.
+            let current = match &email {
+                Some(_) => None,
+                None => Some(rpassword::prompt_password("Current password: ").context("reading password")?),
+            };
+            let new = rpassword::prompt_password("New password: ").context("reading password")?;
+            if new != rpassword::prompt_password("Repeat new password: ").context("reading password")? {
+                bail!("the two new passwords do not match");
+            }
+            if new.chars().count() < 8 {
+                bail!("the new password must be at least 8 characters");
+            }
+            let revoked = remote.change_password(email.as_deref(), current.as_deref(), &new)?;
+            let whose = email.as_deref().unwrap_or("your account");
+            println!("password changed for {whose}; {revoked} other session(s) signed out");
+            if email.is_none() {
+                println!("this device keeps its saved token; other devices need `lemmate login` again");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Invite { server, list, revoke, expires_days, json, token, ca_cert } => {
+            let remote = Remote::from_args(&server, token, ca_cert.as_deref())?;
+            if let Some(id) = revoke {
+                remote.revoke_invite(&id)?;
+                println!("revoked invite {id}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            if list {
+                let invites = remote.invites()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&invites)?);
+                } else if invites.is_empty() {
+                    println!("no invites");
+                } else {
+                    for i in invites {
+                        let state = match (&i.used_by, i.usable) {
+                            (Some(email), _) => format!("used by {email}"),
+                            (None, true) => "unused".to_owned(),
+                            (None, false) => "expired".to_owned(),
+                        };
+                        println!("{}  {state}", i.id);
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let invite = remote.create_invite(expires_days)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&invite)?);
+            } else {
+                let link = invite.link.as_deref().unwrap_or_default();
+                println!("{}{link}", remote.base());
+                println!(
+                    "single use; send it however you like. Revoke with `lemmate invite --revoke {}`",
+                    invite.id
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Logout { server } => {

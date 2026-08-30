@@ -354,3 +354,321 @@ async fn accounts_and_roles() {
     .unwrap();
     assert_eq!(status, 409);
 }
+
+async fn del(addr: SocketAddr, path: &str, token: &str) -> u16 {
+    let req =
+        ureq::delete(format!("http://{addr}{path}")).header("authorization", &format!("Bearer {token}"));
+    tokio::task::spawn_blocking(move || match req.call() {
+        Ok(r) => r.status().as_u16(),
+        Err(ureq::Error::StatusCode(c)) => c,
+        Err(e) => panic!("{e}"),
+    })
+    .await
+    .unwrap()
+}
+
+/// Register the first (admin) account and return its token.
+async fn admin(addr: SocketAddr) -> String {
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/register",
+        json!({"email": "ann@example.org", "password": "first pass"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["user"]["is_admin"], true);
+    body["token"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn changing_your_own_password_needs_the_old_one_and_drops_other_sessions() {
+    let (addr, _state) = start().await;
+    let ann = admin(addr).await;
+
+    // A second session for the same account, to prove the change signs it out.
+    let (s, body) =
+        post(addr, "/api/v1/auth/login", json!({"email": "ann@example.org", "password": "first pass"}), None)
+            .await;
+    assert_eq!(s, 200);
+    let other = body["token"].as_str().unwrap().to_owned();
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&other)).await.0, 200);
+
+    // Wrong current password, and a too-short new one, both refused.
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/password",
+            json!({"current_password": "nope", "new_password": "long enough"}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        401
+    );
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/password",
+            json!({"current_password": "first pass", "new_password": "short"}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        400
+    );
+    // Unauthenticated callers do not get to guess at all.
+    assert_eq!(
+        post(addr, "/api/v1/auth/password", json!({"new_password": "long enough"}), None).await.0,
+        401
+    );
+
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/password",
+        json!({"current_password": "first pass", "new_password": "second pass"}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["sessions_revoked"], 1);
+
+    // The session that made the change survives; the other one is gone.
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&ann)).await.0, 200);
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&other)).await.0, 401);
+
+    // And the new password is the one that works.
+    assert_eq!(
+        post(addr, "/api/v1/auth/login", json!({"email": "ann@example.org", "password": "first pass"}), None)
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/login",
+            json!({"email": "ann@example.org", "password": "second pass"}),
+            None
+        )
+        .await
+        .0,
+        200
+    );
+}
+
+#[tokio::test]
+async fn an_admin_resets_a_forgotten_password_and_a_user_cannot_reset_anyone_else() {
+    let (addr, _state) = start().await;
+    let ann = admin(addr).await;
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "bob@example.org", "password": "bob's pass"}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, body) =
+        post(addr, "/api/v1/auth/login", json!({"email": "bob@example.org", "password": "bob's pass"}), None)
+            .await;
+    let bob = body["token"].as_str().unwrap().to_owned();
+
+    // Bob may not reset Ann, and may not reach an account that does not exist either.
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/password",
+            json!({"email": "ann@example.org", "new_password": "hijacked!"}),
+            Some(&bob)
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/password",
+            json!({"email": "nobody@example.org", "new_password": "long enough"}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        404
+    );
+
+    // The admin resets Bob without knowing his password. Every session of Bob's dies, including
+    // the one he is holding — the admin's own is untouched.
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/password",
+        json!({"email": "Bob@Example.org", "new_password": "reset by ann"}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["sessions_revoked"], 1);
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&bob)).await.0, 401);
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&ann)).await.0, 200);
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/login",
+            json!({"email": "bob@example.org", "password": "reset by ann"}),
+            None
+        )
+        .await
+        .0,
+        200
+    );
+}
+
+#[tokio::test]
+async fn an_invite_opens_registration_exactly_once() {
+    let (addr, _state) = start().await;
+    let ann = admin(addr).await;
+
+    // Registration is closed without one.
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "bob@example.org", "password": "bob's pass"}),
+            None
+        )
+        .await
+        .0,
+        403
+    );
+
+    // Only an admin mints them.
+    let (s, body) = post(addr, "/api/v1/invites", json!({}), Some(&ann)).await;
+    assert_eq!(s, 200, "{body}");
+    let link = body["link"].as_str().unwrap().to_owned();
+    let token = link.strip_prefix("/#/invite/").expect("registration URL").to_owned();
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_ne!(id, token, "the id is the hash, not the token itself");
+    assert_eq!(body["usable"], true);
+
+    // A garbage token is refused, and does not consume the real one.
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "bob@example.org", "password": "bob's pass", "invite": "0".repeat(64)}),
+            None
+        )
+        .await
+        .0,
+        403
+    );
+
+    // The invite registers one account, with no session of the admin's involved.
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/register",
+        json!({"email": "bob@example.org", "password": "bob's pass", "invite": token}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["user"]["is_admin"], false, "an invited account is never an admin");
+    assert!(body["token"].is_string(), "the invited user is signed in");
+
+    // Single use: the same link does not work twice.
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "cara@example.org", "password": "cara's pass", "invite": token}),
+            None
+        )
+        .await
+        .0,
+        403
+    );
+
+    // It now lists as spent, names who used it, and cannot be revoked away.
+    let (s, body) = get(addr, "/api/v1/invites", Some(&ann)).await;
+    assert_eq!(s, 200);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["id"], id);
+    assert_eq!(body[0]["usable"], false);
+    assert_eq!(body[0]["used_by"], "bob@example.org");
+    assert!(body[0]["link"].is_null(), "the token is never handed out again");
+    assert_eq!(del(addr, &format!("/api/v1/invites/{id}"), &ann).await, 409);
+}
+
+#[tokio::test]
+async fn invites_expire_are_revocable_and_are_admin_only() {
+    let (addr, _state) = start().await;
+    let ann = admin(addr).await;
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "bob@example.org", "password": "bob's pass"}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, body) =
+        post(addr, "/api/v1/auth/login", json!({"email": "bob@example.org", "password": "bob's pass"}), None)
+            .await;
+    let bob = body["token"].as_str().unwrap().to_owned();
+
+    // A non-admin can neither mint nor list nor revoke.
+    assert_eq!(post(addr, "/api/v1/invites", json!({}), Some(&bob)).await.0, 403);
+    assert_eq!(get(addr, "/api/v1/invites", Some(&bob)).await.0, 403);
+    assert_eq!(post(addr, "/api/v1/invites", json!({}), None).await.0, 401);
+
+    // Revoking an unused invite makes its link stop working.
+    let (_, body) = post(addr, "/api/v1/invites", json!({"expires_days": 7}), Some(&ann)).await;
+    let token = body["link"].as_str().unwrap().strip_prefix("/#/invite/").unwrap().to_owned();
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert!(body["expires_ms"].as_i64().unwrap() > 0);
+    assert_eq!(del(addr, &format!("/api/v1/invites/{id}"), &bob).await, 403);
+    assert_eq!(del(addr, &format!("/api/v1/invites/{id}"), &ann).await, 204);
+    assert_eq!(del(addr, &format!("/api/v1/invites/{id}"), &ann).await, 404);
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "cara@example.org", "password": "cara's pass", "invite": token}),
+            None
+        )
+        .await
+        .0,
+        403
+    );
+
+    // An expired one is refused too, and a duplicate email does not spend a good invite.
+    let (_, body) = post(addr, "/api/v1/invites", json!({}), Some(&ann)).await;
+    let good = body["link"].as_str().unwrap().strip_prefix("/#/invite/").unwrap().to_owned();
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/register",
+            json!({"email": "bob@example.org", "password": "another pass", "invite": good}),
+            None
+        )
+        .await
+        .0,
+        409,
+        "email already taken"
+    );
+    let (s, body) = post(
+        addr,
+        "/api/v1/auth/register",
+        json!({"email": "cara@example.org", "password": "cara's pass", "invite": good}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "the invite survived the 409: {body}");
+}

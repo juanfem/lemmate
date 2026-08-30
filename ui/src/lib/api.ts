@@ -36,6 +36,17 @@ export interface SearchHit {
   snippet: string
 }
 
+export interface Invite {
+  id: string
+  created_ms: number
+  expires_ms: number | null
+  used_ms: number | null
+  used_by: string | null
+  usable: boolean
+  /** The registration URL, returned only by the call that mints the invite. */
+  link: string | null
+}
+
 export interface User {
   id: string
   email: string
@@ -68,12 +79,24 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return (text ? JSON.parse(text) : null) as T
 }
 
+async function del(path: string): Promise<void> {
+  const r = await fetch(`/api/v1${path}`, { method: 'DELETE' })
+  if (r.status === 401) authState.onUnauthorized()
+  if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for ${path}`)
+}
+
 export const api = {
   me: () => get<User>('/auth/me'),
   login: (email: string, password: string) => post<{ token: string; user: User }>('/auth/login', { email, password, device: navigator.userAgent.slice(0, 40) }),
-  register: (email: string, password: string, display_name: string) =>
-    post<{ token?: string; user?: User }>('/auth/register', { email, password, display_name }),
+  register: (email: string, password: string, display_name: string, invite?: string) =>
+    post<{ token?: string; user?: User }>('/auth/register', { email, password, display_name, invite }),
   logout: () => post<null>('/auth/logout', {}),
+  /** Own password (send `current`), or an admin resetting `email` (do not). */
+  changePassword: (new_password: string, current?: string, email?: string) =>
+    post<{ sessions_revoked: number }>('/auth/password', { new_password, current_password: current, email }),
+  invites: () => get<Invite[]>('/invites'),
+  createInvite: (expires_days?: number) => post<Invite>('/invites', { expires_days }),
+  revokeInvite: (id: string) => del(`/invites/${id}`),
   members: (vault: string) => get<{ user_id: string; email: string; display_name: string; role: string }[]>(`/vaults/${vault}/members`),
   setMember: async (vault: string, email: string, role: string) => {
     const r = await fetch(`/api/v1/vaults/${vault}/members`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, role }) })

@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get};
 use lemmate_core::attachments::hash_bytes;
-use lemmate_core::store::{Role, UserRow};
+use lemmate_core::store::{InviteRow, Role, UserRow, now_ms};
 use lemmate_core::{NoteId, Store, VaultId};
 use serde::{Deserialize, Serialize};
 
@@ -173,6 +173,9 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/v1/vaults/{vault}/notes/{id}/shares",
             get(list_shares).put(put_share).delete(delete_share),
         )
+        .route("/api/v1/auth/password", axum::routing::post(change_password))
+        .route("/api/v1/invites", get(list_invites).post(create_invite))
+        .route("/api/v1/invites/{id}", axum::routing::delete(revoke_invite))
         .route("/api/v1/shared-with-me", get(shared_with_me))
         .route("/api/v1/shared/{token}", get(shared_note))
 }
@@ -398,6 +401,10 @@ pub struct Credentials {
     pub display_name: Option<String>,
     #[serde(default)]
     pub device: Option<String>,
+    /// A registration invite (SPEC §11.1). Lets this one request through on a server where
+    /// registration is otherwise closed; spent on success.
+    #[serde(default)]
+    pub invite: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -447,19 +454,34 @@ async fn register(
     let requester = authenticate(&state, &headers).await;
     let mut store = state.store.lock().await;
     let first = store.user_count().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? == 0;
-    let allowed = first || allow_registration || requester.as_ref().is_some_and(|u| u.is_admin);
-    if !allowed {
+    let by_right = first || allow_registration || requester.as_ref().is_some_and(|u| u.is_admin);
+    // An invite is the fourth way in, and the only one that does not need either an empty server
+    // or an admin's session.
+    let invite = c.invite.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(token_hash);
+    if !by_right && invite.is_none() {
         return Err(StatusCode::FORBIDDEN);
     }
+    // Checked before the invite is spent: a typo'd duplicate email should not burn the link.
     if store.user_by_email(&email).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_some() {
         return Err(StatusCode::CONFLICT);
     }
     let id = lemmate_core::NoteId::new().to_string();
     let hash = hash_password(&c.password)?;
     let name = c.display_name.unwrap_or_else(|| email.split('@').next().unwrap_or("user").to_owned());
-    store
-        .create_user(&id, &email, &name, Some(&hash), first)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if by_right {
+        store
+            .create_user(&id, &email, &name, Some(&hash), first)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else {
+        // Redeem-and-create is one transaction, so a link that two people open at the same moment
+        // creates exactly one account. An invited account is never an admin.
+        let claimed = store
+            .create_user_with_invite(&invite.expect("checked"), &id, &email, &name, Some(&hash))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !claimed {
+            return Err(StatusCode::FORBIDDEN); // unknown, expired, or already spent
+        }
+    }
     let user = store
         .user_by_id(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -507,6 +529,182 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
 
 async fn me(user: AuthUser) -> Json<AuthUser> {
     Json(user)
+}
+
+#[derive(Deserialize)]
+pub struct ChangePassword {
+    /// Whose password to set. Omitted (or your own address) means yourself; anyone else's needs
+    /// an admin.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Required when changing your own password. Ignored for an admin resetting someone else's —
+    /// the point of that path is that nobody knows the old one.
+    #[serde(default)]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+#[derive(Serialize)]
+pub struct PasswordChanged {
+    /// Sessions signed out by the change. Your own is kept when you change your own password.
+    pub sessions_revoked: usize,
+}
+
+/// Set a password (SPEC §11.1). Two shapes: your own, proving the current one; or an admin
+/// resetting another account, which is the only recovery path on a server with no mail.
+///
+/// Either way every *other* session of the target is dropped. A password change that left old
+/// sessions alive would not actually revoke access, which is usually the reason for changing it.
+async fn change_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    user: AuthUser,
+    Json(body): Json<ChangePassword>,
+) -> Result<Json<PasswordChanged>, StatusCode> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if body.new_password.len() < 8 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let target_email = body.email.as_deref().map(|e| e.trim().to_lowercase());
+    let is_self = target_email.as_ref().is_none_or(|e| *e == user.email.to_lowercase());
+    if !is_self && !user.is_admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut store = state.store.lock().await;
+    let target = match (&target_email, is_self) {
+        (Some(email), false) => store
+            .user_by_email(email)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?,
+        _ => store
+            .user_by_id(&user.id)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?,
+    };
+    if is_self {
+        let current = body.current_password.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+        let ok = target.password_hash.as_deref().is_some_and(|h| verify_password(current, h));
+        if !ok {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    let hash = hash_password(&body.new_password)?;
+    store.set_password_hash(&target.id, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Keep the caller's own session only when it belongs to the account being changed.
+    let keep = is_self.then(|| token_from_headers(&headers).map(|t| token_hash(&t))).flatten();
+    let sessions_revoked = store
+        .delete_sessions_of(&target.id, keep.as_deref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(PasswordChanged { sessions_revoked }))
+}
+
+#[derive(Deserialize)]
+pub struct InviteIn {
+    /// Lifetime in days. Omitted means it never expires — it is still single-use.
+    #[serde(default)]
+    pub expires_days: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct InviteOut {
+    /// The invite's id, which is the BLAKE3 hash of the token — safe to list and to revoke by.
+    pub id: String,
+    pub created_ms: i64,
+    pub expires_ms: Option<i64>,
+    pub used_ms: Option<i64>,
+    /// Email of the account this invite created, once it has been used.
+    pub used_by: Option<String>,
+    pub usable: bool,
+    /// The registration URL. Returned once, when the invite is minted, and never again.
+    pub link: Option<String>,
+}
+
+fn invite_out(i: InviteRow, used_by: Option<String>, link: Option<String>) -> InviteOut {
+    InviteOut {
+        usable: i.usable_at(now_ms()),
+        id: i.token_hash,
+        created_ms: i.created_ms,
+        expires_ms: i.expires_ms,
+        used_ms: i.used_ms,
+        used_by,
+        link,
+    }
+}
+
+/// Mint a single-use registration link (SPEC §11.1). Admin only: on a server with
+/// `--allow-registration` off this is the only way to open a door, so handing it out is exactly
+/// as consequential as creating the account by hand.
+async fn create_invite(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<InviteIn>,
+) -> Result<Json<InviteOut>, StatusCode> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !user.is_admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let token = new_token();
+    let expires = body.expires_days.map(|d| now_ms() + i64::from(d) * 24 * 3600 * 1000);
+    let row = state
+        .store
+        .lock()
+        .await
+        .create_invite(&token_hash(&token), &user.id, expires)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(invite_out(row, None, Some(format!("/#/invite/{token}")))))
+}
+
+async fn list_invites(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<InviteOut>>, StatusCode> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !user.is_admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let store = state.store.lock().await;
+    let rows = store.invites().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Resolve the redeemer to an email; a deleted account leaves the id behind as None.
+        let used_by = match &row.used_by {
+            Some(id) => store.user_by_id(id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.map(|u| u.email),
+            None => None,
+        };
+        out.push(invite_out(row, used_by, None));
+    }
+    Ok(Json(out))
+}
+
+/// Revoke an unused invite by its id (the token hash). A spent invite is left alone — 409 — so
+/// the record of which link created which account survives.
+async fn revoke_invite(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !user.is_admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut store = state.store.lock().await;
+    let existing = store.invite(&id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match existing {
+        None => Err(StatusCode::NOT_FOUND),
+        Some(i) if i.used_ms.is_some() => Err(StatusCode::CONFLICT),
+        Some(_) => {
+            store.revoke_invite(&id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+    }
 }
 
 #[derive(Serialize)]

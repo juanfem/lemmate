@@ -598,6 +598,10 @@ pub struct SetupRequest {
     pub password: Option<String>,
     #[serde(default)]
     pub register: bool,
+    /// Registration invite (SPEC §11.1), so the first run of the desktop app can create an
+    /// account on a server where registration is closed. The whole URL or the bare token.
+    #[serde(default)]
+    pub invite: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

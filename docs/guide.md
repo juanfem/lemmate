@@ -33,9 +33,10 @@ version:
 lemmate-server --data-dir ./data --web-dir ui/dist     # accounts on by default
 ```
 
-The **first account to register becomes the admin**; afterwards only admins create accounts,
-unless the server was started with `--allow-registration`. Register immediately after
-deploying — on a fresh server the first registration succeeds without credentials.
+The **first account to register becomes the admin**; afterwards accounts come from the admin —
+either created outright or through an invite link (§4) — unless the server was started with
+`--allow-registration`. Register immediately after deploying: on a fresh server the first
+registration succeeds without credentials, so whoever gets there first is the admin.
 
 `--no-auth` disables accounts, roles and permission checks entirely. It is a **development
 switch only**: every request is treated as a local owner. Never expose a `--no-auth` server to
@@ -50,7 +51,8 @@ a network.
 - **Server URL** — e.g. `https://notes.example.org`;
 - **Vault id** — leave empty to create a new vault, or paste a ULID to join an existing one;
 - **Email / password**, with a "create this account" checkbox for the first account on a new
-  server. Leave both empty for a `--no-auth` server.
+  server — and, under it, a box to paste an invite link if someone sent you one. Leave email and
+  password empty for a `--no-auth` server.
 
 Submitting signs in, writes `desktop.toml`, starts the relay and opens the vault. Every key has
 a flag (`--vault-dir`, `--server-url`, `--vault-id`, `--ca-cert`, `--web-dir`, `--config`) and
@@ -246,6 +248,31 @@ that no note references any more are purged after a grace period
 `Authorization: Bearer …` by native clients and as an HttpOnly cookie by the browser. OIDC is
 specified but not implemented.
 
+**Inviting someone.** An admin mints a single-use link; the person opening it picks their own
+email and password and lands in the app signed in. It works once — a second attempt is refused —
+and an invited account is never an admin.
+
+```sh
+lemmate invite --server https://notes.example.org                 # prints the link
+lemmate invite --server … --expires-days 7                        # optional deadline
+lemmate invite --server … --list                                  # unused / expired / used by whom
+lemmate invite --server … --revoke ID                             # unused ones only
+```
+
+In the browser the same thing is under **Account, password and invites…** — in the command
+palette (Ctrl+Shift+P), or as a link on the vault-picker screen. The link is a credential and is
+not tied to an email address, so send it the way you would send a password.
+
+**Changing a password.** Yours needs the current one; an admin can reset anyone's without it,
+which is the only recovery path — a self-hosted server has no mail and there is no reset-by-email
+link. Either way every *other* session of that account is signed out, so other devices have to
+sign in again.
+
+```sh
+lemmate passwd --server https://notes.example.org                 # your own
+lemmate passwd --server … --email someone@example.org             # admin reset
+```
+
 **Vault roles**: **owner** (manages members), **editor** (read + write), **viewer** (read
 only). They are enforced on every REST call and every relay frame, not in the UI: a viewer's
 updates are refused by the server. A vault nobody owns yet is claimed by the first user who
@@ -316,8 +343,10 @@ notes <command>
 
 | Command | What it does |
 |---|---|
-| `lemmate login --server URL --email E [--register] [--ca-cert F]` | Sign in (or create the account) and save the token to `~/.config/lemmate/credentials.toml`. Password prompted if not given. |
+| `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token to `~/.config/lemmate/credentials.toml`. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
 | `lemmate logout --server URL` | Forget the saved token for that server. |
+| `lemmate passwd --server URL [--email E]` | Change your password (prompts for the current one), or reset another account's as an admin. Signs every other session of that account out. |
+| `lemmate invite --server URL [--expires-days N] [--list] [--revoke ID] [--json]` | Mint, list, or revoke single-use registration links. Admin only. |
 | `lemmate sync --vault DIR --server URL [--vault-id ULID] [--once] [--serve ADDR --web-dir DIR] [--ca-cert F] [--token T]` | Keep a folder in sync; optionally run the local relay and serve the web client. |
 | `lemmate index PATH [--json]` | Index one file or a whole vault and print what the engine extracts (title, tags, links). |
 | `lemmate search VAULT QUERY [--limit N]` | Full-text search over a vault directory, using a throwaway in-memory index. |

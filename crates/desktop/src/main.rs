@@ -128,6 +128,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                             email,
                             password,
                             req.register,
+                            req.invite.as_deref(),
                             ca,
                             &device,
                         )

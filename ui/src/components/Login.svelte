@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { api, ApiError } from '../lib/api.ts'
 
-  let { onDone }: { onDone: () => void } = $props()
-  let mode: 'login' | 'register' = $state('login')
+  let { onDone, invite = null }: { onDone: () => void; invite?: string | null } = $props()
+  // Arriving on an invite link means the point is to create an account, so start there.
+  let mode: 'login' | 'register' = $state(untrack(() => (invite ? 'register' : 'login')))
   let email = $state('')
   let password = $state('')
   let name = $state('')
@@ -16,7 +18,7 @@
     try {
       if (mode === 'login') await api.login(email, password)
       else {
-        const r = await api.register(email, password, name || email.split('@')[0] || 'me')
+        const r = await api.register(email, password, name || email.split('@')[0] || 'me', invite ?? undefined)
         if (!r.token) await api.login(email, password)
       }
       onDone()
@@ -24,6 +26,7 @@
       const status = err instanceof ApiError ? err.status : 0
       error =
         status === 401 ? 'Wrong email or password.'
+        : status === 403 && invite ? 'This invite has already been used, expired, or was revoked. Ask the admin for a new link.'
         : status === 403 ? 'Registration is closed on this server; ask the admin for an account.'
         : status === 409 ? 'An account with that email already exists.'
         : status === 400 ? 'Use a valid email and a password of at least 8 characters.'
@@ -37,7 +40,11 @@
 <main class="login">
   <form onsubmit={submit}>
     <h1>Lemmate</h1>
-    <p class="muted">{mode === 'login' ? 'Sign in to your server.' : 'Create an account. The first account becomes the admin.'}</p>
+    <p class="muted">
+      {#if mode === 'login'}Sign in to your server.
+      {:else if invite}You were invited. Pick an email and a password; the link works once.
+      {:else}Create an account. The first account becomes the admin.{/if}
+    </p>
     {#if mode === 'register'}
       <label>Name <input bind:value={name} autocomplete="name" /></label>
     {/if}
