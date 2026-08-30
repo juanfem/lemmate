@@ -44,8 +44,10 @@ a network.
 
 ### (b) Desktop app, first run
 
-`lemmate-desktop` reads `$XDG_CONFIG_HOME/notes/desktop.toml` (falling back to
-`~/.config/lemmate/desktop.toml`). With no config file it opens a **setup screen** asking for:
+`lemmate-desktop` reads `desktop.toml` from your configuration directory — `~/.config/lemmate` on
+Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on Windows (set
+`LEMMATE_CONFIG_DIR` to put it somewhere else). With no config file it opens a **setup screen**
+asking for:
 
 - **Vault folder** — where your `.md` files live on this computer (created if missing);
 - **Server URL** — e.g. `https://notes.example.org`;
@@ -68,7 +70,8 @@ lemmate login --server https://notes.example.org --email you@example.org --regis
 lemmate sync  --vault ~/vault --server https://notes.example.org          # keeps running
 ```
 
-`login` stores a session token in `~/.config/lemmate/credentials.toml` (mode 0600); `sync` picks
+`login` stores a session token in `credentials.toml` in your configuration directory (mode 0600
+where the OS supports it); `sync` picks
 it up automatically. First run **publishes** the folder as a new vault and prints the id; to
 join an existing vault into an empty folder, pass `--vault-id <ULID>`. Add `--once` to sync and
 exit. Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the local relay, which serves
@@ -343,7 +346,7 @@ notes <command>
 
 | Command | What it does |
 |---|---|
-| `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token to `~/.config/lemmate/credentials.toml`. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
+| `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token to `credentials.toml` in your configuration directory. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
 | `lemmate logout --server URL` | Forget the saved token for that server. |
 | `lemmate passwd --server URL [--email E]` | Change your password (prompts for the current one), or reset another account's as an admin. Signs every other session of that account out. |
 | `lemmate invite --server URL [--expires-days N] [--list] [--revoke ID] [--json]` | Mint, list, or revoke single-use registration links. Admin only. |
@@ -451,9 +454,12 @@ note that stays empty or edits that quietly do not stick. Check your role on the
 | `<vault>/.lemmate/local.db` | Local update log, snapshots, index, and the vault id for this folder |
 | `<vault>/.lemmate/attachments/` | Content-addressed attachment cache |
 | `<vault>/attachments/` | The human-readable projection of referenced attachments |
-| `~/.config/lemmate/credentials.toml` | Saved session tokens, one per server (mode 0600) |
-| `~/.config/lemmate/desktop.toml` | Desktop app configuration |
+| `<config>/credentials.toml` | Saved session tokens, one per server (mode 0600 on Unix) |
+| `<config>/desktop.toml` | Desktop app configuration |
 | `<data-dir>/lemmate.db`, `<data-dir>/attachments/` | Everything on the server |
+
+`<config>` is `~/.config/lemmate` on Linux (or `$XDG_CONFIG_HOME/lemmate`), `~/Library/Application
+Support/lemmate` on macOS and `%APPDATA%\lemmate` on Windows; `LEMMATE_CONFIG_DIR` overrides it.
 
 **Resetting a device.** The sidecar is a cache, not your data: stop the client, delete
 `<vault>/.lemmate/`, and re-sync. Pass `--vault-id <ULID>` (the id is printed by `lemmate sync

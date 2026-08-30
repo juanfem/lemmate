@@ -51,7 +51,9 @@ pandoc.
 
 ## Desktop
 
-`lemmate-desktop` reads `~/.config/lemmate/desktop.toml`; without one it opens a setup screen
+`lemmate-desktop` reads `desktop.toml` from the per-user configuration directory
+(`~/.config/lemmate`, `~/Library/Application Support/lemmate`, `%APPDATA%\lemmate`;
+`LEMMATE_CONFIG_DIR` overrides); without one it opens a setup screen
 (vault folder, server, optional account) and writes it. Sessions come from `lemmate login` or the
 setup screen. The window is the web client served by the embedded relay, so it works offline.
 

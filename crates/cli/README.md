@@ -15,7 +15,7 @@ They all take the same connection options:
 | Option | Environment | Meaning |
 |---|---|---|
 | `--server URL` | `LEMMATE_SERVER` | Server base URL, e.g. `https://notes.example.org`. Required. |
-| `--token TOKEN` | `LEMMATE_TOKEN` | Access token. Defaults to the one `lemmate login` saved for this server (`~/.config/lemmate/credentials.toml`). |
+| `--token TOKEN` | `LEMMATE_TOKEN` | Access token. Defaults to the one `lemmate login` saved for this server (`credentials.toml` in the per-user configuration directory: `~/.config/lemmate` on Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on Windows; `LEMMATE_CONFIG_DIR` overrides it). |
 | `--ca-cert FILE` | `LEMMATE_CA_CERT` | PEM of a private CA to trust for `https://`. |
 | `--vault ULID` | `LEMMATE_VAULT` | Which vault to work in. Optional when the account has exactly one. |
 

@@ -15,7 +15,7 @@ use serde::Deserialize;
 #[derive(Parser, Debug)]
 #[command(name = "lemmate-desktop", version, about = "Self-hosted markdown notes (desktop)")]
 pub struct Cli {
-    /// Configuration file (default: `$XDG_CONFIG_HOME/notes/desktop.toml`).
+    /// Configuration file (default: `desktop.toml` in the per-user configuration directory).
     #[arg(long, value_name = "FILE", env = "LEMMATE_DESKTOP_CONFIG")]
     pub config: Option<PathBuf>,
     /// Vault directory to open; created by the engine if missing.
@@ -62,20 +62,17 @@ pub struct Config {
     pub web_dir: Option<PathBuf>,
 }
 
-/// Where the configuration file lives: `$XDG_CONFIG_HOME/notes/desktop.toml`, falling back
-/// to `~/.config/lemmate/desktop.toml`.
+/// Where the configuration file lives: `desktop.toml` in the per-user configuration directory
+/// (`~/.config/lemmate`, `~/Library/Application Support/lemmate`, `%APPDATA%\lemmate`).
 pub fn default_config_path() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(base.join("lemmate").join("desktop.toml"))
+    Some(lemmate_core::paths::config_dir()?.join("desktop.toml"))
 }
 
 /// The message printed when the configuration is missing or incomplete.
 pub fn format_help(path: Option<&Path>) -> String {
-    let shown =
-        path.map(|p| p.display().to_string()).unwrap_or_else(|| "~/.config/lemmate/desktop.toml".into());
+    let shown = path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "desktop.toml in your configuration directory".into());
     format!(
         "lemmate-desktop has no vault to open yet (there is no setup UI in this milestone).\n\
          \n\
@@ -115,7 +112,7 @@ impl Config {
         if file.vault_dir.is_some() && file.server_url.is_some() {
             return None;
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let home = lemmate_core::paths::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Some(SetupContext {
             config_path: path,
             web_dir: cli.web_dir.clone().or(file.web_dir),

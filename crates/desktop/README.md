@@ -16,7 +16,9 @@ Tauri managed state and `abort()`ed on `RunEvent::Exit`.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/notes/desktop.toml`, falling back to `~/.config/lemmate/desktop.toml`:
+`desktop.toml` in the per-user configuration directory — `~/.config/lemmate` on Linux
+(honouring `$XDG_CONFIG_HOME`), `~/Library/Application Support/lemmate` on macOS,
+`%APPDATA%\lemmate` on Windows, or `$LEMMATE_CONFIG_DIR` when that is set:
 
 ```toml
 vault_dir  = "/home/you/notes"              # required — the vault folder, created if missing

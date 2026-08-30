@@ -1,17 +1,13 @@
-//! Saved sessions for native clients: `$XDG_CONFIG_HOME/notes/credentials.toml`, one
-//! `[servers."<base url>"]` table per server holding `token`. Written by `lemmate login`, read by
-//! `lemmate sync` and the desktop app.
+//! Saved sessions for native clients: `credentials.toml` in the per-user configuration directory
+//! (`crate::paths::config_dir`), one `[servers."<base url>"]` table per server holding `token`.
+//! Written by `lemmate login`, read by `lemmate sync` and the desktop app.
 
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 
 pub fn path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("lemmate").join("credentials.toml")
+    crate::paths::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("credentials.toml")
 }
 
 fn read() -> toml::Table {
@@ -109,8 +105,11 @@ mod tests {
     #[test]
     fn round_trip_in_a_temp_home() {
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: tests in this module run single-threaded with respect to this variable.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        // SAFETY: this is the only test in the crate that touches this variable, so nothing else
+        // races with it. It is also what makes the test platform-independent: without it `path()`
+        // would resolve to the real `~/.config`, `~/Library/Application Support` or `%APPDATA%`.
+        unsafe { std::env::set_var("LEMMATE_CONFIG_DIR", dir.path()) };
+        assert_eq!(path().parent(), Some(dir.path()));
         assert_eq!(load("https://x.example"), None);
         save("https://x.example/", "tok1").unwrap();
         save("https://y.example", "tok2").unwrap();

@@ -62,6 +62,32 @@ jobs:
       - name: cargo check
         run: cargo check -p lemmate-desktop
 
+  # macOS and Windows never run the full suite here — no runner has a vault, a server or a
+  # webview to drive — but they do have to compile, including the Tauri shell (WKWebView and
+  # WebView2 need no extra system packages). The credentials tests come along because they are
+  # what pins the per-user config directory down on each platform.
+  cross:
+    name: Rust (${{ matrix.os }}, check only)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.os }}
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test (paths)
+        run: cargo test -p lemmate-core credentials::
+
   # Svelte type-check plus the markdown corpus tests. ui/test also holds live end-to-end tests
   # that skip themselves unless LEMMATE_SERVER_BIN / LEMMATE_CLI_BIN point at built binaries, so
   # they are inert here and the Rust job stays the one that compiles them.

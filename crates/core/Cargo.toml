@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 blake3 = "1"
+dirs = "6"
 futures-util = "0.3"
 markdown = "1"
 mime_guess = "2"
