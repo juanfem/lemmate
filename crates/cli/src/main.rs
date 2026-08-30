@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use notes_core::client::{self, SyncOptions};
+use notes_core::export;
+use notes_core::import::{self, ImportOptions};
 use notes_core::local::LocalOptions;
 use notes_core::{NoteId, Projection, Store, VaultId, markdown};
 
@@ -60,8 +62,44 @@ enum Cmd {
         #[arg(long, env = "NOTES_WEB_DIR")]
         web_dir: Option<PathBuf>,
     },
+    /// Import notes from another tool into a vault directory (SPEC §11.4).
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+    },
+    /// Export a vault (SPEC §12).
+    Export {
+        #[command(subcommand)]
+        format: ExportFormat,
+    },
     /// Print versions and environment facts.
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum ImportSource {
+    /// Copy an Obsidian vault, converting callouts and image embeds.
+    Obsidian {
+        /// The Obsidian vault directory to read.
+        src: PathBuf,
+        /// Destination notes vault directory; created if missing.
+        #[arg(long)]
+        into: PathBuf,
+        /// Replace files that already exist in the destination.
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportFormat {
+    /// Zip the vault's notes and attachments (no pandoc needed).
+    Zip {
+        /// Vault directory to export.
+        vault: PathBuf,
+        /// Archive to write.
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -149,6 +187,20 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if once {
                 println!("in sync: vault {} ({} notes)", report.vault_id, report.notes);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Import { source } => {
+            let ImportSource::Obsidian { src, into, overwrite } = source;
+            let report = import::import_obsidian(&src, &into, &ImportOptions { overwrite })
+                .with_context(|| format!("importing {} into {}", src.display(), into.display()))?;
+            println!("{report}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Export { format } => {
+            let ExportFormat::Zip { vault, out } = format;
+            let report = export::export_zip(&vault, &out)
+                .with_context(|| format!("exporting {} to {}", vault.display(), out.display()))?;
+            println!("{report} -> {}", out.display());
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor => {

@@ -22,6 +22,10 @@ pub enum Error {
     PathEscape(String),
     #[error("sync: {0}")]
     Sync(String),
+    #[error("import: {0}")]
+    Import(String),
+    #[error("export: {0}")]
+    Export(String),
     #[error("websocket: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
 }
