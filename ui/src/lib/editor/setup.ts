@@ -7,7 +7,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching } from '@codemirror/language'
+import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, codeFolding } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { yCollab } from 'y-codemirror.next'
 import type * as Y from 'yjs'
@@ -35,6 +35,10 @@ const theme = EditorView.theme({
   '.cm-content': { maxWidth: '46rem', margin: '0 auto', padding: '0 2rem', caretColor: 'var(--fg)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-line': { padding: '0' },
+  '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--muted)' },
+  '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35 },
+  '.cm-foldGutter:hover .cm-gutterElement': { opacity: 1 },
+  '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
   '.cm-heading': { lineHeight: '1.3', marginTop: '0.6em' },
   '.cm-h1': { fontSize: '1.9em' },
   '.cm-h2': { fontSize: '1.5em' },
@@ -84,6 +88,8 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       highlightSelectionMatches(),
       indentOnInput(),
       bracketMatching(),
+      codeFolding({ placeholderText: '…' }),
+      foldGutter({ openText: '▾', closedText: '▸' }),
       closeBrackets(),
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage, extensions: noteSyntax, addKeymap: true }),
@@ -92,7 +98,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       livePreview(opts),
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
-      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, indentWithTab]),
+      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
       ...(opts.extra ?? []),
     ],
   })

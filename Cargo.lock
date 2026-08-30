@@ -2504,16 +2504,19 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "jiff",
  "notes-core",
  "notes-server",
  "rcgen",
  "rpassword",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
@@ -2576,6 +2579,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tower-http 0.7.0",

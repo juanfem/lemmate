@@ -9,14 +9,14 @@ specification; this README covers the repository and the current milestone.
 |---|---|---|
 | `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
 | `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
-| `notes-cli` | `crates/cli` | `notes` binary: `login`/`logout`, `sync` (with `--serve` relay), `index`, `search`, `import obsidian`, `export zip`, `doctor`. |
+| `notes-cli` | `crates/cli` | `notes` binary: `login`/`logout`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `notes-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
 | `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `notes-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
-`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST writes; MCP server and
-remote CLI in progress; mobile and Quarto rendering remain.
+`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server and remote CLI; mobile and Quarto
+rendering remain.
 
 Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
 `NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for

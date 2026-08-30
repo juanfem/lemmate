@@ -1,13 +1,18 @@
-//! `notes` — command-line client (SPEC §13.2).
+//! `notes` — command-line client (SPEC §13.2, §13.3).
 //!
-//! M0 scope: local commands built directly on `notes-core`, plus `sync` against a server.
-//! Accounts (`login`) arrive with M2.
+//! Two families of commands: local ones built directly on `notes-core` (`index`, `search`,
+//! `import`, `export`, `sync`, `doctor`), and server-backed ones that speak the REST API
+//! (`vaults`, `ls`, `cat`, `new`, `edit`, `mv`, `rm`, `daily`, `find`, `backlinks`, `tags`) —
+//! plus `mcp`, which exposes the same API to agents over the Model Context Protocol.
 
-use std::path::PathBuf;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::Context;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, bail};
+use clap::{Args, Parser, Subcommand};
+use notes_cli::mcp;
+use notes_cli::remote::{NotesApi, Remote, resolve_vault};
 use notes_core::client::{self, SyncOptions};
 use notes_core::credentials;
 use notes_core::export;
@@ -87,6 +92,110 @@ enum Cmd {
         #[arg(long, env = "NOTES_SERVER")]
         server: String,
     },
+    /// List the vaults this account can see.
+    Vaults {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Emit JSON instead of one vault per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the notes in a vault on the server, one path per line.
+    Ls {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Emit JSON (id, path, title) instead of paths.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a note's markdown.
+    Cat {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path (the `.md` is optional) or note id.
+        note: String,
+        /// Emit the whole note as JSON instead of just its content.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a note from a file, stdin, or nothing.
+    New {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path for the new note; `.md` is added when missing.
+        path: String,
+        /// Read the content from this file (`-` for stdin). Default: stdin when it is piped.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit a note in $EDITOR and send the result back (merged as a diff, not a blind write).
+    Edit {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path or note id.
+        note: String,
+        /// Take the new content from this file (`-` for stdin) instead of opening an editor.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Move or rename a note.
+    Mv {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path or note id.
+        note: String,
+        /// New vault-relative path.
+        new_path: String,
+    },
+    /// Move a note to the trash (its history is kept).
+    Rm {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path or note id.
+        note: String,
+    },
+    /// Print the daily note for a date, creating it when it does not exist yet.
+    Daily {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Calendar date as YYYY-MM-DD (default: today).
+        date: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Full-text search a vault on the server (the local `search` walks a directory instead).
+    Find {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the notes that link to a note.
+    Backlinks {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative path or note id.
+        note: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the tags used in a vault, most used first.
+    Tags {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve the Model Context Protocol over stdio so an agent can read and write notes.
+    Mcp {
+        #[command(flatten)]
+        remote: RemoteArgs,
+    },
     /// Import notes from another tool into a vault directory (SPEC §11.4).
     Import {
         #[command(subcommand)]
@@ -99,6 +208,36 @@ enum Cmd {
     },
     /// Print versions and environment facts.
     Doctor,
+}
+
+/// The options every server-backed command shares.
+#[derive(Args, Clone, Debug)]
+struct RemoteArgs {
+    /// Server base URL, e.g. https://notes.example.org
+    #[arg(long, env = "NOTES_SERVER")]
+    server: String,
+    /// Access token (default: the one saved by `notes login` for this server).
+    #[arg(long, env = "NOTES_TOKEN")]
+    token: Option<String>,
+    /// PEM file of a private CA to trust for https:// (default: public roots).
+    #[arg(long, env = "NOTES_CA_CERT")]
+    ca_cert: Option<PathBuf>,
+    /// Vault id; optional when the account has exactly one vault.
+    #[arg(long, env = "NOTES_VAULT")]
+    vault: Option<String>,
+}
+
+impl RemoteArgs {
+    fn connect(&self) -> anyhow::Result<Remote> {
+        Remote::from_args(&self.server, self.token.clone(), self.ca_cert.as_deref())
+    }
+
+    /// A client plus the vault to work in (asks the server when `--vault` was left out).
+    fn open(&self) -> anyhow::Result<(Remote, String)> {
+        let remote = self.connect()?;
+        let vault = resolve_vault(&remote, self.vault.as_deref())?;
+        Ok((remote, vault))
+    }
 }
 
 #[derive(Subcommand)]
@@ -128,7 +267,9 @@ enum ExportFormat {
 }
 
 fn main() -> ExitCode {
+    // stderr, always: `notes mcp` speaks JSON-RPC on stdout.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
@@ -230,6 +371,149 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Vaults { remote, json } => {
+            let vaults = remote.connect()?.vaults()?;
+            if json {
+                print_json(&vaults)?;
+            } else if vaults.is_empty() {
+                println!("no vaults yet — create one with `notes sync`");
+            } else {
+                for v in &vaults {
+                    println!("{}  {} notes", v.id, v.notes);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Ls { remote, json } => {
+            let (r, vault) = remote.open()?;
+            let mut notes = r.notes(&vault)?;
+            notes.sort_by(|a, b| a.path.cmp(&b.path));
+            if json {
+                print_json(&notes)?;
+            } else {
+                for n in &notes {
+                    println!("{}", n.path);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Cat { remote, note, json } => {
+            let (r, vault) = remote.open()?;
+            let found = r.resolve_note(&vault, &note)?;
+            let note = r.note(&vault, &found.id)?;
+            if json {
+                print_json(&note)?;
+            } else {
+                print_content(&note.content);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::New { remote, path, from, json } => {
+            let (r, vault) = remote.open()?;
+            let content = read_content(from.as_deref())?;
+            let note = r.create(&vault, &path, &content)?;
+            if json {
+                print_json(&note)?;
+            } else {
+                println!("created {} ({})", note.path, note.id);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Edit { remote, note, from } => {
+            let (r, vault) = remote.open()?;
+            let found = r.resolve_note(&vault, &note)?;
+            let current = r.note(&vault, &found.id)?.content;
+            let edited = match from {
+                Some(path) => Some(read_content(Some(&path))?),
+                None => edit_in_editor(&current, &found.path)?,
+            };
+            match edited {
+                Some(text) if text != current => {
+                    let note = r.replace(&vault, &found.id, &text)?;
+                    println!("updated {} ({})", note.path, note.id);
+                }
+                _ => println!("no changes to {}", found.path),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Mv { remote, note, new_path } => {
+            let (r, vault) = remote.open()?;
+            let found = r.resolve_note(&vault, &note)?;
+            r.rename(&vault, &found.id, &new_path)?;
+            println!("{} -> {}", found.path, notes_cli::remote::normalize_path(&new_path));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Rm { remote, note } => {
+            let (r, vault) = remote.open()?;
+            let found = r.resolve_note(&vault, &note)?;
+            r.delete(&vault, &found.id)?;
+            println!("trashed {} ({})", found.path, found.id);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Daily { remote, date, json } => {
+            let date = date.map(|d| d.trim().to_owned()).unwrap_or_else(mcp::today);
+            if !mcp::valid_date(&date) {
+                bail!("date must be YYYY-MM-DD (got {date:?})");
+            }
+            let (r, vault) = remote.open()?;
+            let note = r.daily(&vault, &date)?;
+            if json {
+                print_json(&note)?;
+            } else {
+                print_content(&note.content);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Find { remote, query, limit, json } => {
+            let (r, vault) = remote.open()?;
+            let hits = r.search(&vault, &query, limit)?;
+            if json {
+                print_json(&hits)?;
+            } else if hits.is_empty() {
+                println!("no matches");
+            } else {
+                let paths: std::collections::HashMap<String, String> =
+                    r.notes(&vault)?.into_iter().map(|n| (n.id, n.path)).collect();
+                for h in &hits {
+                    let path = paths.get(&h.note_id).unwrap_or(&h.note_id);
+                    println!("{path}\n  {}", h.snippet.replace('\n', " ").trim());
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Backlinks { remote, note, json } => {
+            let (r, vault) = remote.open()?;
+            let found = r.resolve_note(&vault, &note)?;
+            let links = r.backlinks(&vault, &found.id)?;
+            if json {
+                print_json(&links)?;
+            } else if links.is_empty() {
+                println!("nothing links to {}", found.path);
+            } else {
+                for n in &links {
+                    println!("{}", n.path);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Tags { remote, json } => {
+            let (r, vault) = remote.open()?;
+            let mut tags = r.tags(&vault)?;
+            tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
+            if json {
+                print_json(&tags)?;
+            } else {
+                for t in &tags {
+                    println!("#{}  {}", t.tag, t.count);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Mcp { remote } => {
+            let (r, vault) = remote.open()?;
+            mcp::serve_stdio(&r, vault)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Import { source } => {
             let ImportSource::Obsidian { src, into, overwrite } = source;
             let report = import::import_obsidian(&src, &into, &ImportOptions { overwrite })
@@ -257,6 +541,63 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Note content to stdout, with exactly one trailing newline.
+fn print_content(content: &str) {
+    if content.ends_with('\n') || content.is_empty() {
+        print!("{content}");
+    } else {
+        println!("{content}");
+    }
+}
+
+/// Content for `new`/`edit --from`: a file, `-`/a pipe for stdin, or empty on a bare terminal.
+fn read_content(from: Option<&Path>) -> anyhow::Result<String> {
+    let stdin = || {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).context("reading stdin")?;
+        anyhow::Ok(buf)
+    };
+    match from {
+        Some(p) if p == Path::new("-") => stdin(),
+        Some(p) => std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display())),
+        None if !std::io::stdin().is_terminal() => stdin(),
+        None => Ok(String::new()),
+    }
+}
+
+/// Open `$VISUAL`/`$EDITOR` on `initial` in a temp file; `None` when nothing changed.
+fn edit_in_editor(initial: &str, hint: &str) -> anyhow::Result<Option<String>> {
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_owned());
+    let stem: String = hint
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let file = std::env::temp_dir().join(format!("notes-{}-{stem}", std::process::id()));
+    std::fs::write(&file, initial).with_context(|| format!("writing {}", file.display()))?;
+    let mut words = editor.split_whitespace();
+    let program = words.next().unwrap_or("vi");
+    let status = std::process::Command::new(program)
+        .args(words)
+        .arg(&file)
+        .status()
+        .with_context(|| format!("launching editor {editor:?}"))?;
+    let edited = std::fs::read_to_string(&file);
+    let _ = std::fs::remove_file(&file);
+    if !status.success() {
+        bail!("editor {editor:?} exited with {status}");
+    }
+    let edited = edited.with_context(|| format!("reading back {}", file.display()))?;
+    Ok((edited != initial).then_some(edited))
 }
 
 fn hostname() -> String {

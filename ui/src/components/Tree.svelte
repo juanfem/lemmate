@@ -2,7 +2,21 @@
   import type { NoteEntry } from '../lib/vault.svelte.ts'
   import { displayName } from '../lib/vault.svelte.ts'
 
-  let { notes, activeId, onOpen }: { notes: NoteEntry[]; activeId: string | null; onOpen: (id: string) => void } = $props()
+  let {
+    notes,
+    activeId,
+    onOpen,
+    onCreateIn,
+    onRenameFolder,
+    onDeleteFolder,
+  }: {
+    notes: NoteEntry[]
+    activeId: string | null
+    onOpen: (id: string) => void
+    onCreateIn?: (folder: string) => void
+    onRenameFolder?: (folder: string) => void
+    onDeleteFolder?: (folder: string) => void
+  } = $props()
 
   interface Folder {
     name: string
@@ -56,11 +70,18 @@
 
 {#snippet folder(f: Folder, depth: number)}
   {#each [...f.folders.values()].sort((a, b) => a.name.localeCompare(b.name)) as sub (sub.path)}
-    <button class="row folder" style:padding-left="{depth * 0.9 + 0.4}rem" onclick={() => toggle(sub.path)}>
-      <span class="chev" class:open={!collapsed[sub.path]}>▸</span>
-      <span class="name">{sub.name}</span>
-      <span class="count">{count(sub)}</span>
-    </button>
+    <div class="row folder" style:padding-left="{depth * 0.9 + 0.4}rem">
+      <button class="folder-main" onclick={() => toggle(sub.path)}>
+        <span class="chev" class:open={!collapsed[sub.path]}>▸</span>
+        <span class="name">{sub.name}</span>
+        <span class="count">{count(sub)}</span>
+      </button>
+      <span class="actions">
+        {#if onCreateIn}<button title="New note here" onclick={() => onCreateIn(sub.path)}>＋</button>{/if}
+        {#if onRenameFolder}<button title="Rename / move folder" onclick={() => onRenameFolder(sub.path)}>✎</button>{/if}
+        {#if onDeleteFolder}<button title="Move folder to trash" onclick={() => onDeleteFolder(sub.path)}>🗑</button>{/if}
+      </span>
+    </div>
     {#if !collapsed[sub.path]}
       {@render folder(sub, depth + 1)}
     {/if}
@@ -113,6 +134,41 @@
   }
   .folder .name {
     font-weight: 600;
+  }
+  .folder {
+    padding-right: 0.2rem;
+  }
+  .folder-main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .actions {
+    display: none;
+    gap: 0.1rem;
+  }
+  .folder:hover .actions {
+    display: inline-flex;
+  }
+  .actions button {
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.8em;
+    cursor: pointer;
+    padding: 0 0.2rem;
+  }
+  .actions button:hover {
+    color: var(--fg);
   }
   .chev {
     display: inline-block;

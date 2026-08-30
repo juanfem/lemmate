@@ -391,6 +391,30 @@
     closed = closed.filter((c) => c !== id)
   }
 
+  // ---- folder actions (folders are just path prefixes; SPEC §9)
+  async function createInFolder(folder: string) {
+    const name = await ask({ kind: 'prompt', title: `New note in ${folder}/`, placeholder: 'Title' })
+    if (name?.trim()) create(`${folder}/${name.trim()}`)
+  }
+  async function renameFolder(folder: string) {
+    if (!session) return
+    const next = (await ask({ kind: 'prompt', title: 'Rename / move folder', initial: folder }))?.trim().replace(/^\/+|\/+$/gu, '')
+    if (!next || next === folder) return
+    for (const n of session.notes.filter((n) => n.path.startsWith(`${folder}/`))) {
+      await session.renameNote(n.id, `${next}/${n.path.slice(folder.length + 1)}`)
+    }
+  }
+  async function deleteFolder(folder: string) {
+    if (!session) return
+    const inside = session.notes.filter((n) => n.path.startsWith(`${folder}/`))
+    const ok = await ask({ kind: 'confirm', title: `Move “${folder}” and its ${inside.length} notes to trash?`, confirmLabel: 'Move to trash', danger: true })
+    if (ok === null) return
+    for (const n of inside) {
+      close(n.id, true)
+      session.deleteNote(n.id)
+    }
+  }
+
   /** Server-side pandoc export (SPEC §12); the browser saves the result as a download. */
   async function exportActive(format: string) {
     if (!session || !active) return
@@ -500,7 +524,14 @@
       {#if session.noteOnly}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
       {:else if sidebar === 'files'}
-        <Tree notes={session.notes} activeId={active} onOpen={open} />
+        <Tree
+          notes={session.notes}
+          activeId={active}
+          onOpen={open}
+          onCreateIn={createInFolder}
+          onRenameFolder={renameFolder}
+          onDeleteFolder={deleteFolder}
+        />
       {:else if sidebar === 'search'}
         <SearchPane vault={session.id} onOpen={open} />
       {:else if sidebar === 'tags'}
