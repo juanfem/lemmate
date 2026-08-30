@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import type { EditorView } from '@codemirror/view'
+  import { EditorView } from '@codemirror/view'
   import { createEditor } from '../lib/editor/setup.ts'
   import type { VaultSession } from '../lib/vault.svelte.ts'
   import { api } from '../lib/api.ts'
@@ -34,11 +34,45 @@
     }
   }
 
+  /** Paste/drop files: upload, then reference them at the cursor (images as embeds). */
+  async function insertFiles(files: FileList | File[], at: number) {
+    if (!view) return
+    const refs: string[] = []
+    for (const file of Array.from(files)) {
+      try {
+        const path = await session.uploadAttachment(file.name, new Uint8Array(await file.arrayBuffer()), file.type)
+        const name = path.split('/').pop() ?? path
+        refs.push(file.type.startsWith('image/') ? `![[${name}]]` : `[${name}](${path})`)
+      } catch (e) {
+        refs.push(`<!-- upload failed for ${file.name}: ${String(e)} -->`)
+      }
+    }
+    if (refs.length) view.dispatch({ changes: { from: at, insert: refs.join('\n') }, selection: { anchor: at + refs.join('\n').length } })
+  }
+
+  const fileHandlers = EditorView.domEventHandlers({
+    paste(event, v) {
+      const files = event.clipboardData?.files
+      if (!files || files.length === 0) return false
+      event.preventDefault()
+      void insertFiles(files, v.state.selection.main.head)
+      return true
+    },
+    drop(event, v) {
+      const files = event.dataTransfer?.files
+      if (!files || files.length === 0) return false
+      event.preventDefault()
+      const pos = v.posAtCoords({ x: event.clientX, y: event.clientY }) ?? v.state.selection.main.head
+      void insertFiles(files, pos)
+      return true
+    },
+  })
+
   onMount(() => {
     const acquired = session.acquire(noteId)
     release = acquired.release
     acquired.awareness.setLocalStateField('user', { name: localStorage.getItem('notes.user') ?? 'me', color: '#4c8bf5', colorLight: '#4c8bf533' })
-    view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, { openLink, embedUrl })
+    view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, { openLink, embedUrl, extra: [fileHandlers] })
     view.focus()
   })
 

@@ -108,11 +108,42 @@ export class VaultSession {
     this.notesMap.delete(id)
   }
 
+  /**
+   * Upload bytes as an attachment and return the vault-relative path to reference. Against
+   * the relay the engine files it under `attachments/`; against the server we choose the
+   * path and record it in the vault doc ourselves (SPEC §7: upload before referencing).
+   */
+  async uploadAttachment(name: string, bytes: Uint8Array, mime: string): Promise<string> {
+    const hash = await blake3Hex(bytes)
+    const res = await fetch(`/api/v1/vaults/${this.id}/attachments/${hash}`, {
+      method: 'PUT',
+      headers: { 'content-type': mime || 'application/octet-stream', 'x-filename': name },
+      body: bytes as unknown as BodyInit,
+    })
+    if (!res.ok) throw new Error(`upload failed: ${res.status}`)
+    const text = await res.text()
+    if (text.trim().startsWith('{')) {
+      const stored = JSON.parse(text) as { path: string; hash: string }
+      return stored.path
+    }
+    let path = `attachments/${name}`
+    if (this.attachmentsMap.get(path) && this.attachmentsMap.get(path) !== hash) {
+      const dot = name.lastIndexOf('.')
+      path = dot > 0 ? `attachments/${name.slice(0, dot)}-${hash.slice(0, 6)}${name.slice(dot)}` : `attachments/${name}-${hash.slice(0, 6)}`
+    }
+    if (this.attachmentsMap.get(path) !== hash) this.attachmentsMap.set(path, hash)
+    return path
+  }
+
   destroy() {
     this.client.destroy()
     this.vaultDoc.destroy()
   }
 }
+
+// BLAKE3 is what the engine and server key attachments by. Browsers have no native BLAKE3;
+// the tiny pure-JS implementation in ./blake3.ts is used for uploads only.
+import { blake3Hex } from './blake3.ts'
 
 export function basename(path: string): string {
   const i = path.lastIndexOf('/')

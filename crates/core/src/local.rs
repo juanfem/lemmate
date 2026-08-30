@@ -35,10 +35,18 @@ pub enum LocalQuery {
     Vaults,
     Notes,
     Note(NoteId),
-    Search { q: String, limit: u32 },
+    Search {
+        q: String,
+        limit: u32,
+    },
     Backlinks(NoteId),
     Tags,
     Attachment(String),
+    /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
+    StoreAttachment {
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 pub enum LocalReply {
@@ -49,6 +57,7 @@ pub enum LocalReply {
     Backlinks(Vec<NoteRow>),
     Tags(Vec<(String, u32)>),
     Attachment(Option<(Vec<u8>, String)>),
+    Stored { path: String, hash: String },
     Error(String),
 }
 
@@ -82,7 +91,8 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
         .route("/api/v1/vaults/{vault}/search", get(search))
-        .route("/api/v1/vaults/{vault}/attachments/{hash}", get(attachment));
+        .route("/api/v1/vaults/{vault}/attachments/{hash}", get(attachment).put(put_attachment))
+        .layer(axum::extract::DefaultBodyLimit::max(crate::attachments::MAX_ATTACHMENT_BYTES as usize));
     let router = match &opts.web_dir {
         Some(dir) => {
             router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html"))))
@@ -257,6 +267,30 @@ async fn attachment(
     match ask(&s, LocalQuery::Attachment(hash)).await? {
         LocalReply::Attachment(Some((bytes, mime))) => Ok(([(header::CONTENT_TYPE, mime)], bytes)),
         LocalReply::Attachment(None) => Err(StatusCode::NOT_FOUND),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Serialize)]
+struct Stored {
+    path: String,
+    hash: String,
+}
+
+/// Upload from a local UI: the engine writes the file into the vault, where it is picked up
+/// like any attachment (hashed, uploaded, recorded in the vault doc once a note references it).
+async fn put_attachment(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, hash)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Resp<Stored> {
+    if !crate::attachments::is_valid_hash(&hash) || crate::attachments::hash_bytes(&body) != hash {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let name = headers.get("x-filename").and_then(|v| v.to_str().ok()).unwrap_or("file").to_owned();
+    match ask(&s, LocalQuery::StoreAttachment { name, bytes: body.to_vec() }).await? {
+        LocalReply::Stored { path, hash } => Ok(axum::Json(Stored { path, hash })),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

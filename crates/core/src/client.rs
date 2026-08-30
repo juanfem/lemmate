@@ -813,6 +813,48 @@ impl Engine {
         Ok(())
     }
 
+    /// Write uploaded bytes under `attachments/` (SPEC §6.3), reusing an identical existing
+    /// file and suffixing the name on a content clash. Returns the vault-relative path.
+    fn store_attachment(&mut self, name: &str, bytes: &[u8]) -> Result<String> {
+        let safe: String = name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("file")
+            .chars()
+            .filter(|c| {
+                !c.is_control()
+                    && *c != ':'
+                    && *c != '?'
+                    && *c != '*'
+                    && *c != '"'
+                    && *c != '<'
+                    && *c != '>'
+                    && *c != '|'
+            })
+            .collect();
+        let safe = if safe.trim().is_empty() { "file".to_owned() } else { safe };
+        let hash = hash_bytes(bytes);
+        let (stem, ext) = match safe.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
+            _ => (safe.clone(), String::new()),
+        };
+        let mut candidate = format!("attachments/{safe}");
+        let mut n = 1;
+        while self.is_attachment_file(&candidate)? {
+            if self.local_hash(&candidate)?.as_deref() == Some(hash.as_str()) {
+                return Ok(candidate); // same bytes already there
+            }
+            n += 1;
+            candidate = format!("attachments/{stem}-{}{ext}", &hash[..6.min(hash.len())]);
+            if n > 2 {
+                candidate = format!("attachments/{stem}-{n}{ext}");
+            }
+        }
+        self.proj.write_bytes(&candidate, bytes)?;
+        self.local_hashes.insert(candidate.clone(), hash);
+        Ok(candidate)
+    }
+
     /// A tracked attachment file changed or vanished on disk.
     fn process_attachment_path(&mut self, rel: &str) -> Result<()> {
         self.local_hashes.remove(rel);
@@ -1068,6 +1110,10 @@ impl Engine {
                     None => Vec::new(),
                 }),
                 LocalQuery::Tags => LocalReply::Tags(self.store.tags_in_vault(self.vault_id)?),
+                LocalQuery::StoreAttachment { name, bytes } => {
+                    let path = self.store_attachment(&name, &bytes)?;
+                    LocalReply::Stored { path, hash: hash_bytes(&bytes) }
+                }
                 LocalQuery::Attachment(hash) => {
                     let path =
                         self.vault.attachment_entries().into_iter().find(|(_, h)| *h == hash).map(|(p, _)| p);

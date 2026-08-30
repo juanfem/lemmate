@@ -73,6 +73,24 @@ test('relay serves a UI offline and forwards to the server', { skip: !SERVER || 
     // The relay's own API answers from the local store.
     await waitFor(async () => (await json<{ note_id: string }[]>(`http://127.0.0.1:${RELAY_PORT}/api/v1/vaults/${vaultId}/search?q=relay`)).length === 1, 10_000, 'local search')
 
+    // A file pasted into the editor: PUT to the relay files it under attachments/, and once a
+    // note references it the engine records it in the vault doc and uploads it.
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])
+    const { blake3Hex } = await import('../src/lib/blake3.ts')
+    const hash = await blake3Hex(png)
+    const put = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/v1/vaults/${vaultId}/attachments/${hash}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'image/png', 'x-filename': 'shot.png' },
+      body: png,
+    })
+    assert.equal(put.status, 200)
+    const stored = (await put.json()) as { path: string; hash: string }
+    assert.equal(stored.path, 'attachments/shot.png')
+    assert.ok(existsSync(join(vaultDir, 'attachments/shot.png')))
+    note.getText('content').insert(note.getText('content').length, '![[shot.png]]\n')
+    await waitFor(() => vdoc.getMap<string>('attachments').get('attachments/shot.png') === hash, 10_000, 'attachment entry')
+    await waitFor(async () => (await fetch(`${serverApi}/attachments/${hash}`)).ok, 10_000, 'server blob')
+
     // Server goes away. The UI keeps editing through the relay; disk keeps up.
     server.kill()
     await waitFor(async () => !(await up(SERVER_PORT)), 10_000, 'server down')
