@@ -6,7 +6,22 @@
   import { api } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
 
-  let { session, noteId, onOpen }: { session: VaultSession; noteId: string; onOpen: (id: string) => void } = $props()
+  import { syntaxTree } from '@codemirror/language'
+  import type { OutlineItem } from './OutlinePane.svelte'
+
+  let {
+    session,
+    noteId,
+    onOpen,
+    onHeadings,
+    jumpTo = $bindable(),
+  }: {
+    session: VaultSession
+    noteId: string
+    onOpen: (id: string) => void
+    onHeadings?: (items: OutlineItem[]) => void
+    jumpTo?: (pos: number) => void
+  } = $props()
 
   let host: HTMLDivElement
   let view: EditorView | undefined
@@ -50,6 +65,26 @@
     if (refs.length) view.dispatch({ changes: { from: at, insert: refs.join('\n') }, selection: { anchor: at + refs.join('\n').length } })
   }
 
+  let headingTimer: ReturnType<typeof setTimeout> | undefined
+  function reportHeadings(v: EditorView) {
+    clearTimeout(headingTimer)
+    headingTimer = setTimeout(() => {
+      const items: OutlineItem[] = []
+      syntaxTree(v.state).iterate({
+        enter(node) {
+          const m = /^ATXHeading(\d)$/u.exec(node.name)
+          if (!m) return
+          const text = v.state.sliceDoc(node.from, node.to).replace(/^#+\s*/u, '').trim()
+          items.push({ level: Number(m[1]), text, pos: node.from })
+        },
+      })
+      onHeadings?.(items)
+    }, 150)
+  }
+  const headingWatcher = EditorView.updateListener.of((u) => {
+    if (u.docChanged) reportHeadings(u.view)
+  })
+
   const fileHandlers = EditorView.domEventHandlers({
     paste(event, v) {
       const files = event.clipboardData?.files
@@ -72,8 +107,18 @@
     const acquired = session.acquire(noteId)
     release = acquired.release
     acquired.awareness.setLocalStateField('user', { name: localStorage.getItem('notes.user') ?? 'me', color: '#4c8bf5', colorLight: '#4c8bf533' })
-    view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, { openLink, embedUrl, extra: [fileHandlers] })
+    view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
+      openLink,
+      embedUrl,
+      extra: [fileHandlers, headingWatcher],
+    })
     view.focus()
+    reportHeadings(view)
+    jumpTo = (pos: number) => {
+      if (!view) return
+      view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 20 }) })
+      view.focus()
+    }
   })
 
   onDestroy(() => {

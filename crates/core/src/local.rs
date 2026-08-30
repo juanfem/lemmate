@@ -41,6 +41,7 @@ pub enum LocalQuery {
     },
     Backlinks(NoteId),
     Tags,
+    Tagged(String),
     Attachment(String),
     /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
     StoreAttachment {
@@ -56,6 +57,7 @@ pub enum LocalReply {
     Search(Vec<SearchHit>),
     Backlinks(Vec<NoteRow>),
     Tags(Vec<(String, u32)>),
+    Tagged(Vec<NoteRow>),
     Attachment(Option<(Vec<u8>, String)>),
     Stored { path: String, hash: String },
     Error(String),
@@ -90,6 +92,7 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/notes/{id}", get(note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
+        .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search))
         .route("/api/v1/vaults/{vault}/attachments/{hash}", get(attachment).put(put_attachment))
         .layer(axum::extract::DefaultBodyLimit::max(crate::attachments::MAX_ATTACHMENT_BYTES as usize));
@@ -241,6 +244,22 @@ async fn tags(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> R
         LocalReply::Tags(t) => {
             Ok(axum::Json(t.into_iter().map(|(tag, count)| TagCount { tag, count }).collect()))
         }
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagParams {
+    tag: String,
+}
+
+async fn tagged(
+    State(s): State<Arc<LocalState>>,
+    Path(_vault): Path<String>,
+    Query(p): Query<TagParams>,
+) -> Resp<Vec<NoteSummary>> {
+    match ask(&s, LocalQuery::Tagged(p.tag)).await? {
+        LocalReply::Tagged(rows) => Ok(axum::Json(summaries(rows))),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

@@ -31,7 +31,9 @@ class CDP {
   send(method, params = {}) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject: (e) => reject(new Error(`${method} failed: ${e.message}`)) });
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} timed out after 30s`)); }, 30000);
+      const settle = (fn) => (v) => { clearTimeout(timer); fn(v); };
+      this.pending.set(id, { resolve: settle(resolve), reject: settle((e) => reject(new Error(`${method} failed: ${e.message}`))) });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -114,9 +116,13 @@ async function main() {
   const profile = mkdtempSync(join(tmpdir(), 'cdp-profile-'));
   const chrome = spawn('google-chrome-stable', ['--headless=new', '--disable-gpu', '--no-sandbox',
     `--remote-debugging-port=${port}`, '--window-size=1400,900', `--user-data-dir=${profile}`, 'about:blank'],
-    { stdio: ['ignore', 'ignore', 'ignore'] });
-  const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} rmSync(profile, { recursive: true, force: true }); };
+    { stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+  const cleanup = () => {
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { try { chrome.kill('SIGKILL'); } catch {} }
+    rmSync(profile, { recursive: true, force: true });
+  };
   process.on('exit', cleanup);
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(1));
 
   try {
     const base = `http://127.0.0.1:${port}`;

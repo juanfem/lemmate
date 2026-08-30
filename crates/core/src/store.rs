@@ -513,6 +513,17 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
+    /// Live notes carrying `tag` (exact, lower-case) or any nested tag under it.
+    pub fn notes_with_tag(&self, vault_id: VaultId, tag: &str) -> Result<Vec<NoteRow>> {
+        let tag = tag.trim_matches('/').to_lowercase();
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT n.id, n.vault_id, n.path, n.title FROM note_tags t JOIN notes n ON n.id = t.note_id
+             WHERE n.vault_id = ?1 AND n.deleted_at IS NULL AND (t.tag = ?2 OR t.tag LIKE ?3) ORDER BY n.path",
+        )?;
+        let rows = stmt.query_map(params![vault_id.to_string(), tag, format!("{tag}/%")], row_to_note)?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
     pub fn tags_in_vault(&self, vault_id: VaultId) -> Result<Vec<(String, u32)>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id = t.note_id
@@ -776,6 +787,12 @@ mod tests {
         assert_eq!(store.backlinks_to(&alpha).unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![b]);
         assert_eq!(store.vaults().unwrap(), vec![]); // no vault doc journaled in this test
         assert_eq!(store.tags_in_vault(vault).unwrap().len(), 2);
+        assert_eq!(store.notes_with_tag(vault, "project").unwrap().len(), 2);
+        assert_eq!(
+            store.notes_with_tag(vault, "Daily").unwrap().iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![b]
+        );
+        assert!(store.notes_with_tag(vault, "nope").unwrap().is_empty());
         assert_eq!(store.search_in_vault(vault, "quick fox", 10).unwrap().len(), 1);
         assert_eq!(store.search_in_vault(VaultId::new(), "quick fox", 10).unwrap().len(), 0);
         assert_eq!(store.tags().unwrap(), vec![("daily".to_owned(), 1), ("project".to_owned(), 2)]);

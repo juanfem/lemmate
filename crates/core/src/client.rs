@@ -1110,6 +1110,9 @@ impl Engine {
                     None => Vec::new(),
                 }),
                 LocalQuery::Tags => LocalReply::Tags(self.store.tags_in_vault(self.vault_id)?),
+                LocalQuery::Tagged(tag) => {
+                    LocalReply::Tagged(self.store.notes_with_tag(self.vault_id, &tag)?)
+                }
                 LocalQuery::StoreAttachment { name, bytes } => {
                     let path = self.store_attachment(&name, &bytes)?;
                     LocalReply::Stored { path, hash: hash_bytes(&bytes) }

@@ -7,6 +7,9 @@
   import Editor from './components/Editor.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
+  import TagsPane from './components/TagsPane.svelte'
+  import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
+  import CommandPalette, { type Command } from './components/CommandPalette.svelte'
 
   // ---- vault selection: #/v/<ULID>
   let vaultId = $state<string | null>(readHash())
@@ -46,16 +49,46 @@
   // ---- tabs
   let tabs: string[] = $state([])
   let active = $state<string | null>(null)
-  let sidebar: 'files' | 'search' = $state('files')
+  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' = $state('files')
   let switcher = $state(false)
+  let palette = $state(false)
   let backlinks: NoteSummary[] = $state([])
+  let headings: OutlineItem[] = $state([])
+  let jumpTo: ((pos: number) => void) | undefined = $state()
+  let tagsVersion = $state(0)
 
   function open(id: string) {
     if (!tabs.includes(id)) tabs = [...tabs, id]
     active = id
     switcher = false
+    palette = false
+    headings = []
     refreshBacklinks()
+    tagsVersion++
   }
+  function openPath(path: string) {
+    const id = session?.idOf(path)
+    if (id) open(id)
+  }
+  function bookmarkActive() {
+    if (!session || !active) return
+    const path = session.pathOf(active)
+    if (path) session.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
+  }
+  let commands: Command[] = $derived([
+    { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (switcher = true) },
+    { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
+    { id: 'search', label: 'Search notes', shortcut: 'Ctrl+Shift+F', run: () => (sidebar = 'search') },
+    { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
+    { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
+    { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
+    { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
+    { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
+    { id: 'rename', label: 'Rename / move note', run: renameActive },
+    { id: 'delete', label: 'Move note to trash', run: deleteActive },
+    { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => active && close(active) },
+    { id: 'vault', label: 'Switch vault', run: () => (location.hash = '') },
+  ])
   function close(id: string) {
     const i = tabs.indexOf(id)
     tabs = tabs.filter((t) => t !== id)
@@ -99,8 +132,9 @@
   function onKey(e: KeyboardEvent) {
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
-    if (e.key === 'o' || e.key === 'p') {
+    if ((e.key === 'o' || e.key === 'p') && !e.shiftKey) {
       switcher = !switcher
+      palette = false
       e.preventDefault()
     } else if (e.key === 'n' && !e.shiftKey) {
       switcher = true
@@ -113,6 +147,13 @@
       e.preventDefault()
     } else if (e.key === 'f' && e.shiftKey) {
       sidebar = 'search'
+      e.preventDefault()
+    } else if ((e.key === 'p' || e.key === 'P') && e.shiftKey) {
+      palette = !palette
+      switcher = false
+      e.preventDefault()
+    } else if ((e.key === 'b' || e.key === 'B') && e.shiftKey) {
+      bookmarkActive()
       e.preventDefault()
     }
   }
@@ -137,16 +178,30 @@
   <div class="layout">
     <aside>
       <div class="side-tabs">
-        <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
-        <button class:on={sidebar === 'search'} onclick={() => (sidebar = 'search')}>Search</button>
+        <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')} title="Files">Files</button>
+        <button class:on={sidebar === 'search'} onclick={() => (sidebar = 'search')} title="Search (Ctrl+Shift+F)">Search</button>
+        <button class:on={sidebar === 'tags'} onclick={() => (sidebar = 'tags')} title="Tags">Tags</button>
+        <button class:on={sidebar === 'outline'} onclick={() => (sidebar = 'outline')} title="Outline">Outline</button>
+        <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
         <span class="spacer"></span>
         <button title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
-        <button title="Today's daily note (Ctrl+Shift+D)" onclick={daily}>📅</button>
+        <button title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
       </div>
       {#if sidebar === 'files'}
         <Tree notes={session.notes} activeId={active} onOpen={open} />
-      {:else}
+      {:else if sidebar === 'search'}
         <SearchPane vault={session.id} onOpen={open} />
+      {:else if sidebar === 'tags'}
+        <TagsPane vault={session.id} version={tagsVersion} onOpen={open} />
+      {:else if sidebar === 'outline'}
+        <OutlinePane items={headings} onJump={(pos) => jumpTo?.(pos)} />
+      {:else}
+        <nav class="bookmarks-pane">
+          {#each session.bookmarks as b, i (b.kind + b.target + i)}
+            <button onclick={() => openPath(b.target)} title={b.target}>★ {b.label}</button>
+          {/each}
+          {#if session.bookmarks.length === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
+        </nav>
       {/if}
       <footer class="status" class:offline={session.status !== 'online'}>
         <span class="dot"></span>
@@ -168,11 +223,12 @@
           <div class="note-head">
             <span class="path">{activePath}</span>
             <span class="spacer"></span>
+            <button onclick={bookmarkActive} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
             <button onclick={renameActive} title="Rename / move">Rename</button>
             <button onclick={deleteActive} title="Move to trash">Delete</button>
           </div>
           <div class="editor-wrap">
-            <Editor {session} noteId={active} onOpen={open} />
+            <Editor {session} noteId={active} onOpen={open} onHeadings={(h) => (headings = h)} bind:jumpTo />
           </div>
           {#if backlinks.length}
             <div class="backlinks">
@@ -192,6 +248,9 @@
   </div>
   {#if switcher}
     <QuickSwitcher notes={session.notes} onOpen={open} onCreate={create} onClose={() => (switcher = false)} />
+  {/if}
+  {#if palette}
+    <CommandPalette {commands} onClose={() => (palette = false)} />
   {/if}
 {/if}
 
@@ -338,6 +397,30 @@
   }
   .backlinks button {
     color: var(--accent);
+  }
+  .bookmarks-pane {
+    display: flex;
+    flex-direction: column;
+    padding: 0.3rem;
+    overflow: auto;
+  }
+  .bookmarks-pane button {
+    font: inherit;
+    font-size: 0.9rem;
+    text-align: left;
+    border: 0;
+    background: none;
+    color: inherit;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .bookmarks-pane button:hover {
+    background: var(--hover);
+  }
+  .pad {
+    padding: 0.6rem;
+    font-size: 0.85rem;
   }
   .placeholder {
     display: grid;

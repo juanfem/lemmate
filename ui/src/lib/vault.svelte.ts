@@ -11,16 +11,25 @@ export interface NoteEntry {
   path: string
 }
 
+/** SPEC §4.3: bookmarks live in the vault doc so every replica shares them. */
+export interface Bookmark {
+  kind: 'note' | 'folder' | 'search' | 'heading'
+  target: string
+  label: string
+}
+
 export class VaultSession {
   readonly id: string
   readonly client: SyncClient
   readonly vaultDoc = new Y.Doc()
   private notesMap: Y.Map<string>
   private attachmentsMap: Y.Map<string>
+  private bookmarksArr: Y.Array<Bookmark>
   private open = new Map<string, { doc: Y.Doc; awareness: Awareness; refs: number }>()
 
   notes: NoteEntry[] = $state([])
   attachments: Record<string, string> = $state({})
+  bookmarks: Bookmark[] = $state([])
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
 
@@ -33,12 +42,15 @@ export class VaultSession {
     }
     this.notesMap = this.vaultDoc.getMap<string>('notes')
     this.attachmentsMap = this.vaultDoc.getMap<string>('attachments')
+    this.bookmarksArr = this.vaultDoc.getArray<Bookmark>('bookmarks')
     const refresh = () => {
       this.notes = [...this.notesMap.entries()].map(([id, path]) => ({ id, path })).sort((a, b) => a.path.localeCompare(b.path))
       this.attachments = Object.fromEntries(this.attachmentsMap.entries())
+      this.bookmarks = this.bookmarksArr.toArray()
     }
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
+    this.bookmarksArr.observe(refresh)
     this.client.open(this.vaultDocId, this.vaultDoc)
   }
 
@@ -106,6 +118,16 @@ export class VaultSession {
 
   deleteNote(id: string) {
     this.notesMap.delete(id)
+  }
+
+  toggleBookmark(b: Bookmark) {
+    const i = this.bookmarksArr.toArray().findIndex((x) => x.kind === b.kind && x.target === b.target)
+    if (i >= 0) this.bookmarksArr.delete(i, 1)
+    else this.bookmarksArr.push([b])
+  }
+
+  isBookmarked(kind: Bookmark['kind'], target: string): boolean {
+    return this.bookmarks.some((x) => x.kind === kind && x.target === target)
   }
 
   /**

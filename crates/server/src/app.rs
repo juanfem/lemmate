@@ -176,6 +176,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}", get(get_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
+        .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search_vault))
         .route("/api/v1/search", get(search))
         .route("/api/v1/vaults/{vault}/attachments/{hash}", get(get_attachment).put(put_attachment))
@@ -507,6 +508,25 @@ async fn tags(
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let rows = state.store.lock().await.tags_in_vault(vault).map_err(internal)?;
     Ok(Json(rows.into_iter().map(|(tag, count)| TagCount { tag, count }).collect()))
+}
+
+#[derive(Deserialize)]
+struct TagParams {
+    tag: String,
+}
+
+async fn tagged(
+    State(state): State<Arc<AppState>>,
+    Path(vault): Path<String>,
+    Query(p): Query<TagParams>,
+) -> Result<Json<Vec<NoteSummary>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let rows = state.store.lock().await.notes_with_tag(vault, &p.tag).map_err(internal)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
+            .collect(),
+    ))
 }
 
 async fn search_vault(
