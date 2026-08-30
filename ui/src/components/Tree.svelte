@@ -48,7 +48,7 @@
 
   function loadCollapsed(): Record<string, boolean> {
     try {
-      return JSON.parse(localStorage.getItem('notes.tree.collapsed') ?? '{}')
+      return JSON.parse(localStorage.getItem('lemmate.tree.collapsed') ?? '{}')
     } catch {
       return {}
     }
@@ -56,7 +56,7 @@
   function toggle(path: string) {
     collapsed[path] = !collapsed[path]
     try {
-      localStorage.setItem('notes.tree.collapsed', JSON.stringify(collapsed))
+      localStorage.setItem('lemmate.tree.collapsed', JSON.stringify(collapsed))
     } catch {
       /* ignore */
     }

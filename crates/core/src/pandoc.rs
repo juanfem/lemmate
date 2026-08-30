@@ -158,7 +158,7 @@ mod tests {
     use super::*;
 
     fn pandoc() -> Option<PathBuf> {
-        std::env::var_os("NOTES_TEST_PANDOC").map(PathBuf::from).filter(|p| p.is_file())
+        std::env::var_os("LEMMATE_TEST_PANDOC").map(PathBuf::from).filter(|p| p.is_file())
     }
 
     #[test]
@@ -176,11 +176,11 @@ mod tests {
         assert!(!pandoc_available(Some(Path::new("/nonexistent/pandoc"))));
     }
 
-    /// Runs only when NOTES_TEST_PANDOC points at a pandoc binary.
+    /// Runs only when LEMMATE_TEST_PANDOC points at a pandoc binary.
     #[test]
     fn renders_html_and_docx_with_wikilinks_and_math() {
         let Some(bin) = pandoc() else {
-            eprintln!("skipped: set NOTES_TEST_PANDOC");
+            eprintln!("skipped: set LEMMATE_TEST_PANDOC");
             return;
         };
         let opts = ExportOptions { pandoc: Some(bin), ..Default::default() };

@@ -1,14 +1,14 @@
-//! The REST client and the MCP dispatcher against a real `notes-server`, in-process.
+//! The REST client and the MCP dispatcher against a real `lemmate-server`, in-process.
 //!
 //! The server runs on its own runtime thread because `Remote` is blocking (`ureq`), which is
-//! exactly how the CLI and `notes mcp` use it.
+//! exactly how the CLI and `lemmate mcp` use it.
 
 use std::net::SocketAddr;
 
-use notes_cli::mcp;
-use notes_cli::remote::{NotesApi, Remote, resolve_vault};
-use notes_core::{Store, VaultId};
-use notes_server::{ServerOptions, build_state, router};
+use lemmate_cli::mcp;
+use lemmate_cli::remote::{NotesApi, Remote, resolve_vault};
+use lemmate_core::{Store, VaultId};
+use lemmate_server::{ServerOptions, build_state, router};
 use serde_json::{Value, json};
 
 /// A server with authentication off (`ServerOptions::default()`), on a port of its own.
@@ -30,7 +30,7 @@ fn start_server() -> (String, tempfile::TempDir) {
 
 /// Note body without the `id:` front matter the server adds (SPEC §6.3).
 fn body(text: &str) -> String {
-    match notes_core::frontmatter::block(text) {
+    match lemmate_core::frontmatter::block(text) {
         Some((_, end)) => text[end..].to_owned(),
         None => text.to_owned(),
     }
@@ -65,7 +65,7 @@ fn remote_client_drives_a_vault_end_to_end() {
         assert_eq!(remote.resolve_note(&vault, key).unwrap().id, plan.id, "resolving {key}");
     }
     assert!(remote.lookup_note(&vault, "Projects/nope.md").unwrap().is_none());
-    assert!(remote.lookup_note(&vault, &notes_core::NoteId::new().to_string()).unwrap().is_none());
+    assert!(remote.lookup_note(&vault, &lemmate_core::NoteId::new().to_string()).unwrap().is_none());
     assert!(remote.resolve_note(&vault, "Projects/nope.md").is_err());
 
     // replace (diff-merged by the server) and rename

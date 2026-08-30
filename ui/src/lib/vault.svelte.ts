@@ -73,7 +73,7 @@ export class VaultSession {
   /** Offline cache (SPEC §6.4): docs opened here stay readable/editable after a reload. */
   private cache(docId: string, doc: Y.Doc) {
     try {
-      new IndexeddbPersistence(`notes:${this.id}:${docId}`, doc)
+      new IndexeddbPersistence(`lemmate:${this.id}:${docId}`, doc)
     } catch {
       /* private mode or no IndexedDB: online-only */
     }

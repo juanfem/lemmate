@@ -1,9 +1,9 @@
 {
-  "name": "notes-ui",
+  "name": "lemmate-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "TypeScript side of notes: markdown parsing (shared corpus with notes-core), later the CodeMirror 6 editor and Svelte 5 shell.",
+  "description": "TypeScript side of notes: markdown parsing (shared corpus with lemmate-core), later the CodeMirror 6 editor and Svelte 5 shell.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

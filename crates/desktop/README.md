@@ -1,10 +1,10 @@
-# notes-desktop
+# lemmate-desktop
 
 The Tauri 2 desktop shell (SPEC §3.1, §14). It is deliberately thin: it starts the engine's
 **local relay** for one vault and opens **one window** on the URL that relay serves.
 
 ```
-notes-desktop ──> notes_core::client::start(SyncOptions, LocalOptions)
+lemmate-desktop ──> lemmate_core::client::start(SyncOptions, LocalOptions)
                      │  binds 127.0.0.1:0, serves ui/dist + the local API,
                      │  syncs the vault with the server in a background task
                      └──> window at http://127.0.0.1:<port>/#/v/<vault-id>
@@ -16,7 +16,7 @@ Tauri managed state and `abort()`ed on `RunEvent::Exit`.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/notes/desktop.toml`, falling back to `~/.config/notes/desktop.toml`:
+`$XDG_CONFIG_HOME/notes/desktop.toml`, falling back to `~/.config/lemmate/desktop.toml`:
 
 ```toml
 vault_dir  = "/home/you/notes"              # required — the vault folder, created if missing
@@ -30,12 +30,12 @@ Every key has a flag that overrides it, and most have an environment variable:
 
 | Flag | Env | Key |
 |---|---|---|
-| `--config FILE` | `NOTES_DESKTOP_CONFIG` | — (which file to read) |
-| `--vault-dir DIR` | `NOTES_VAULT_DIR` | `vault_dir` |
-| `--server-url URL` | `NOTES_SERVER` | `server_url` |
+| `--config FILE` | `LEMMATE_DESKTOP_CONFIG` | — (which file to read) |
+| `--vault-dir DIR` | `LEMMATE_VAULT_DIR` | `vault_dir` |
+| `--server-url URL` | `LEMMATE_SERVER` | `server_url` |
 | `--vault-id ULID` | — | `vault_id` |
-| `--ca-cert FILE` | `NOTES_CA_CERT` | `ca_cert` |
-| `--web-dir DIR` | `NOTES_WEB_DIR` | `web_dir` |
+| `--ca-cert FILE` | `LEMMATE_CA_CERT` | `ca_cert` |
+| `--web-dir DIR` | `LEMMATE_WEB_DIR` | `web_dir` |
 
 Without a usable configuration the app opens a **setup screen** in the window (vault folder, server, optional account) and writes this file for you; the flags below still override it.
 
@@ -43,17 +43,17 @@ Without a usable configuration the app opens a **setup screen** in the window (v
 
 ```sh
 (cd ui && npm install && npm run build)     # the relay serves ui/dist; build it first
-cargo run -p notes-server -- --data-dir ./data
-cargo run -p notes-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
+cargo run -p lemmate-server -- --data-dir ./data
+cargo run -p lemmate-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
 
-RUST_LOG=info cargo run -p notes-desktop    # …with the config file instead of flags
+RUST_LOG=info cargo run -p lemmate-desktop    # …with the config file instead of flags
 ```
 
 ## Web assets
 
 The relay needs a directory of built web assets. They are resolved in this order:
 
-1. `--web-dir` / `NOTES_WEB_DIR` / `web_dir` in the config file;
+1. `--web-dir` / `LEMMATE_WEB_DIR` / `web_dir` in the config file;
 2. `<resource dir>/ui/dist` — the copy shipped by `bundle.resources` in `tauri.conf.json`
    (`"../../ui/dist/": "ui/dist/"`), used in an installed build;
 3. `<repo>/ui/dist` relative to `CARGO_MANIFEST_DIR` — dev mode, straight from the source tree.

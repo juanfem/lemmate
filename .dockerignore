@@ -15,7 +15,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
-**/.notes/
+**/.lemmate/
 
 # Docs and fixtures: not needed to build the server, the CLI, or the web client.
 corpus/

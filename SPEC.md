@@ -1,4 +1,4 @@
-# Notes — Specification
+# Lemmate — Specification
 
 Status: draft v0.4 (2026-08-30) — M0–M2 implemented, M3 partly (export, REST/relay writes, MCP); see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
@@ -250,7 +250,7 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 
 ### 6.1 Server
 
-- `notes.db` (SQLite, WAL): all tables in §4.1. Doc updates are appended per doc; a
+- `lemmate.db` (SQLite, WAL): all tables in §4.1. Doc updates are appended per doc; a
   snapshot is written every 500 updates or 10 minutes, after which older updates may be
   pruned to the last snapshot older than the version-history retention window (§9).
 - `attachments/<vault_id>/<hash[0..2]>/<hash>` on the filesystem.
@@ -263,7 +263,7 @@ Per vault, a local directory chosen by the user (the projection, §6.3) plus a s
 
 ```
 <vault>/
-  .notes/
+  .lemmate/
     local.db          # same schema subset as the server: docs, updates, snapshots, index
     attachments/      # content-addressed cache; pinned or LRU (mobile)
   Daily/2026-08-29.md
@@ -281,7 +281,7 @@ Write direction (CRDT → disk):
   `-<hash[0..6]>` on collision); notes may still reference files anywhere in the vault.
 
 Read direction (disk → CRDT):
-- A watcher (`notify` crate) observes the vault directory, ignoring `.notes/`.
+- A watcher (`notify` crate) observes the vault directory, ignoring `.lemmate/`.
 - On change to a known file: compute a diff between the last projected text (stored in
   `local.db`) and the new file content, apply the diff as a Y.Text delta. Because the diff
   is against the *last projected* text, it composes correctly with concurrent CRDT edits.
@@ -416,7 +416,7 @@ Enforcement is at the sync layer (§7) and API layer, not in the UI.
 
 ### 11.4 Obsidian import
 
-`notes import obsidian <dir>` (CLI and desktop wizard):
+`lemmate import obsidian <dir>` (CLI and desktop wizard):
 - Preserves folder structure and filenames; assigns ULIDs.
 - Converts `> [!kind] Title` callouts to `::: {.callout-kind title="Title"}`.
 - Keeps wikilinks; rewrites `![[img.png]]` image embeds to `![](img.png)`; other embeds
@@ -471,14 +471,14 @@ applies the result as CRDT edits, so API writes merge with concurrent editors.
 
 ### 13.2 CLI
 
-`notes login`, `notes vault ls`, `notes ls|cat|new|edit|mv|rm`, `notes search`,
-`notes daily [date]`, `notes export`, `notes import obsidian`, `notes sync` (native
+`lemmate login`, `notes vault ls`, `lemmate ls|cat|new|edit|mv|rm`, `lemmate search`,
+`lemmate daily [date]`, `lemmate export`, `lemmate import obsidian`, `lemmate sync` (native
 projection folder without the GUI). JSON output with `--json` for scripting.
 
 ### 13.3 MCP
 
 - Transport: **Streamable HTTP** at `/mcp` on the server (auth by personal access token),
-  and `notes mcp` for stdio against a server.
+  and `lemmate mcp` for stdio against a server.
 - Tools: `search_notes`, `read_note`, `write_note` (diff-merged), `append_to_note`,
   `list_notes`, `get_daily_note`, `get_backlinks`, `list_tags`.
 - Resources: `note://<vault>/<path>` for read-only exposure.
@@ -496,7 +496,7 @@ projection folder without the GUI). JSON output with `--json` for scripting.
 | Web | browser | cached docs only | no | Served by the server; no install. |
 
 Minimum: single-binary server on Linux amd64/arm64; Docker image; `fly.toml` with a
-persistent volume for `notes.db` and attachments.
+persistent volume for `lemmate.db` and attachments.
 
 ---
 

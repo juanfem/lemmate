@@ -1,6 +1,6 @@
-// The browser sync layer against a real notes-server: create a note from "the UI" (Y.Doc ops
-// over the frame protocol), see the server index it, and see `notes sync` project it to disk.
-// Skipped unless NOTES_SERVER_BIN and NOTES_CLI_BIN point at built binaries.
+// The browser sync layer against a real lemmate-server: create a note from "the UI" (Y.Doc ops
+// over the frame protocol), see the server index it, and see `lemmate sync` project it to disk.
+// Skipped unless LEMMATE_SERVER_BIN and LEMMATE_CLI_BIN point at built binaries.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -12,8 +12,8 @@ import * as Y from 'yjs'
 import { SyncClient } from '../src/lib/sync.ts'
 import { ulid } from '../src/lib/ulid.ts'
 
-const SERVER = process.env.NOTES_SERVER_BIN
-const CLI = process.env.NOTES_CLI_BIN
+const SERVER = process.env.LEMMATE_SERVER_BIN
+const CLI = process.env.LEMMATE_CLI_BIN
 const PORT = 18095
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))

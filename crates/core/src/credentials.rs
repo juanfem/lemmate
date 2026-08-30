@@ -1,6 +1,6 @@
 //! Saved sessions for native clients: `$XDG_CONFIG_HOME/notes/credentials.toml`, one
-//! `[servers."<base url>"]` table per server holding `token`. Written by `notes login`, read by
-//! `notes sync` and the desktop app.
+//! `[servers."<base url>"]` table per server holding `token`. Written by `lemmate login`, read by
+//! `lemmate sync` and the desktop app.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ pub fn path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("notes").join("credentials.toml")
+    base.join("lemmate").join("credentials.toml")
 }
 
 fn read() -> toml::Table {

@@ -8,33 +8,33 @@ use std::str::FromStr;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use notes_core::VaultId;
+use lemmate_core::VaultId;
 use serde::Deserialize;
 
-/// `notes-desktop` — the Tauri shell around the sync engine's local relay.
+/// `lemmate-desktop` — the Tauri shell around the sync engine's local relay.
 #[derive(Parser, Debug)]
-#[command(name = "notes-desktop", version, about = "Self-hosted markdown notes (desktop)")]
+#[command(name = "lemmate-desktop", version, about = "Self-hosted markdown notes (desktop)")]
 pub struct Cli {
     /// Configuration file (default: `$XDG_CONFIG_HOME/notes/desktop.toml`).
-    #[arg(long, value_name = "FILE", env = "NOTES_DESKTOP_CONFIG")]
+    #[arg(long, value_name = "FILE", env = "LEMMATE_DESKTOP_CONFIG")]
     pub config: Option<PathBuf>,
     /// Vault directory to open; created by the engine if missing.
-    #[arg(long, value_name = "DIR", env = "NOTES_VAULT_DIR")]
+    #[arg(long, value_name = "DIR", env = "LEMMATE_VAULT_DIR")]
     pub vault_dir: Option<PathBuf>,
     /// Server base URL, e.g. https://notes.example.org
-    #[arg(long, value_name = "URL", env = "NOTES_SERVER")]
+    #[arg(long, value_name = "URL", env = "LEMMATE_SERVER")]
     pub server_url: Option<String>,
     /// Vault id (ULID) to join, when pulling an existing vault into an empty directory.
     #[arg(long, value_name = "ULID")]
     pub vault_id: Option<String>,
     /// PEM file of a private CA to trust for wss:// and https:// (default: public roots).
-    #[arg(long, value_name = "FILE", env = "NOTES_CA_CERT")]
+    #[arg(long, value_name = "FILE", env = "LEMMATE_CA_CERT")]
     pub ca_cert: Option<PathBuf>,
-    /// Access token (default: the one saved by `notes login` for this server).
-    #[arg(long, env = "NOTES_TOKEN")]
+    /// Access token (default: the one saved by `lemmate login` for this server).
+    #[arg(long, env = "LEMMATE_TOKEN")]
     pub token: Option<String>,
     /// Directory of built web assets for the relay to serve (default: bundled, then `ui/dist`).
-    #[arg(long, value_name = "DIR", env = "NOTES_WEB_DIR")]
+    #[arg(long, value_name = "DIR", env = "LEMMATE_WEB_DIR")]
     pub web_dir: Option<PathBuf>,
 }
 
@@ -58,26 +58,26 @@ pub struct Config {
     pub vault_id: Option<VaultId>,
     pub ca_cert: Option<PathBuf>,
     pub token: Option<String>,
-    /// `--web-dir` / `NOTES_WEB_DIR`; `None` means "discover it" (see `main::resolve_web_dir`).
+    /// `--web-dir` / `LEMMATE_WEB_DIR`; `None` means "discover it" (see `main::resolve_web_dir`).
     pub web_dir: Option<PathBuf>,
 }
 
 /// Where the configuration file lives: `$XDG_CONFIG_HOME/notes/desktop.toml`, falling back
-/// to `~/.config/notes/desktop.toml`.
+/// to `~/.config/lemmate/desktop.toml`.
 pub fn default_config_path() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
     };
-    Some(base.join("notes").join("desktop.toml"))
+    Some(base.join("lemmate").join("desktop.toml"))
 }
 
 /// The message printed when the configuration is missing or incomplete.
 pub fn format_help(path: Option<&Path>) -> String {
     let shown =
-        path.map(|p| p.display().to_string()).unwrap_or_else(|| "~/.config/notes/desktop.toml".into());
+        path.map(|p| p.display().to_string()).unwrap_or_else(|| "~/.config/lemmate/desktop.toml".into());
     format!(
-        "notes-desktop has no vault to open yet (there is no setup UI in this milestone).\n\
+        "lemmate-desktop has no vault to open yet (there is no setup UI in this milestone).\n\
          \n\
          Write {shown} like this:\n\
          \n\
@@ -89,7 +89,7 @@ pub fn format_help(path: Option<&Path>) -> String {
          \n\
          Or pass the same values as flags, which take precedence over the file:\n\
          \n\
-         \x20   notes-desktop --vault-dir /home/you/notes --server-url https://notes.example.org\n"
+         \x20   lemmate-desktop --vault-dir /home/you/lemmate --server-url https://notes.example.org\n"
     )
 }
 
@@ -119,12 +119,15 @@ impl Config {
         Some(SetupContext {
             config_path: path,
             web_dir: cli.web_dir.clone().or(file.web_dir),
-            suggested_vault_dir: home.join("notes"),
+            suggested_vault_dir: home.join("lemmate"),
         })
     }
 
     /// Write the file the setup screen produced; `resolve` reads it back on the next start.
-    pub fn write_setup(path: &std::path::Path, req: &notes_core::local::SetupRequest) -> anyhow::Result<()> {
+    pub fn write_setup(
+        path: &std::path::Path,
+        req: &lemmate_core::local::SetupRequest,
+    ) -> anyhow::Result<()> {
         let mut table = toml::Table::new();
         table.insert("vault_dir".into(), toml::Value::String(req.vault_dir.clone()));
         table.insert("server_url".into(), toml::Value::String(req.server_url.clone()));

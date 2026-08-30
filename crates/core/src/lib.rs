@@ -1,4 +1,4 @@
-//! notes-core — the shared engine behind the server, desktop, and mobile apps.
+//! lemmate-core — the shared engine behind the server, desktop, and mobile apps.
 //!
 //! Responsibilities (see SPEC.md §3.1):
 //! - CRDT note documents ([`doc`]) backed by yrs, with text-diff application ([`diff`]).
@@ -41,4 +41,4 @@ pub use vault_doc::VaultDoc;
 /// Name of the Y.Text holding a note's markdown source (SPEC §4.2).
 pub const CONTENT_FIELD: &str = "content";
 /// Sidecar directory inside a projected vault (SPEC §6.2).
-pub const SIDECAR_DIR: &str = ".notes";
+pub const SIDECAR_DIR: &str = ".lemmate";

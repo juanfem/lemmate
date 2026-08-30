@@ -1,6 +1,6 @@
 //! `notes` — command-line client (SPEC §13.2, §13.3).
 //!
-//! Two families of commands: local ones built directly on `notes-core` (`index`, `search`,
+//! Two families of commands: local ones built directly on `lemmate-core` (`index`, `search`,
 //! `import`, `export`, `sync`, `doctor`), and server-backed ones that speak the REST API
 //! (`vaults`, `ls`, `cat`, `new`, `edit`, `mv`, `rm`, `daily`, `find`, `backlinks`, `tags`) —
 //! plus `mcp`, which exposes the same API to agents over the Model Context Protocol.
@@ -11,17 +11,17 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use notes_cli::mcp;
-use notes_cli::remote::{NotesApi, Remote, resolve_vault};
-use notes_core::client::{self, SyncOptions};
-use notes_core::credentials;
-use notes_core::export;
-use notes_core::import::{self, ImportOptions};
-use notes_core::local::LocalOptions;
-use notes_core::{NoteId, Projection, Store, VaultId, markdown};
+use lemmate_cli::mcp;
+use lemmate_cli::remote::{NotesApi, Remote, resolve_vault};
+use lemmate_core::client::{self, SyncOptions};
+use lemmate_core::credentials;
+use lemmate_core::export;
+use lemmate_core::import::{self, ImportOptions};
+use lemmate_core::local::LocalOptions;
+use lemmate_core::{NoteId, Projection, Store, VaultId, markdown};
 
 #[derive(Parser)]
-#[command(name = "notes", version, about = "Self-hosted markdown notes")]
+#[command(name = "lemmate", version, about = "Self-hosted markdown notes")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -43,13 +43,13 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    /// Keep a vault directory in sync with a server (creates `<vault>/.notes/`).
+    /// Keep a vault directory in sync with a server (creates `<vault>/.lemmate/`).
     Sync {
         /// Vault directory; created if missing.
         #[arg(long)]
         vault: PathBuf,
         /// Server base URL, e.g. http://127.0.0.1:8080
-        #[arg(long, env = "NOTES_SERVER")]
+        #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
         /// Vault id to join (required to pull an existing vault into an empty directory).
         #[arg(long)]
@@ -58,38 +58,38 @@ enum Cmd {
         #[arg(long)]
         once: bool,
         /// PEM file of a private CA to trust for wss:// and https:// (default: public roots).
-        #[arg(long, env = "NOTES_CA_CERT")]
+        #[arg(long, env = "LEMMATE_CA_CERT")]
         ca_cert: Option<PathBuf>,
         /// Also run the local relay on this address (e.g. 127.0.0.1:8081): serves the sync
         /// socket and API from the local copy, so a UI keeps working offline.
         #[arg(long)]
         serve: Option<std::net::SocketAddr>,
         /// Built web client to serve at / on the relay (ui/dist).
-        #[arg(long, env = "NOTES_WEB_DIR")]
+        #[arg(long, env = "LEMMATE_WEB_DIR")]
         web_dir: Option<PathBuf>,
-        /// Access token (default: the one saved by `notes login` for this server).
-        #[arg(long, env = "NOTES_TOKEN")]
+        /// Access token (default: the one saved by `lemmate login` for this server).
+        #[arg(long, env = "LEMMATE_TOKEN")]
         token: Option<String>,
     },
     /// Sign in to a server and save the session token for `sync` and the desktop app.
     Login {
         /// Server base URL, e.g. https://notes.example.org
-        #[arg(long, env = "NOTES_SERVER")]
+        #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
         #[arg(long)]
         email: String,
         /// Password (prompted when omitted).
-        #[arg(long, env = "NOTES_PASSWORD")]
+        #[arg(long, env = "LEMMATE_PASSWORD")]
         password: Option<String>,
         /// Create the account instead of signing in (first account, or when registration is open).
         #[arg(long)]
         register: bool,
-        #[arg(long, env = "NOTES_CA_CERT")]
+        #[arg(long, env = "LEMMATE_CA_CERT")]
         ca_cert: Option<PathBuf>,
     },
     /// Forget the saved token for a server.
     Logout {
-        #[arg(long, env = "NOTES_SERVER")]
+        #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
     },
     /// List the vaults this account can see.
@@ -214,16 +214,16 @@ enum Cmd {
 #[derive(Args, Clone, Debug)]
 struct RemoteArgs {
     /// Server base URL, e.g. https://notes.example.org
-    #[arg(long, env = "NOTES_SERVER")]
+    #[arg(long, env = "LEMMATE_SERVER")]
     server: String,
-    /// Access token (default: the one saved by `notes login` for this server).
-    #[arg(long, env = "NOTES_TOKEN")]
+    /// Access token (default: the one saved by `lemmate login` for this server).
+    #[arg(long, env = "LEMMATE_TOKEN")]
     token: Option<String>,
     /// PEM file of a private CA to trust for https:// (default: public roots).
-    #[arg(long, env = "NOTES_CA_CERT")]
+    #[arg(long, env = "LEMMATE_CA_CERT")]
     ca_cert: Option<PathBuf>,
     /// Vault id; optional when the account has exactly one vault.
-    #[arg(long, env = "NOTES_VAULT")]
+    #[arg(long, env = "LEMMATE_VAULT")]
     vault: Option<String>,
 }
 
@@ -267,7 +267,7 @@ enum ExportFormat {
 }
 
 fn main() -> ExitCode {
-    // stderr, always: `notes mcp` speaks JSON-RPC on stdout.
+    // stderr, always: `lemmate mcp` speaks JSON-RPC on stdout.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -376,7 +376,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if json {
                 print_json(&vaults)?;
             } else if vaults.is_empty() {
-                println!("no vaults yet — create one with `notes sync`");
+                println!("no vaults yet — create one with `lemmate sync`");
             } else {
                 for v in &vaults {
                     println!("{}  {} notes", v.id, v.notes);
@@ -440,7 +440,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let (r, vault) = remote.open()?;
             let found = r.resolve_note(&vault, &note)?;
             r.rename(&vault, &found.id, &new_path)?;
-            println!("{} -> {}", found.path, notes_cli::remote::normalize_path(&new_path));
+            println!("{} -> {}", found.path, lemmate_cli::remote::normalize_path(&new_path));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Rm { remote, note } => {
@@ -530,7 +530,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Cmd::Doctor => {
             println!("notes {}", env!("CARGO_PKG_VERSION"));
-            println!("schema version: {}", notes_core::store::SCHEMA_VERSION);
+            println!("schema version: {}", lemmate_core::store::SCHEMA_VERSION);
             println!("sqlite: {}", rusqlite_version());
             for tool in ["pandoc", "quarto"] {
                 let found = std::env::var_os("PATH")
@@ -605,5 +605,5 @@ fn hostname() -> String {
 }
 
 fn rusqlite_version() -> String {
-    notes_core::store::sqlite_version()
+    lemmate_core::store::sqlite_version()
 }

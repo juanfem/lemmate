@@ -1,5 +1,5 @@
 [package]
-name = "notes-server"
+name = "lemmate-server"
 description = "Sync relay, persistence, web, and API server"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "notes-server"
+name = "lemmate-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -16,7 +16,7 @@ argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
-notes-core.workspace = true
+lemmate-core.workspace = true
 rand = "0.9"
 rusqlite = "0.40"
 serde = { version = "1", features = ["derive"] }

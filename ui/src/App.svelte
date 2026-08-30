@@ -43,7 +43,7 @@
       .catch(() => {})
   $effect(() => {
     // The editor labels our cursor for others with this name.
-    if (me) (window as unknown as { notes?: { userName?: string } }).notes = { ...((window as unknown as { notes?: object }).notes ?? {}), userName: me.display_name }
+    if (me) (window as unknown as { lemmate?: { userName?: string } }).lemmate = { ...((window as unknown as { lemmate?: object }).lemmate ?? {}), userName: me.display_name }
   })
   async function signedIn() {
     authRequired = false
@@ -104,7 +104,7 @@
         return
       }
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
-      ;(window as unknown as { notes?: unknown }).notes = { session }
+      ;(window as unknown as { lemmate?: unknown }).lemmate = { session }
       const restored = id ? loadLayout(id) : { panes: [blankPane()], focused: 0 }
       panes = restored.panes
       focusedPane = restored.focused
@@ -164,7 +164,7 @@
   }
   function loadLayout(vault: string): { panes: PaneState[]; focused: number } {
     try {
-      const raw = localStorage.getItem(`notes.layout.${vault}`)
+      const raw = localStorage.getItem(`lemmate.layout.${vault}`)
       const data = raw ? (JSON.parse(raw) as StoredLayout) : null
       const list = (data?.panes ?? [])
         .filter((p) => Array.isArray(p.tabs) && p.tabs.length > 0)
@@ -181,7 +181,7 @@
   }
   function loadPinned(vault: string): string[] {
     try {
-      const raw = localStorage.getItem(`notes.pins.${vault}`)
+      const raw = localStorage.getItem(`lemmate.pins.${vault}`)
       const list = raw ? (JSON.parse(raw) as unknown) : null
       return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : []
     } catch {
@@ -193,7 +193,7 @@
     if (!s || s.noteOnly) return
     const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active })), focused: focusedPane })
     try {
-      localStorage.setItem(`notes.layout.${s.id}`, data)
+      localStorage.setItem(`lemmate.layout.${s.id}`, data)
     } catch {
       /* storage may be unavailable */
     }
@@ -286,7 +286,7 @@
     pinned = pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
     if (session)
       try {
-        localStorage.setItem(`notes.pins.${session.id}`, JSON.stringify(pinned))
+        localStorage.setItem(`lemmate.pins.${session.id}`, JSON.stringify(pinned))
       } catch {
         /* storage may be unavailable */
       }
@@ -485,12 +485,12 @@
 {:else if setup && !setupStarting}
   <Setup status={setup} onDone={() => (setupStarting = true)} />
 {:else if setupStarting}
-  <main class="welcome"><h1>notes</h1><p class="muted">Starting your vault…</p></main>
+  <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
 {:else if authRequired}
   <Login onDone={signedIn} />
 {:else if !session}
   <main class="welcome">
-    <h1>notes</h1>
+    <h1>Lemmate</h1>
     <p>Open a vault on this server, or create a new one.</p>
     <ul>
       {#each vaults as v (v.id)}

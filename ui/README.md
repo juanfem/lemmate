@@ -1,14 +1,14 @@
-# notes-ui
+# lemmate-ui
 
-TypeScript side of the project. Today: the markdown indexer that must agree with `notes-core`
+TypeScript side of the project. Today: the markdown indexer that must agree with `lemmate-core`
 on the shared `corpus/`. Later: the CodeMirror 6 live-preview editor and the Svelte 5 shell
 used by the desktop, mobile, and web clients.
 
 ```sh
 npm install
-npm run dev       # Vite dev server on :5173, proxying /api and /ws to a notes-server on :8080
-npm run build     # → dist/, serve with `notes-server --web-dir ui/dist`
-npm test          # corpus conformance + (with NOTES_SERVER_BIN/NOTES_CLI_BIN set) a live sync e2e
+npm run dev       # Vite dev server on :5173, proxying /api and /ws to a lemmate-server on :8080
+npm run build     # → dist/, serve with `lemmate-server --web-dir ui/dist`
+npm test          # corpus conformance + (with LEMMATE_SERVER_BIN/LEMMATE_CLI_BIN set) a live sync e2e
 npm run check     # svelte-check + tsc
 ```
 

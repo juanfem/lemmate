@@ -3,7 +3,7 @@
 //! The one export that never needs pandoc or quarto: a zip of the vault's markdown and
 //! attachments. Entries are stored under vault-relative paths with forward slashes in a
 //! deterministic (sorted) order, so exporting an unchanged vault twice yields the same archive.
-//! The sidecar (`.notes/`) and hidden entries are left out — they are local state, not content.
+//! The sidecar (`.lemmate/`) and hidden entries are left out — they are local state, not content.
 
 use std::fmt;
 use std::fs;
@@ -93,7 +93,7 @@ mod tests {
         write(&vault.join("Root.md"), "# Root\n");
         write(&vault.join("a/Nested.qmd"), "nested\n");
         write(&vault.join("a/img.png"), "PNG-BYTES");
-        write(&vault.join(".notes/local.db"), "sqlite");
+        write(&vault.join(".lemmate/local.db"), "sqlite");
         write(&vault.join(".hidden/secret.md"), "no");
         write(&vault.join(".dotfile"), "no");
 

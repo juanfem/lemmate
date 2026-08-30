@@ -1,5 +1,5 @@
 // Cross-parser conformance: every corpus/*.md must index to exactly corpus/*.json, the same
-// fixtures `cargo test -p notes-core corpus` checks against the Rust indexer.
+// fixtures `cargo test -p lemmate-core corpus` checks against the Rust indexer.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

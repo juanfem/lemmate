@@ -1,6 +1,6 @@
 /target
 /data
-**/.notes/
+**/.lemmate/
 *.db
 *.db-wal
 *.db-shm

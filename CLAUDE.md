@@ -1,8 +1,8 @@
 # Lemmate — working notes for Claude
 
 Lemmate is a self-hosted, open-source, multi-user markdown note app (an Obsidian replacement).
-The product name is **Lemmate**; crate, binary and path names still say `notes` (`notes-core`,
-`notes-server`, `notes` CLI, `~/.config/notes/`) pending a rename.
+The product name is **Lemmate**; crate, binary and path names still say `notes` (`lemmate-core`,
+`lemmate-server`, `notes` CLI, `~/.config/lemmate/`) pending a rename.
 
 `SPEC.md` is the design authority (decisions marked **[decided]** are settled — do not
 re-litigate: CRDT is the truth and files are a projection; CodeMirror 6 live preview, not
@@ -23,13 +23,13 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 ## Commands
 
 ```sh
-cargo test --workspace --exclude notes-desktop        # Rust tests (desktop needs webkit2gtk; `cargo check -p notes-desktop`)
-NOTES_TEST_PANDOC=/path/to/pandoc cargo test -p notes-core pandoc::   # pandoc tests are skipped without it
-cargo clippy --workspace --exclude notes-desktop --all-targets -- -D warnings && cargo fmt --all --check
+cargo test --workspace --exclude lemmate-desktop        # Rust tests (desktop needs webkit2gtk; `cargo check -p lemmate-desktop`)
+LEMMATE_TEST_PANDOC=/path/to/pandoc cargo test -p lemmate-core pandoc::   # pandoc tests are skipped without it
+cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings && cargo fmt --all --check
 cd ui && npm run check && npm test                     # svelte-check + tsc; corpus + codec tests
-NOTES_SERVER_BIN=<target>/debug/notes-server NOTES_CLI_BIN=<target>/debug/notes npm test   # live e2e too
-npm run build                                          # → ui/dist, served by `notes-server --web-dir ui/dist`
-notes-server --no-auth --data-dir ./data --web-dir ui/dist   # dev server (auth off = dev only)
+LEMMATE_SERVER_BIN=<target>/debug/lemmate-server LEMMATE_CLI_BIN=<target>/debug/lemmate npm test   # live e2e too
+npm run build                                          # → ui/dist, served by `lemmate-server --web-dir ui/dist`
+lemmate-server --no-auth --data-dir ./data --web-dir ui/dist   # dev server (auth off = dev only)
 node ui/scripts/cdp.mjs <url> <outdir> 'waitfor:…' 'click:…' 'eval:…' 'shot:name'   # headless-Chrome smoke runs
 ```
 
@@ -69,4 +69,4 @@ CI (`.github/workflows/ci.yml`) runs exactly the checks above; keep them green b
 - Rust raw strings: `r#"…"}"#…"#` terminates early on `"#` — use `r##"…"##`.
 - Node's type stripping rejects TS parameter properties; `erasableSyntaxOnly` is on for a reason.
 - CodeMirror block widgets must come from a `StateField`, not a `ViewPlugin`.
-- Env bool flags use `BoolishValueParser` (`1/0/yes/no` work); `NOTES_*` names are in `crates/server/src/main.rs`.
+- Env bool flags use `BoolishValueParser` (`1/0/yes/no` work); `LEMMATE_*` names are in `crates/server/src/main.rs`.

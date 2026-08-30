@@ -1,5 +1,5 @@
 [package]
-name = "notes-core"
+name = "lemmate-core"
 description = "Shared core: CRDT docs, persistence, sync protocol, file projection, markdown indexing"
 version.workspace = true
 edition.workspace = true

@@ -1,4 +1,4 @@
-// The local relay (`notes sync --serve`): a UI client talks to the engine on loopback, the
+// The local relay (`lemmate sync --serve`): a UI client talks to the engine on loopback, the
 // engine projects to disk and forwards to the real server — and keeps working while the server
 // is down, pushing the backlog when it returns.
 
@@ -12,8 +12,8 @@ import * as Y from 'yjs'
 import { SyncClient } from '../src/lib/sync.ts'
 import { ulid } from '../src/lib/ulid.ts'
 
-const SERVER = process.env.NOTES_SERVER_BIN
-const CLI = process.env.NOTES_CLI_BIN
+const SERVER = process.env.LEMMATE_SERVER_BIN
+const CLI = process.env.LEMMATE_CLI_BIN
 const SERVER_PORT = 18097
 const RELAY_PORT = 18098
 

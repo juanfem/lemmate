@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store, VaultDoc, VaultId};
-use notes_server::{AppState, AuthMode, ServerOptions, build_state, router};
+use lemmate_core::sync::{Frame, Message, SyncMessage};
+use lemmate_core::{DocId, NoteDoc, NoteId, Store, VaultDoc, VaultId};
+use lemmate_server::{AppState, AuthMode, ServerOptions, build_state, router};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as TMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;

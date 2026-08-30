@@ -1,8 +1,8 @@
-//! Blocking REST client for a `notes-server` (SPEC §13.1), shared by the remote CLI commands
+//! Blocking REST client for a `lemmate-server` (SPEC §13.1), shared by the remote CLI commands
 //! (SPEC §13.2) and the MCP server (SPEC §13.3).
 //!
 //! Everything speaks JSON over `ureq` and authenticates with `Authorization: Bearer <token>`,
-//! taking the token from `--token`/`NOTES_TOKEN` or, failing that, from the file `notes login`
+//! taking the token from `--token`/`LEMMATE_TOKEN` or, failing that, from the file `lemmate login`
 //! writes. Non-2xx answers become [`HttpError`]s that carry the status, so callers (and the
 //! MCP tools) can tell "no such note" from "not signed in".
 
@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use notes_core::{NoteId, VaultId, credentials, tls};
+use lemmate_core::{NoteId, VaultId, credentials, tls};
 use serde::{Deserialize, Serialize};
 
 /// Response bodies are notes and note lists; a very large vault still fits comfortably.
@@ -79,7 +79,7 @@ impl HttpError {
     fn explain(&self) -> &'static str {
         match self.status {
             400 => "the server rejected the request",
-            401 => "not signed in: run `notes login`",
+            401 => "not signed in: run `lemmate login`",
             403 => "no access: you need editor rights on this vault",
             404 => "not found or no access",
             409 => "conflict: a note already exists at that path",
@@ -128,7 +128,7 @@ pub struct Remote {
 
 impl Remote {
     /// Build a client from the common `--server/--token/--ca-cert` options. The token falls back
-    /// to the one `notes login` saved for this server.
+    /// to the one `lemmate login` saved for this server.
     pub fn from_args(server: &str, token: Option<String>, ca_cert: Option<&Path>) -> Result<Self> {
         tls::install_crypto_provider();
         let base = credentials::key(server);
@@ -272,11 +272,11 @@ pub fn resolve_vault(api: &dyn NotesApi, arg: Option<&str>) -> Result<String> {
     let vaults = api.vaults()?;
     match vaults.as_slice() {
         [only] => Ok(only.id.clone()),
-        [] => bail!("this account has no vaults yet — create one with `notes sync`"),
+        [] => bail!("this account has no vaults yet — create one with `lemmate sync`"),
         many => {
             let list =
                 many.iter().map(|v| format!("  {} ({} notes)", v.id, v.notes)).collect::<Vec<_>>().join("\n");
-            bail!("several vaults are available; pass --vault (or set NOTES_VAULT):\n{list}")
+            bail!("several vaults are available; pass --vault (or set LEMMATE_VAULT):\n{list}")
         }
     }
 }
@@ -354,7 +354,7 @@ mod tests {
     fn http_errors_explain_themselves_and_keep_the_status() {
         let e = anyhow::Error::from(HttpError { status: 401, request: "GET /vaults".into() });
         assert_eq!(status_of(&e), Some(401));
-        assert!(e.to_string().contains("notes login"), "{e}");
+        assert!(e.to_string().contains("lemmate login"), "{e}");
         let e = anyhow::Error::from(HttpError { status: 404, request: "GET /vaults/x/notes/y".into() });
         assert!(is_not_found(&e));
         assert!(e.to_string().contains("not found or no access"), "{e}");

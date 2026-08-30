@@ -3,12 +3,12 @@
 
 use std::net::SocketAddr;
 
-use notes_core::client::{LocalHandle, LocalOptions, SyncOptions, start};
-use notes_core::{Store, VaultId};
-use notes_server::{ServerOptions, build_state, router};
+use lemmate_core::client::{LocalHandle, LocalOptions, SyncOptions, start};
+use lemmate_core::{Store, VaultId};
+use lemmate_server::{ServerOptions, build_state, router};
 use serde_json::Value;
 
-async fn server() -> (SocketAddr, std::sync::Arc<notes_server::AppState>) {
+async fn server() -> (SocketAddr, std::sync::Arc<lemmate_server::AppState>) {
     let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

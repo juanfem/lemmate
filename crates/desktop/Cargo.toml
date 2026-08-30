@@ -1,5 +1,5 @@
 [package]
-name = "notes-desktop"
+name = "lemmate-desktop"
 description = "Tauri 2 desktop shell: runs the local sync relay and opens one window on it"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "notes-desktop"
+name = "lemmate-desktop"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -16,7 +16,7 @@ tauri-build = "2"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-notes-core.workspace = true
+lemmate-core.workspace = true
 serde = { version = "1", features = ["derive"] }
 tauri = "2"
 toml = "1"

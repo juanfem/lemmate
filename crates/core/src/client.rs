@@ -2,7 +2,7 @@
 //! store, and the server in agreement.
 //!
 //! One engine per vault. It owns every note doc in memory, persists every update to
-//! `<vault>/.notes/local.db`, writes remote changes to disk (debounced), ingests local file
+//! `<vault>/.lemmate/local.db`, writes remote changes to disk (debounced), ingests local file
 //! changes as CRDT edits, and speaks the framed Yjs protocol over a WebSocket. Being offline is
 //! not an error: everything is journaled locally and the handshake on reconnect sends what the
 //! other side is missing. The same engine will back the Tauri shells.

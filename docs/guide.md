@@ -16,9 +16,9 @@ Three clients, one engine:
 
 | Client | What it is | Offline |
 |---|---|---|
-| **Desktop** (`notes-desktop`) | Tauri 2 window over a **local relay**: the sync engine runs on your machine, owns the vault folder, and serves the same web UI on loopback. | Yes — full local copy, local search, edits journalled and pushed on reconnect. |
-| **Web** | The same Svelte UI served by `notes-server`, talking to it over WebSocket + REST. | No. There is no IndexedDB cache yet, so a reload while disconnected loses unsent edits. |
-| **CLI** (`notes`) | `notes sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
+| **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: the sync engine runs on your machine, owns the vault folder, and serves the same web UI on loopback. | Yes — full local copy, local search, edits journalled and pushed on reconnect. |
+| **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | No. There is no IndexedDB cache yet, so a reload while disconnected loses unsent edits. |
+| **CLI** (`notes`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
 
 ---
 
@@ -30,7 +30,7 @@ See [`deploy.md`](deploy.md) for Docker, a Caddy reverse proxy, fly.io, and back
 version:
 
 ```sh
-notes-server --data-dir ./data --web-dir ui/dist     # accounts on by default
+lemmate-server --data-dir ./data --web-dir ui/dist     # accounts on by default
 ```
 
 The **first account to register becomes the admin**; afterwards only admins create accounts,
@@ -43,8 +43,8 @@ a network.
 
 ### (b) Desktop app, first run
 
-`notes-desktop` reads `$XDG_CONFIG_HOME/notes/desktop.toml` (falling back to
-`~/.config/notes/desktop.toml`). With no config file it opens a **setup screen** asking for:
+`lemmate-desktop` reads `$XDG_CONFIG_HOME/notes/desktop.toml` (falling back to
+`~/.config/lemmate/desktop.toml`). With no config file it opens a **setup screen** asking for:
 
 - **Vault folder** — where your `.md` files live on this computer (created if missing);
 - **Server URL** — e.g. `https://notes.example.org`;
@@ -62,18 +62,18 @@ unreachable.
 ### (c) Sync a folder from the command line
 
 ```sh
-notes login --server https://notes.example.org --email you@example.org --register
-notes sync  --vault ~/vault --server https://notes.example.org          # keeps running
+lemmate login --server https://notes.example.org --email you@example.org --register
+lemmate sync  --vault ~/vault --server https://notes.example.org          # keeps running
 ```
 
-`login` stores a session token in `~/.config/notes/credentials.toml` (mode 0600); `sync` picks
+`login` stores a session token in `~/.config/lemmate/credentials.toml` (mode 0600); `sync` picks
 it up automatically. First run **publishes** the folder as a new vault and prints the id; to
 join an existing vault into an empty folder, pass `--vault-id <ULID>`. Add `--once` to sync and
 exit. Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the local relay, which serves
 the sync socket, the API and the web client on loopback — this is exactly what the desktop app
 embeds.
 
-For a private CA, `--ca-cert ca.pem` (or `NOTES_CA_CERT`); `--server https://…` implies `wss://`.
+For a private CA, `--ca-cert ca.pem` (or `LEMMATE_CA_CERT`); `--server https://…` implies `wss://`.
 
 ### (d) Web client
 
@@ -316,20 +316,20 @@ notes <command>
 
 | Command | What it does |
 |---|---|
-| `notes login --server URL --email E [--register] [--ca-cert F]` | Sign in (or create the account) and save the token to `~/.config/notes/credentials.toml`. Password prompted if not given. |
-| `notes logout --server URL` | Forget the saved token for that server. |
-| `notes sync --vault DIR --server URL [--vault-id ULID] [--once] [--serve ADDR --web-dir DIR] [--ca-cert F] [--token T]` | Keep a folder in sync; optionally run the local relay and serve the web client. |
-| `notes index PATH [--json]` | Index one file or a whole vault and print what the engine extracts (title, tags, links). |
-| `notes search VAULT QUERY [--limit N]` | Full-text search over a vault directory, using a throwaway in-memory index. |
-| `notes import obsidian SRC --into DIR [--overwrite]` | Import an Obsidian vault (see §8). |
-| `notes export zip VAULT OUT` | Zip the vault's notes and attachments. No pandoc needed. |
-| `notes doctor` | Print versions, the SQLite schema version, and whether `pandoc`/`quarto` are on `PATH`. |
+| `lemmate login --server URL --email E [--register] [--ca-cert F]` | Sign in (or create the account) and save the token to `~/.config/lemmate/credentials.toml`. Password prompted if not given. |
+| `lemmate logout --server URL` | Forget the saved token for that server. |
+| `lemmate sync --vault DIR --server URL [--vault-id ULID] [--once] [--serve ADDR --web-dir DIR] [--ca-cert F] [--token T]` | Keep a folder in sync; optionally run the local relay and serve the web client. |
+| `lemmate index PATH [--json]` | Index one file or a whole vault and print what the engine extracts (title, tags, links). |
+| `lemmate search VAULT QUERY [--limit N]` | Full-text search over a vault directory, using a throwaway in-memory index. |
+| `lemmate import obsidian SRC --into DIR [--overwrite]` | Import an Obsidian vault (see §8). |
+| `lemmate export zip VAULT OUT` | Zip the vault's notes and attachments. No pandoc needed. |
+| `lemmate doctor` | Print versions, the SQLite schema version, and whether `pandoc`/`quarto` are on `PATH`. |
 
-`NOTES_SERVER`, `NOTES_TOKEN`, `NOTES_CA_CERT`, `NOTES_PASSWORD` and `NOTES_WEB_DIR` back the
+`LEMMATE_SERVER`, `LEMMATE_TOKEN`, `LEMMATE_CA_CERT`, `LEMMATE_PASSWORD` and `LEMMATE_WEB_DIR` back the
 corresponding flags.
 
-The remote commands from SPEC §13.2 (`notes ls|cat|new|mv|rm`, `notes daily`, `notes vault ls`)
-and the stdio MCP server (`notes mcp`, SPEC §13.3) are being wired up now; when they land, the
+The remote commands from SPEC §13.2 (`lemmate ls|cat|new|mv|rm`, `lemmate daily`, `notes vault ls`)
+and the stdio MCP server (`lemmate mcp`, SPEC §13.3) are being wired up now; when they land, the
 CLI's own `crates/cli/README.md` documents the MCP tool surface.
 
 ---
@@ -351,8 +351,8 @@ CLI's own `crates/cli/README.md` documents the MCP tool surface.
 Pandoc reads the note as
 `markdown+wikilinks_title_after_pipe+tex_math_dollars+fenced_divs+bracketed_spans`, so
 wikilinks, `$…$`, callouts and bracketed spans survive the trip. Front matter is stripped
-before rendering. Pandoc is found on `PATH` unless you pass `--pandoc PATH` / `NOTES_PANDOC`;
-without it the endpoint answers **501**. `notes doctor` tells you whether it is installed.
+before rendering. Pandoc is found on `PATH` unless you pass `--pandoc PATH` / `LEMMATE_PANDOC`;
+without it the endpoint answers **501**. `lemmate doctor` tells you whether it is installed.
 
 A vault-level `export/` folder is consulted when the exporter knows the vault directory:
 `defaults.yaml` (passed as `--defaults`), `references.bib` (turns on `--citeproc`), and
@@ -361,7 +361,7 @@ pass a vault directory, so today `export/` and image resource paths only apply w
 exporter is given one — server exports render the note text alone, with links left relative.
 The local relay has no export endpoint at all yet, so exporting requires the server.
 
-Whole-vault export never needs pandoc: `notes export zip <vault> <out.zip>` writes the markdown
+Whole-vault export never needs pandoc: `lemmate export zip <vault> <out.zip>` writes the markdown
 and attachments as they are. And because the vault is already a folder of files, `pandoc` or
 `quarto` can be pointed straight at it.
 
@@ -370,8 +370,8 @@ and attachments as they are. And because the vault is already a folder of files,
 ## 8. Coming from Obsidian
 
 ```sh
-notes import obsidian ~/ObsidianVault --into ~/vault
-notes sync --vault ~/vault --server https://notes.example.org
+lemmate import obsidian ~/ObsidianVault --into ~/vault
+lemmate sync --vault ~/vault --server https://notes.example.org
 ```
 
 The importer preserves folders and filenames and reports what it did. What changes:
@@ -383,7 +383,7 @@ The importer preserves folders and filenames and reports what it did. What chang
 | `[[wikilinks]]`, `[[a\|b]]`, `#tags`, maths, front matter | Left exactly as they are |
 | Self-hosted LiveSync | The built-in sync — one WebSocket, CRDT merge, no conflict files |
 | File Tree Alternative | The built-in tree, with per-folder note counts |
-| `.obsidian/bookmarks.json`, `daily-notes.json` | Translated into `.notes/*.import.json`; nothing consumes them yet, so re-create bookmarks and check the daily-note path by hand |
+| `.obsidian/bookmarks.json`, `daily-notes.json` | Translated into `.lemmate/*.import.json`; nothing consumes them yet, so re-create bookmarks and check the daily-note path by hand |
 | `.obsidian/`, `.trash/` | Skipped |
 
 Note ids are not written during import — the sync engine assigns them on first sync.
@@ -400,8 +400,8 @@ encryption, and peer-to-peer sync.
 `connecting` or `offline`, followed by the note count and, while the vault doc is still
 catching up, "syncing…". Reconnection is automatic with exponential backoff up to 30 s.
 
-**Offline.** On desktop and `notes sync`, everything keeps working: edits are journalled in
-`<vault>/.notes/local.db` and reconciled when the server returns. In the **browser** there is
+**Offline.** On desktop and `lemmate sync`, everything keeps working: edits are journalled in
+`<vault>/.lemmate/local.db` and reconciled when the server returns. In the **browser** there is
 no local persistence yet — a reload while offline loses anything unsent, so avoid reloading a
 disconnected tab.
 
@@ -419,20 +419,20 @@ note that stays empty or edits that quietly do not stick. Check your role on the
 
 | Path | What |
 |---|---|
-| `<vault>/.notes/local.db` | Local update log, snapshots, index, and the vault id for this folder |
-| `<vault>/.notes/attachments/` | Content-addressed attachment cache |
+| `<vault>/.lemmate/local.db` | Local update log, snapshots, index, and the vault id for this folder |
+| `<vault>/.lemmate/attachments/` | Content-addressed attachment cache |
 | `<vault>/attachments/` | The human-readable projection of referenced attachments |
-| `~/.config/notes/credentials.toml` | Saved session tokens, one per server (mode 0600) |
-| `~/.config/notes/desktop.toml` | Desktop app configuration |
-| `<data-dir>/notes.db`, `<data-dir>/attachments/` | Everything on the server |
+| `~/.config/lemmate/credentials.toml` | Saved session tokens, one per server (mode 0600) |
+| `~/.config/lemmate/desktop.toml` | Desktop app configuration |
+| `<data-dir>/lemmate.db`, `<data-dir>/attachments/` | Everything on the server |
 
 **Resetting a device.** The sidecar is a cache, not your data: stop the client, delete
-`<vault>/.notes/`, and re-sync. Pass `--vault-id <ULID>` (the id is printed by `notes sync
+`<vault>/.lemmate/`, and re-sync. Pass `--vault-id <ULID>` (the id is printed by `lemmate sync
 --once`, appears in the vault URL, and is what `desktop.toml` stores) so the folder rejoins the
 same vault instead of publishing itself as a new one. Any local-only edit that never reached
 the server is lost with the journal, so sync before you delete it. To start completely clean,
 delete the vault folder as well and let the engine re-materialise it from the server.
 
 **Login appears to do nothing** over HTTPS: the server needs `--secure-cookies`
-(`NOTES_SECURE_COOKIES=true`) so the browser stores the session cookie — and must *not* have it
+(`LEMMATE_SECURE_COOKIES=true`) so the browser stores the session cookie — and must *not* have it
 on a plain-HTTP deployment. See [`deploy.md`](deploy.md).

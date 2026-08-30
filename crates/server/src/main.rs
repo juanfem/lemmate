@@ -1,4 +1,4 @@
-//! notes-server — sync relay, persistence, and REST API (SPEC §3.1, §7, §13).
+//! lemmate-server — sync relay, persistence, and REST API (SPEC §3.1, §7, §13).
 //!
 //! M0 scope: an unauthenticated single-process relay suitable for local development. Accounts,
 //! roles, and per-doc permission checks (SPEC §11) arrive in M2 and slot into `handle_frame`.
@@ -8,48 +8,48 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use notes_core::RetentionPolicy;
-use notes_core::Store;
-use notes_server::{AuthMode, ServerOptions, build_state, purge_orphans, router};
+use lemmate_core::RetentionPolicy;
+use lemmate_core::Store;
+use lemmate_server::{AuthMode, ServerOptions, build_state, purge_orphans, router};
 use std::time::Duration;
 use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "notes-server", version, about)]
+#[command(name = "lemmate-server", version, about)]
 struct Config {
     /// Address to listen on.
-    #[arg(long, env = "NOTES_BIND", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "LEMMATE_BIND", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
-    /// Directory holding `notes.db` and `attachments/`.
-    #[arg(long, env = "NOTES_DATA_DIR", default_value = "./data")]
+    /// Directory holding `lemmate.db` and `attachments/`.
+    #[arg(long, env = "LEMMATE_DATA_DIR", default_value = "./data")]
     data_dir: PathBuf,
     /// Write a snapshot after this many updates to a doc.
-    #[arg(long, env = "NOTES_SNAPSHOT_EVERY_UPDATES", default_value_t = 500)]
+    #[arg(long, env = "LEMMATE_SNAPSHOT_EVERY_UPDATES", default_value_t = 500)]
     snapshot_every_updates: u32,
     /// ... or when the oldest unsnapshotted update is this old (minutes).
-    #[arg(long, env = "NOTES_SNAPSHOT_EVERY_MINUTES", default_value_t = 10)]
+    #[arg(long, env = "LEMMATE_SNAPSHOT_EVERY_MINUTES", default_value_t = 10)]
     snapshot_every_minutes: u64,
     /// Keep raw updates (fine-grained history) for this many days; versions are kept forever.
-    #[arg(long, env = "NOTES_RETAIN_DAYS", default_value_t = 90)]
+    #[arg(long, env = "LEMMATE_RETAIN_DAYS", default_value_t = 90)]
     retain_days: u64,
     /// Directory with the built web client (ui/dist) to serve at /; omit for API + sync only.
-    #[arg(long, env = "NOTES_WEB_DIR")]
+    #[arg(long, env = "LEMMATE_WEB_DIR")]
     web_dir: Option<PathBuf>,
     /// Disable accounts entirely (development only): every request acts as a local owner.
-    #[arg(long, env = "NOTES_NO_AUTH", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    #[arg(long, env = "LEMMATE_NO_AUTH", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     no_auth: bool,
     /// Let anyone register. Without it, only the first account (the admin) can register and
     /// the admin creates further accounts.
-    #[arg(long, env = "NOTES_ALLOW_REGISTRATION", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    #[arg(long, env = "LEMMATE_ALLOW_REGISTRATION", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     allow_registration: bool,
     /// Mark session cookies Secure (set when the server is reached over HTTPS).
-    #[arg(long, env = "NOTES_SECURE_COOKIES", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    #[arg(long, env = "LEMMATE_SECURE_COOKIES", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     secure_cookies: bool,
     /// pandoc binary for exports (default: `pandoc` on PATH).
-    #[arg(long, env = "NOTES_PANDOC")]
+    #[arg(long, env = "LEMMATE_PANDOC")]
     pandoc: Option<PathBuf>,
     /// Purge attachment blobs that have been unreferenced for this many days.
-    #[arg(long, env = "NOTES_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
+    #[arg(long, env = "LEMMATE_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
 }
 
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::parse();
     std::fs::create_dir_all(&cfg.data_dir).with_context(|| format!("creating {}", cfg.data_dir.display()))?;
     std::fs::create_dir_all(cfg.data_dir.join("attachments"))?;
-    let store = Store::open(cfg.data_dir.join("notes.db")).context("opening notes.db")?;
+    let store = Store::open(cfg.data_dir.join("lemmate.db")).context("opening lemmate.db")?;
 
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),
@@ -92,7 +92,8 @@ async fn main() -> anyhow::Result<()> {
         let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
         loop {
             tick.tick().await;
-            match purge_orphans(&sweeper, notes_core::store::now_ms(), sweeper.options.attachment_grace).await
+            match purge_orphans(&sweeper, lemmate_core::store::now_ms(), sweeper.options.attachment_grace)
+                .await
             {
                 Ok(r) if r.purged > 0 || r.newly_orphaned > 0 => info!(?r, "attachment sweep"),
                 Ok(_) => {}
@@ -105,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     if cfg.no_auth {
         tracing::warn!("authentication disabled (--no-auth): do not expose this server to a network");
     }
-    info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), auth = !cfg.no_auth, "notes-server listening");
+    info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), auth = !cfg.no_auth, "lemmate-server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

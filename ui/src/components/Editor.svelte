@@ -110,7 +110,7 @@
   onMount(() => {
     const acquired = session.acquire(noteId)
     release = acquired.release
-    const me = localStorage.getItem('notes.user') ?? (window as unknown as { notes?: { userName?: string } }).notes?.userName ?? 'me'
+    const me = localStorage.getItem('lemmate.user') ?? (window as unknown as { lemmate?: { userName?: string } }).lemmate?.userName ?? 'me'
     const hue = [...me].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)
     acquired.awareness.setLocalStateField('user', { name: me, color: `hsl(${hue} 70% 45%)`, colorLight: `hsl(${hue} 70% 45% / 0.25)` })
     const presence = () => {

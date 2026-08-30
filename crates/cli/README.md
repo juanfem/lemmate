@@ -1,4 +1,4 @@
-# notes-cli
+# lemmate-cli
 
 The `notes` binary: local commands over a vault directory, server-backed commands over the REST
 API, and an MCP server for agents. See [SPEC.md](../../SPEC.md) §13 for the contract.
@@ -14,41 +14,41 @@ They all take the same connection options:
 
 | Option | Environment | Meaning |
 |---|---|---|
-| `--server URL` | `NOTES_SERVER` | Server base URL, e.g. `https://notes.example.org`. Required. |
-| `--token TOKEN` | `NOTES_TOKEN` | Access token. Defaults to the one `notes login` saved for this server (`~/.config/notes/credentials.toml`). |
-| `--ca-cert FILE` | `NOTES_CA_CERT` | PEM of a private CA to trust for `https://`. |
-| `--vault ULID` | `NOTES_VAULT` | Which vault to work in. Optional when the account has exactly one. |
+| `--server URL` | `LEMMATE_SERVER` | Server base URL, e.g. `https://notes.example.org`. Required. |
+| `--token TOKEN` | `LEMMATE_TOKEN` | Access token. Defaults to the one `lemmate login` saved for this server (`~/.config/lemmate/credentials.toml`). |
+| `--ca-cert FILE` | `LEMMATE_CA_CERT` | PEM of a private CA to trust for `https://`. |
+| `--vault ULID` | `LEMMATE_VAULT` | Which vault to work in. Optional when the account has exactly one. |
 
 A note is named either by its vault-relative path — `Projects/plan.md`, or just
 `Projects/plan`, or even `plan` when the file name is unambiguous — or by its ULID.
 
 | Command | What it does |
 |---|---|
-| `notes vaults [--json]` | List the vaults this account can see, with note counts. |
-| `notes ls [--json]` | List the vault's notes, one path per line. |
-| `notes cat <note> [--json]` | Print a note's markdown (`--json` gives id, path, title, content). |
-| `notes new <path> [--from FILE]` | Create a note. Content comes from `--from`, from stdin when it is piped (`--from -` forces this), else the note starts empty. |
-| `notes edit <note> [--from FILE]` | Fetch the note, open `$VISUAL`/`$EDITOR` on it, send the result back. `--from` skips the editor. |
-| `notes mv <note> <new-path>` | Move or rename. |
-| `notes rm <note>` | Move to the trash (history is kept). |
-| `notes daily [YYYY-MM-DD] [--json]` | Print the daily note for a date (today by default), creating `Daily/<date>.md` if needed. |
-| `notes find <query> [--limit N] [--json]` | Full-text search the vault on the server. (The local `notes search <dir> <query>` walks a directory instead.) |
-| `notes backlinks <note> [--json]` | The notes that link to this one. |
-| `notes tags [--json]` | The vault's tags, most used first. |
-| `notes mcp` | Serve the Model Context Protocol on stdin/stdout. |
+| `lemmate vaults [--json]` | List the vaults this account can see, with note counts. |
+| `lemmate ls [--json]` | List the vault's notes, one path per line. |
+| `lemmate cat <note> [--json]` | Print a note's markdown (`--json` gives id, path, title, content). |
+| `lemmate new <path> [--from FILE]` | Create a note. Content comes from `--from`, from stdin when it is piped (`--from -` forces this), else the note starts empty. |
+| `lemmate edit <note> [--from FILE]` | Fetch the note, open `$VISUAL`/`$EDITOR` on it, send the result back. `--from` skips the editor. |
+| `lemmate mv <note> <new-path>` | Move or rename. |
+| `lemmate rm <note>` | Move to the trash (history is kept). |
+| `lemmate daily [YYYY-MM-DD] [--json]` | Print the daily note for a date (today by default), creating `Daily/<date>.md` if needed. |
+| `lemmate find <query> [--limit N] [--json]` | Full-text search the vault on the server. (The local `lemmate search <dir> <query>` walks a directory instead.) |
+| `lemmate backlinks <note> [--json]` | The notes that link to this one. |
+| `lemmate tags [--json]` | The vault's tags, most used first. |
+| `lemmate mcp` | Serve the Model Context Protocol on stdin/stdout. |
 
 Writes are never blind overwrites: the server diffs the text you send against the current
 content and applies the difference as CRDT edits, so they merge with whoever else is editing.
 
 ```sh
-notes login --server https://notes.example.org --email you@example.org
-export NOTES_SERVER=https://notes.example.org
-notes vaults
-notes new Meetings/standup < draft.md
-notes ls
-notes cat Meetings/standup
-notes find "sync protocol" --json | jq -r '.[].note_id'
-notes daily >> today.md
+lemmate login --server https://notes.example.org --email you@example.org
+export LEMMATE_SERVER=https://notes.example.org
+lemmate vaults
+lemmate new Meetings/standup < draft.md
+lemmate ls
+lemmate cat Meetings/standup
+lemmate find "sync protocol" --json | jq -r '.[].note_id'
+lemmate daily >> today.md
 ```
 
 Every command exits non-zero with a one-line reason on failure: "not signed in: run `notes
@@ -56,7 +56,7 @@ login`" for a 401, "not found or no access" for a 404.
 
 ### MCP server
 
-`notes mcp` speaks [Model Context Protocol](https://modelcontextprotocol.io) JSON-RPC 2.0 over
+`lemmate mcp` speaks [Model Context Protocol](https://modelcontextprotocol.io) JSON-RPC 2.0 over
 stdio (one message per line; stdout carries protocol traffic only, logs go to stderr). It
 negotiates `2024-11-05`, `2025-03-26`, or `2025-06-18`, and offers:
 
@@ -69,14 +69,14 @@ Point a client at it with:
 
 ```json
 {
-  "command": "notes",
+  "command": "lemmate",
   "args": ["mcp", "--server", "https://notes.example.org", "--vault", "01J…"],
-  "env": { "NOTES_TOKEN": "…" }
+  "env": { "LEMMATE_TOKEN": "…" }
 }
 ```
 
-`--vault` may be left out when the account has exactly one vault, and `NOTES_TOKEN` when
-`notes login` has already saved a token for that server.
+`--vault` may be left out when the account has exactly one vault, and `LEMMATE_TOKEN` when
+`lemmate login` has already saved a token for that server.
 
 ## Layout
 

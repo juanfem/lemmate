@@ -1,8 +1,8 @@
-//! `notes-desktop` — the Tauri 2 desktop shell (SPEC §3.1, §14).
+//! `lemmate-desktop` — the Tauri 2 desktop shell (SPEC §3.1, §14).
 //!
 //! The shell is deliberately thin: it starts the engine's local relay for the configured
 //! vault and opens one window on the URL that relay serves. All of the application lives
-//! in `notes-core` (sync, projection, search) and in the shared TypeScript UI; nothing is
+//! in `lemmate-core` (sync, projection, search) and in the shared TypeScript UI; nothing is
 //! exposed to the webview over Tauri IPC yet.
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use notes_core::client::{self, LocalHandle, LocalOptions, SyncOptions};
+use lemmate_core::client::{self, LocalHandle, LocalOptions, SyncOptions};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 const WINDOW_LABEL: &str = "main";
@@ -95,7 +95,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         .setup(move |app| {
             let web_dir = resolve_web_dir(app, ctx.web_dir.as_deref())?;
-            let (addr, rx, setup_task) = tauri::async_runtime::block_on(notes_core::local::serve_setup(
+            let (addr, rx, setup_task) = tauri::async_runtime::block_on(lemmate_core::local::serve_setup(
                 SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                 Some(web_dir.clone()),
                 ctx.config_path.clone(),
@@ -105,7 +105,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
             let url: tauri::Url = format!("http://{addr}/").parse()?;
             tracing::info!(%url, "opening setup window");
             WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
-                .title("notes — setup")
+                .title("Lemmate — setup")
                 .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
                 .build()
                 .context("creating the setup window")?;
@@ -123,7 +123,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                         let device = std::fs::read_to_string("/etc/hostname")
                             .map(|s| s.trim().to_owned())
                             .unwrap_or_else(|_| "desktop".into());
-                        notes_core::credentials::login(
+                        lemmate_core::credentials::login(
                             &req.server_url,
                             email,
                             password,
@@ -142,7 +142,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                         vault_id: cfg.vault_id,
                         once: false,
                         ca_cert: cfg.ca_cert.clone(),
-                        token: cfg.token.clone().or_else(|| notes_core::credentials::load(&cfg.server_url)),
+                        token: cfg.token.clone().or_else(|| lemmate_core::credentials::load(&cfg.server_url)),
                     };
                     let local = LocalOptions {
                         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -152,7 +152,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                     let url: tauri::Url = format!("http://{}/#/v/{}", relay.addr, relay.vault_id).parse()?;
                     if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
                         w.navigate(url).context("navigating to the relay")?;
-                        let _ = w.set_title("notes");
+                        let _ = w.set_title("Lemmate");
                     }
                     if let Some(state) = handle.try_state::<Relay>()
                         && let Ok(mut guard) = state.0.lock()
@@ -193,8 +193,8 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
         vault_id: cfg.vault_id,
         once: false,
         ca_cert: cfg.ca_cert.clone(),
-        // Saved by `notes login`; a server with accounts refuses the sync without it.
-        token: cfg.token.clone().or_else(|| notes_core::credentials::load(&cfg.server_url)),
+        // Saved by `lemmate login`; a server with accounts refuses the sync without it.
+        token: cfg.token.clone().or_else(|| lemmate_core::credentials::load(&cfg.server_url)),
     };
     let local = LocalOptions { bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), web_dir: Some(web_dir) };
 
@@ -208,7 +208,7 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
     let url = url.parse().with_context(|| format!("relay URL {url} is not a valid URL"))?;
 
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
-        .title("notes")
+        .title("Lemmate")
         .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
         .build()
         .context("creating the main window")?;
@@ -218,7 +218,7 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
 
 /// Where the relay reads the built web assets from, in order of precedence:
 ///
-/// 1. `--web-dir` / `NOTES_WEB_DIR` (or `web_dir` in the config file);
+/// 1. `--web-dir` / `LEMMATE_WEB_DIR` (or `web_dir` in the config file);
 /// 2. `<resource dir>/ui/dist`, i.e. the copy bundled by `bundle.resources`, when present;
 /// 3. `<repo>/ui/dist` relative to `CARGO_MANIFEST_DIR` — the dev-mode source tree.
 fn resolve_web_dir(app: &tauri::App, override_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -242,7 +242,7 @@ fn resolve_web_dir(app: &tauri::App, override_dir: Option<&Path>) -> anyhow::Res
     }
 
     bail!(
-        "no web assets found: pass --web-dir (or set NOTES_WEB_DIR), or build the UI with \
+        "no web assets found: pass --web-dir (or set LEMMATE_WEB_DIR), or build the UI with \
          `npm install && npm run build` in {}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui").display()
     )

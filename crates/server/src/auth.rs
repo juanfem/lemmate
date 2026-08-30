@@ -12,14 +12,14 @@ use axum::extract::{FromRequestParts, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get};
-use notes_core::attachments::hash_bytes;
-use notes_core::store::{Role, UserRow};
-use notes_core::{NoteId, Store, VaultId};
+use lemmate_core::attachments::hash_bytes;
+use lemmate_core::store::{Role, UserRow};
+use lemmate_core::{NoteId, Store, VaultId};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
 
-pub const COOKIE: &str = "notes_session";
+pub const COOKIE: &str = "lemmate_session";
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
@@ -188,7 +188,7 @@ pub struct ShareOut {
     pub link: Option<String>,
 }
 
-fn share_out(s: notes_core::store::NoteShareRow) -> ShareOut {
+fn share_out(s: lemmate_core::store::NoteShareRow) -> ShareOut {
     ShareOut {
         kind: if s.token_hash.is_some() { "link".into() } else { "user".into() },
         user_id: s.user_id,
@@ -212,7 +212,7 @@ async fn list_shares(
     Path((vault, id)): Path<(String, String)>,
 ) -> Result<Json<Vec<ShareOut>>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: lemmate_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     require(&state, &user, vault, Role::Editor).await?;
     note_in_vault(&state, vault, id).await?;
     let rows = state.store.lock().await.note_shares(id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -245,7 +245,7 @@ async fn put_share(
     Json(body): Json<ShareIn>,
 ) -> Result<Json<ShareOut>, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: lemmate_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     require(&state, &user, vault, Role::Editor).await?;
     note_in_vault(&state, vault, id).await?;
     let role = Role::parse(&body.role).filter(|r| *r < Role::Owner).ok_or(StatusCode::BAD_REQUEST)?;
@@ -272,7 +272,7 @@ async fn put_share(
         "link" => {
             let token = new_token();
             let expires =
-                body.expires_days.map(|d| notes_core::store::now_ms() + i64::from(d) * 24 * 3600 * 1000);
+                body.expires_days.map(|d| lemmate_core::store::now_ms() + i64::from(d) * 24 * 3600 * 1000);
             store
                 .share_note_by_link(id, &token_hash(&token), Role::Viewer, &user.id, expires)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -305,7 +305,7 @@ async fn delete_share(
     Json(body): Json<Unshare>,
 ) -> Result<StatusCode, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: notes_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: lemmate_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     require(&state, &user, vault, Role::Editor).await?;
     let mut store = state.store.lock().await;
     if let Some(u) = body.user_id {
@@ -384,7 +384,7 @@ async fn shared_note(
         .store
         .lock()
         .await
-        .load_doc(notes_core::DocId::Note(note))
+        .load_doc(lemmate_core::DocId::Note(note))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .text();
     Ok(Json(PublicNote { id: note.to_string(), path: row.path, title: row.title, content }))
@@ -454,7 +454,7 @@ async fn register(
     if store.user_by_email(&email).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_some() {
         return Err(StatusCode::CONFLICT);
     }
-    let id = notes_core::NoteId::new().to_string();
+    let id = lemmate_core::NoteId::new().to_string();
     let hash = hash_password(&c.password)?;
     let name = c.display_name.unwrap_or_else(|| email.split('@').next().unwrap_or("user").to_owned());
     store
@@ -498,8 +498,10 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         let _ = state.store.lock().await.delete_session(&token_hash(&t));
     }
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    resp.headers_mut()
-        .insert(header::SET_COOKIE, HeaderValue::from_static("notes_session=; Path=/; HttpOnly; Max-Age=0"));
+    resp.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static("lemmate_session=; Path=/; HttpOnly; Max-Age=0"),
+    );
     resp
 }
 

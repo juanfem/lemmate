@@ -1,5 +1,5 @@
-//! SQLite persistence (SPEC §6.1 / §6.2). One schema serves both the server (`notes.db`) and
-//! native clients (`<vault>/.notes/local.db`); clients simply leave the multi-user tables empty.
+//! SQLite persistence (SPEC §6.1 / §6.2). One schema serves both the server (`lemmate.db`) and
+//! native clients (`<vault>/.lemmate/local.db`); clients simply leave the multi-user tables empty.
 
 use std::path::Path;
 use std::time::Duration;

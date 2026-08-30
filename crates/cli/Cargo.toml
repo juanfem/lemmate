@@ -1,5 +1,5 @@
 [package]
-name = "notes-cli"
+name = "lemmate-cli"
 description = "Command-line client"
 version.workspace = true
 edition.workspace = true
@@ -7,18 +7,18 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "notes_cli"
+name = "lemmate_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "notes"
+name = "lemmate"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 jiff = "0.2"
-notes-core.workspace = true
+lemmate-core.workspace = true
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,6 +31,6 @@ ureq = "3"
 [dev-dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
-notes-server = { path = "../server" }
+lemmate-server = { path = "../server" }
 rcgen = "0.14"
 tempfile = "3"

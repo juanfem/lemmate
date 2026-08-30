@@ -32,7 +32,7 @@
 </script>
 
 <main class="shared">
-  <header><strong>{title || 'Shared note'}</strong><span class="muted">read-only · shared with notes</span></header>
+  <header><strong>{title || 'Shared note'}</strong><span class="muted">read-only · shared with Lemmate</span></header>
   {#if error}<p class="error">{error}</p>{/if}
   <div class="editor" bind:this={host}></div>
 </main>

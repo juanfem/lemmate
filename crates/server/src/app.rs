@@ -12,12 +12,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use notes_core::attachments::{
+use lemmate_core::attachments::{
     AttachmentStore, MAX_ATTACHMENT_BYTES, hash_bytes, is_valid_hash, mime_for_path,
 };
-use notes_core::store::{AttachmentRow, Role, now_ms};
-use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
+use lemmate_core::store::{AttachmentRow, Role, now_ms};
+use lemmate_core::sync::{Frame, Message, SyncMessage};
+use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::{ServeDir, ServeFile};
@@ -67,7 +67,7 @@ pub async fn purge_orphans(
     state: &AppState,
     now_ms: i64,
     grace: std::time::Duration,
-) -> notes_core::Result<PurgeReport> {
+) -> lemmate_core::Result<PurgeReport> {
     let mut report = PurgeReport::default();
     let mut store = state.store.lock().await;
     // Notes trashed longer than the grace period go for good (SPEC §9).
@@ -144,7 +144,7 @@ impl RoomDoc {
             RoomDoc::Vault(d) => d.diff_since(sv),
         }
     }
-    fn apply_update(&self, u: &[u8]) -> notes_core::Result<bool> {
+    fn apply_update(&self, u: &[u8]) -> lemmate_core::Result<bool> {
         match self {
             RoomDoc::Note(d) => d.apply_update(u),
             RoomDoc::Vault(d) => d.apply_update(u),
@@ -411,7 +411,7 @@ async fn handle_frame(
     }
 }
 
-async fn get_room(state: &Arc<AppState>, id: DocId) -> notes_core::Result<Arc<Room>> {
+async fn get_room(state: &Arc<AppState>, id: DocId) -> lemmate_core::Result<Arc<Room>> {
     let key = id.to_string();
     let mut rooms = state.rooms.lock().await;
     if let Some(r) = rooms.get(&key) {
@@ -431,7 +431,7 @@ async fn get_room(state: &Arc<AppState>, id: DocId) -> notes_core::Result<Arc<Ro
 /// Keep the relational tables (notes, tags, links, FTS) in step with the CRDT truth so the REST
 /// and search endpoints reflect what clients synced (SPEC §4.2: metadata is derived, never a
 /// second source of truth).
-async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> notes_core::Result<()> {
+async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Result<()> {
     let doc = room.doc.lock().await;
     let mut store = state.store.lock().await;
     match (&*doc, room.id) {
@@ -486,7 +486,7 @@ fn index_note_text(
     path: &str,
     text: &str,
     attachment_paths: &[String],
-) -> notes_core::Result<()> {
+) -> lemmate_core::Result<()> {
     let ix = markdown::index(text)?;
     store.index_note(id, &ix)?;
     let mut paths: Vec<String> = Vec::new();
@@ -497,7 +497,7 @@ fn index_note_text(
         .map(|w| (w.target.clone(), true))
         .chain(ix.links.iter().map(|l| (l.clone(), false)));
     for (target, wiki) in targets {
-        if let Some(p) = notes_core::attachments::resolve_reference(
+        if let Some(p) = lemmate_core::attachments::resolve_reference(
             path,
             &target,
             wiki,
@@ -575,7 +575,7 @@ async fn create_note(
     }
     let id = NoteId::new();
     let text =
-        notes_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
+        lemmate_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
     // Content first, then the entry, so nobody sees an empty note (same order as the UI).
     let nroom = note_room(&state, id).await?;
     state.note_vault_claims.lock().await.insert(id, vault);
@@ -620,7 +620,7 @@ async fn put_note(
         .ok_or(StatusCode::NOT_FOUND)?;
     let room = note_room(&state, id).await?;
     let text =
-        notes_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
+        lemmate_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
     let update = match &*room.doc.lock().await {
         RoomDoc::Note(d) => d.set_text(&text),
         RoomDoc::Vault(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -859,8 +859,8 @@ async fn export_note(
     if auth::note_role(&state, &user, vault, id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let format = notes_core::pandoc::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
-    if !notes_core::pandoc::pandoc_available(state.options.pandoc.as_deref()) {
+    let format = lemmate_core::pandoc::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    if !lemmate_core::pandoc::pandoc_available(state.options.pandoc.as_deref()) {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
     let row = state.store.lock().await.note_by_id(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
@@ -870,14 +870,15 @@ async fn export_note(
         RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
     };
     let opts =
-        notes_core::pandoc::ExportOptions { pandoc: state.options.pandoc.clone(), ..Default::default() };
-    let (bytes, mime) = tokio::task::spawn_blocking(move || notes_core::pandoc::render(&text, format, &opts))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|e| {
-            warn!(%e, "export");
-            StatusCode::UNPROCESSABLE_ENTITY
-        })?;
+        lemmate_core::pandoc::ExportOptions { pandoc: state.options.pandoc.clone(), ..Default::default() };
+    let (bytes, mime) =
+        tokio::task::spawn_blocking(move || lemmate_core::pandoc::render(&text, format, &opts))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                warn!(%e, "export");
+                StatusCode::UNPROCESSABLE_ENTITY
+            })?;
     let stem = std::path::Path::new(&row.path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1140,7 +1141,7 @@ async fn get_attachment(
     ))
 }
 
-fn internal(e: notes_core::Error) -> StatusCode {
+fn internal(e: lemmate_core::Error) -> StatusCode {
     warn!(%e, "internal error");
     StatusCode::INTERNAL_SERVER_ERROR
 }

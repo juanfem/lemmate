@@ -198,7 +198,7 @@ async fn ask(state: &LocalState, query: LocalQuery) -> std::result::Result<Local
     }
 }
 
-// Same JSON shapes as notes-server, so the web client does not know which one it talks to.
+// Same JSON shapes as lemmate-server, so the web client does not know which one it talks to.
 #[derive(Serialize)]
 struct VaultSummary {
     id: String,

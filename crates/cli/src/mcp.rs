@@ -1,4 +1,4 @@
-//! `notes mcp` — a Model Context Protocol server over stdio (SPEC §13.3).
+//! `lemmate mcp` — a Model Context Protocol server over stdio (SPEC §13.3).
 //!
 //! JSON-RPC 2.0, one message per line on stdin/stdout; **stdout carries protocol traffic only**,
 //! everything else goes to stderr. The dispatcher is a pure function over `serde_json::Value`
@@ -159,7 +159,7 @@ impl<'a> Server<'a> {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": {}, "resources": {} },
-                    "serverInfo": { "name": "notes", "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": { "name": "lemmate", "version": env!("CARGO_PKG_VERSION") },
                 }))
             }
             "ping" => Ok(json!({})),
@@ -218,7 +218,7 @@ impl<'a> Server<'a> {
                 let note = match self.api.lookup_note(v, target)? {
                     Some(found) => self.api.replace(v, &found.id, content)?,
                     None => {
-                        if target.parse::<notes_core::NoteId>().is_ok() {
+                        if target.parse::<lemmate_core::NoteId>().is_ok() {
                             bail!("no note with id {target} in this vault");
                         }
                         self.api.create(v, target, content)?
@@ -243,7 +243,7 @@ impl<'a> Server<'a> {
                         self.api.replace(v, &found.id, &text)?
                     }
                     None => {
-                        if target.parse::<notes_core::NoteId>().is_ok() {
+                        if target.parse::<lemmate_core::NoteId>().is_ok() {
                             bail!("no note with id {target} in this vault");
                         }
                         self.api.create(v, target, addition)?
@@ -471,7 +471,7 @@ pub fn tools() -> Vec<Value> {
 /// Serve MCP on stdin/stdout until end of input.
 pub fn serve_stdio(api: &dyn NotesApi, vault: String) -> Result<()> {
     let server = Server::new(api, vault);
-    eprintln!("notes mcp: serving vault {} (protocol {DEFAULT_PROTOCOL})", server.vault());
+    eprintln!("lemmate mcp: serving vault {} (protocol {DEFAULT_PROTOCOL})", server.vault());
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
     let mut line = String::new();
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(r["jsonrpc"], "2.0");
         assert_eq!(r["id"], 1);
         assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(r["result"]["serverInfo"]["name"], "notes");
+        assert_eq!(r["result"]["serverInfo"]["name"], "lemmate");
         assert_eq!(r["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
         assert!(r["result"]["capabilities"]["tools"].is_object());
         assert!(r["result"]["capabilities"]["resources"].is_object());

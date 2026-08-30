@@ -13,7 +13,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # notes-core / notes-server / notes-cli. notes-desktop is excluded: it pulls in Tauri, which
+  # lemmate-core / lemmate-server / lemmate-cli. lemmate-desktop is excluded: it pulls in Tauri, which
   # needs webkit2gtk and friends — see the `desktop` job below.
   rust:
     name: Rust (fmt, clippy, test)
@@ -31,10 +31,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude notes-desktop --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --exclude notes-desktop
+        run: cargo test --workspace --exclude lemmate-desktop
 
   # Type-check only: building the Tauri shell would also need a bundler toolchain, and nothing
   # here produces a desktop artifact. The system packages are Tauri 2's Linux prerequisites.
@@ -60,10 +60,10 @@ jobs:
           key: desktop
 
       - name: cargo check
-        run: cargo check -p notes-desktop
+        run: cargo check -p lemmate-desktop
 
   # Svelte type-check plus the markdown corpus tests. ui/test also holds live end-to-end tests
-  # that skip themselves unless NOTES_SERVER_BIN / NOTES_CLI_BIN point at built binaries, so
+  # that skip themselves unless LEMMATE_SERVER_BIN / LEMMATE_CLI_BIN point at built binaries, so
   # they are inert here and the Rust job stays the one that compiles them.
   node:
     name: Web client (check, test)
@@ -102,6 +102,6 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
-          tags: notes:ci
+          tags: lemmate:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

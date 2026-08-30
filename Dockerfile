@@ -1,10 +1,10 @@
-# notes — multi-stage image: Svelte web client + notes-server + notes CLI.
+# Lemmate — multi-stage image: Svelte web client + lemmate-server + lemmate CLI.
 #
-# Build:  docker build -t notes .
-# Run:    docker run -p 8080:8080 -v notes_data:/data notes
+# Build:  docker build -t lemmate .
+# Run:    docker run -p 8080:8080 -v lemmate_data:/data lemmate
 #
 # The workspace also contains crates/desktop (Tauri 2), which needs webkit2gtk/GTK and is
-# never built here: every cargo invocation names -p notes-server -p notes-cli explicitly.
+# never built here: every cargo invocation names -p lemmate-server -p lemmate-cli explicitly.
 
 # ---- Stage 1: build the web client (ui/dist) -------------------------------------------------
 FROM node:24-alpine AS ui
@@ -48,15 +48,15 @@ RUN mkdir -p crates/core/src crates/server/src crates/cli/src crates/desktop/src
     && echo 'fn main() {}' > crates/cli/src/main.rs \
     && echo 'fn main() {}' > crates/desktop/src/main.rs \
     && echo 'fn main() {}' > crates/desktop/build.rs \
-    && cargo build --release --locked -p notes-server -p notes-cli
+    && cargo build --release --locked -p lemmate-server -p lemmate-cli
 
 # --- real build ---
 # COPY preserves the context's mtimes, which are older than the stub artifacts just produced, so
 # cargo would consider the stubs fresh. Drop exactly the three workspace packages' artifacts
 # (dependencies stay cached) and rebuild for real.
 COPY crates/ crates/
-RUN cargo clean --release -p notes-core -p notes-server -p notes-cli \
-    && cargo build --release --locked -p notes-server -p notes-cli
+RUN cargo clean --release -p lemmate-core -p lemmate-server -p lemmate-cli \
+    && cargo build --release --locked -p lemmate-server -p lemmate-cli
 
 
 # ---- Stage 3: runtime ------------------------------------------------------------------------
@@ -69,15 +69,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Fixed uid so a host bind mount can be chowned deterministically: chown -R 10001:10001 ./data
-RUN groupadd --gid 10001 notes \
-    && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home --shell /usr/sbin/nologin notes
+RUN groupadd --gid 10001 lemmate \
+    && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home --shell /usr/sbin/nologin lemmate
 
 WORKDIR /app
-COPY --from=build /src/target/release/notes-server /usr/local/bin/notes-server
-COPY --from=build /src/target/release/notes        /usr/local/bin/notes
+COPY --from=build /src/target/release/lemmate-server /usr/local/bin/lemmate-server
+COPY --from=build /src/target/release/lemmate        /usr/local/bin/lemmate
 COPY --from=ui    /ui/dist                         /app/web
 
-# notes.db + attachments/ live here. Created (and owned) before VOLUME so a fresh named volume
+# lemmate.db + attachments/ live here. Created (and owned) before VOLUME so a fresh named volume
 # inherits the ownership. Bind mounts and fly.io volumes are root-owned and need a manual chown
 # — see docs/deploy.md.
 RUN mkdir -p /data && chown -R 10001:10001 /data
@@ -89,5 +89,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["notes-server"]
+ENTRYPOINT ["lemmate-server"]
 CMD ["--bind", "0.0.0.0:8080", "--data-dir", "/data", "--web-dir", "/app/web"]

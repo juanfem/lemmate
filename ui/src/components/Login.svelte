@@ -36,7 +36,7 @@
 
 <main class="login">
   <form onsubmit={submit}>
-    <h1>notes</h1>
+    <h1>Lemmate</h1>
     <p class="muted">{mode === 'login' ? 'Sign in to your server.' : 'Create an account. The first account becomes the admin.'}</p>
     {#if mode === 'register'}
       <label>Name <input bind:value={name} autocomplete="name" /></label>

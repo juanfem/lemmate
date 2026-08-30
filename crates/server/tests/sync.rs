@@ -3,16 +3,16 @@
 use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
-use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store, VaultId};
-use notes_server::{ServerOptions, build_state, router};
+use lemmate_core::sync::{Frame, Message, SyncMessage};
+use lemmate_core::{DocId, NoteDoc, NoteId, Store, VaultId};
+use lemmate_server::{ServerOptions, build_state, router};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as TMsg;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn start() -> (SocketAddr, std::sync::Arc<notes_server::AppState>) {
+async fn start() -> (SocketAddr, std::sync::Arc<lemmate_server::AppState>) {
     let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -140,7 +140,7 @@ async fn rest_writes_are_crdt_edits() {
     let vault = VaultId::new();
     let vdoc_id = DocId::Vault(vault).to_string();
     let mut c = connect(addr).await;
-    let vdoc = notes_core::VaultDoc::new();
+    let vdoc = lemmate_core::VaultDoc::new();
     // Subscribe to the vault doc first.
     send(&mut c, &vdoc_id, Message::Sync(SyncMessage::SyncStep1(vdoc.state_vector()))).await;
     let _ = recv(&mut c).await;
@@ -264,10 +264,10 @@ async fn rest_writes_are_crdt_edits() {
     assert!(state.store.lock().await.note_by_id(id.parse().unwrap()).unwrap().is_none(), "trashed");
 }
 
-/// Export goes through pandoc when the server has one (NOTES_TEST_PANDOC), else answers 501.
+/// Export goes through pandoc when the server has one (LEMMATE_TEST_PANDOC), else answers 501.
 #[tokio::test]
 async fn export_uses_pandoc_or_says_so() {
-    let pandoc = std::env::var_os("NOTES_TEST_PANDOC").map(std::path::PathBuf::from);
+    let pandoc = std::env::var_os("LEMMATE_TEST_PANDOC").map(std::path::PathBuf::from);
     let options = ServerOptions { pandoc: pandoc.clone(), ..ServerOptions::default() };
     let state = build_state(Store::open_in_memory().unwrap(), options);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

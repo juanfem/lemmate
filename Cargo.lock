@@ -2236,6 +2236,99 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lemmate-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "clap",
+ "jiff",
+ "lemmate-core",
+ "lemmate-server",
+ "rcgen",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "lemmate-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blake3",
+ "futures-util",
+ "markdown",
+ "mime_guess",
+ "notify",
+ "rusqlite",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.1.4+spec-1.1.0",
+ "tower-http 0.7.0",
+ "tracing",
+ "ulid",
+ "ureq",
+ "webpki-roots 1.0.9",
+ "yrs",
+ "zip",
+]
+
+[[package]]
+name = "lemmate-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lemmate-core",
+ "serde",
+ "tauri",
+ "tauri-build",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lemmate-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "clap",
+ "futures-util",
+ "lemmate-core",
+ "rand 0.9.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "yrs",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2494,99 +2587,6 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
-]
-
-[[package]]
-name = "notes-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "clap",
- "jiff",
- "notes-core",
- "notes-server",
- "rcgen",
- "rpassword",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml 1.1.4+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
-name = "notes-core"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "futures-util",
- "markdown",
- "mime_guess",
- "notify",
- "rusqlite",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "similar",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite",
- "toml 1.1.4+spec-1.1.0",
- "tower-http 0.7.0",
- "tracing",
- "ulid",
- "ureq",
- "webpki-roots 1.0.9",
- "yrs",
- "zip",
-]
-
-[[package]]
-name = "notes-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "notes-core",
- "serde",
- "tauri",
- "tauri-build",
- "toml 1.1.4+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "notes-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "axum",
- "clap",
- "futures-util",
- "notes-core",
- "rand 0.9.5",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "yrs",
 ]
 
 [[package]]

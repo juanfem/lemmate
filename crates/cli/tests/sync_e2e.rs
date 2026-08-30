@@ -6,9 +6,9 @@ use std::path::Path;
 
 use std::time::Duration;
 
-use notes_core::client::{SyncOptions, SyncReport};
-use notes_core::{Store, VaultId};
-use notes_server::{AppState, ServerOptions, build_state, router};
+use lemmate_core::client::{SyncOptions, SyncReport};
+use lemmate_core::{Store, VaultId};
+use lemmate_server::{AppState, ServerOptions, build_state, router};
 use std::sync::Arc;
 
 async fn start_server() -> (String, Arc<AppState>, tempfile::TempDir) {
@@ -34,8 +34,8 @@ fn opts(dir: &Path, server: &str, vault_id: Option<VaultId>) -> SyncOptions {
 }
 
 /// `client::run` in once mode, bounded so a regression can never hang the suite.
-async fn run(o: SyncOptions) -> notes_core::Result<SyncReport> {
-    tokio::time::timeout(Duration::from_secs(30), notes_core::client::run(o))
+async fn run(o: SyncOptions) -> lemmate_core::Result<SyncReport> {
+    tokio::time::timeout(Duration::from_secs(30), lemmate_core::client::run(o))
         .await
         .expect("sync run timed out")
 }
@@ -43,7 +43,7 @@ async fn run(o: SyncOptions) -> notes_core::Result<SyncReport> {
 /// Note body without the `id:` front matter the engine adds (SPEC §6.3).
 fn read(dir: &Path, rel: &str) -> String {
     let text = std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
-    match notes_core::frontmatter::block(&text) {
+    match lemmate_core::frontmatter::block(&text) {
         Some((_, end)) => text[end..].to_owned(),
         None => text,
     }
@@ -54,7 +54,7 @@ fn write_body(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
     let head = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|t| notes_core::frontmatter::block(&t).map(|(_, end)| t[..end].to_owned()))
+        .and_then(|t| lemmate_core::frontmatter::block(&t).map(|(_, end)| t[..end].to_owned()))
         .unwrap_or_default();
     std::fs::write(path, format!("{head}{body}")).unwrap();
 }
@@ -99,7 +99,7 @@ async fn two_directories_round_trip_through_server() {
     run(opts(b.path(), &server, None)).await.unwrap();
     assert!(!b.path().join("Projects/plan.md").exists());
     assert_eq!(read(b.path(), "plan-v2.md"), merged);
-    let b_store = Store::open(b.path().join(".notes/local.db")).unwrap();
+    let b_store = Store::open(b.path().join(".lemmate/local.db")).unwrap();
     assert_eq!(b_store.list_notes(vault_id).unwrap().len(), 1);
     drop(b_store);
 
@@ -146,7 +146,7 @@ async fn attachments_follow_references() {
     assert!(!b.path().join("attachments/unreferenced.bin").exists());
     {
         let store = state.store.lock().await;
-        let hash = notes_core::attachments::hash_bytes(&logo);
+        let hash = lemmate_core::attachments::hash_bytes(&logo);
         let row = store.attachment(vault_id, &hash).unwrap().expect("server row");
         assert_eq!(
             (row.size, row.mime.as_str(), row.filename_hint.as_deref()),
@@ -173,12 +173,12 @@ async fn attachments_follow_references() {
     // Orphans: B drops every reference to the logo; the entry leaves the vault doc, the server
     // purges both logo versions after the grace period, and two.bin survives.
     let (h1, h2, h_two) = (
-        notes_core::attachments::hash_bytes(&logo),
-        notes_core::attachments::hash_bytes(&logo2),
-        notes_core::attachments::hash_bytes(b"two"),
+        lemmate_core::attachments::hash_bytes(&logo),
+        lemmate_core::attachments::hash_bytes(&logo2),
+        lemmate_core::attachments::hash_bytes(b"two"),
     );
-    let now = notes_core::store::now_ms();
-    let first = notes_server::purge_orphans(&state, now, Duration::from_secs(3600)).await.unwrap();
+    let now = lemmate_core::store::now_ms();
+    let first = lemmate_server::purge_orphans(&state, now, Duration::from_secs(3600)).await.unwrap();
     assert_eq!(
         (first.newly_orphaned, first.purged),
         (1, 0),
@@ -194,16 +194,17 @@ no images any more
     );
     run(opts(b.path(), &server, None)).await.unwrap();
     run(opts(a.path(), &server, None)).await.unwrap();
-    let a_store = Store::open(a.path().join(".notes/local.db")).unwrap();
+    let a_store = Store::open(a.path().join(".lemmate/local.db")).unwrap();
     let entries = a_store.load_vault_doc(vault_id).unwrap().attachment_entries();
     assert_eq!(entries.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["sub/img/two.bin"]);
     assert!(a.path().join("attachments/logo.png").exists(), "local files are never deleted by cleanup");
     drop(a_store);
 
-    let within = notes_server::purge_orphans(&state, now + 1000, Duration::from_secs(3600)).await.unwrap();
+    let within = lemmate_server::purge_orphans(&state, now + 1000, Duration::from_secs(3600)).await.unwrap();
     assert_eq!((within.newly_orphaned, within.purged), (1, 0));
-    let later =
-        notes_server::purge_orphans(&state, now + 3_600_000 + 2000, Duration::from_secs(3600)).await.unwrap();
+    let later = lemmate_server::purge_orphans(&state, now + 3_600_000 + 2000, Duration::from_secs(3600))
+        .await
+        .unwrap();
     assert_eq!(later.purged, 2);
     assert!(!state.attachments.exists(vault_id, &h1) && !state.attachments.exists(vault_id, &h2));
     assert!(state.attachments.exists(vault_id, &h_two));
@@ -215,7 +216,7 @@ no images any more
 /// `wss://` + `https://` against a TLS server signed by a private CA, trusted via `ca_cert`.
 #[tokio::test]
 async fn wss_with_private_ca() {
-    notes_core::tls::install_crypto_provider();
+    lemmate_core::tls::install_crypto_provider();
     let cert =
         rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]).unwrap();
     let ca_file = tempfile::NamedTempFile::new().unwrap();

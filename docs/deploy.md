@@ -1,33 +1,33 @@
-# Deploying `notes-server`
+# Deploying `lemmate-server`
 
-`notes-server` is a single binary. It keeps everything in one directory (`--data-dir`):
-`notes.db` (SQLite: update log, snapshots, derived index, accounts, sessions) and
+`lemmate-server` is a single binary. It keeps everything in one directory (`--data-dir`):
+`lemmate.db` (SQLite: update log, snapshots, derived index, accounts, sessions) and
 `attachments/` (content-addressed blobs). It speaks plain HTTP and expects **TLS to be
 terminated in front of it** — a reverse proxy on a home server, or the platform's terminator on
 fly.io.
 
 Two deployment shapes are covered here. Both use the [`Dockerfile`](../Dockerfile) at the repo
-root, which builds the web client (`ui/dist`), `notes-server`, and the `notes` CLI, and ships
+root, which builds the web client (`ui/dist`), `lemmate-server`, and the `notes` CLI, and ships
 them on `debian:bookworm-slim` as uid `10001`.
 
 ## Flags and environment variables
 
-Every `notes-server` flag has an environment variable, so you can configure the container
+Every `lemmate-server` flag has an environment variable, so you can configure the container
 either way. From `crates/server/src/main.rs`:
 
 | Flag | Env var | Default |
 |---|---|---|
-| `--bind <ADDR>` | `NOTES_BIND` | `127.0.0.1:8080` |
-| `--data-dir <DIR>` | `NOTES_DATA_DIR` | `./data` |
-| `--web-dir <DIR>` | `NOTES_WEB_DIR` | unset (API + sync only, no web client) |
-| `--no-auth` | `NOTES_NO_AUTH` | off |
-| `--allow-registration` | `NOTES_ALLOW_REGISTRATION` | off |
-| `--pandoc PATH` | `NOTES_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
-| `--secure-cookies` | `NOTES_SECURE_COOKIES` | off |
-| `--snapshot-every-updates <N>` | `NOTES_SNAPSHOT_EVERY_UPDATES` | `500` |
-| `--snapshot-every-minutes <N>` | `NOTES_SNAPSHOT_EVERY_MINUTES` | `10` |
-| `--retain-days <N>` | `NOTES_RETAIN_DAYS` | `90` |
-| `--attachment-grace-days <N>` | `NOTES_ATTACHMENT_GRACE_DAYS` | `30` |
+| `--bind <ADDR>` | `LEMMATE_BIND` | `127.0.0.1:8080` |
+| `--data-dir <DIR>` | `LEMMATE_DATA_DIR` | `./data` |
+| `--web-dir <DIR>` | `LEMMATE_WEB_DIR` | unset (API + sync only, no web client) |
+| `--no-auth` | `LEMMATE_NO_AUTH` | off |
+| `--allow-registration` | `LEMMATE_ALLOW_REGISTRATION` | off |
+| `--pandoc PATH` | `LEMMATE_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
+| `--secure-cookies` | `LEMMATE_SECURE_COOKIES` | off |
+| `--snapshot-every-updates <N>` | `LEMMATE_SNAPSHOT_EVERY_UPDATES` | `500` |
+| `--snapshot-every-minutes <N>` | `LEMMATE_SNAPSHOT_EVERY_MINUTES` | `10` |
+| `--retain-days <N>` | `LEMMATE_RETAIN_DAYS` | `90` |
+| `--attachment-grace-days <N>` | `LEMMATE_ATTACHMENT_GRACE_DAYS` | `30` |
 
 The four boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
 
@@ -36,7 +36,7 @@ error: invalid value '1' for '--no-auth'
   [possible values: true, false]
 ```
 
-`NOTES_SECURE_COOKIES=false` is valid and equivalent to leaving the variable unset. Use the
+`LEMMATE_SECURE_COOKIES=false` is valid and equivalent to leaving the variable unset. Use the
 spelled-out words in Compose files, `fly.toml`, and systemd units.
 
 Log verbosity is `RUST_LOG` (`tracing_subscriber::EnvFilter`), defaulting to
@@ -45,7 +45,7 @@ Log verbosity is `RUST_LOG` (`tracing_subscriber::EnvFilter`), defaulting to
 The image's default command is:
 
 ```
-notes-server --bind 0.0.0.0:8080 --data-dir /data --web-dir /app/web
+lemmate-server --bind 0.0.0.0:8080 --data-dir /data --web-dir /app/web
 ```
 
 Anything you append to `docker run … notes <args>` replaces that whole list, so repeat the
@@ -60,20 +60,20 @@ Liveness endpoint: `GET /healthz` → `ok`, unauthenticated.
 ### Run the container
 
 ```sh
-docker volume create notes_data
+docker volume create lemmate_data
 
 docker run -d --name notes \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
-  -v notes_data:/data \
-  -e NOTES_SECURE_COOKIES=true \
+  -v lemmate_data:/data \
+  -e LEMMATE_SECURE_COOKIES=true \
   -e RUST_LOG=info \
   ghcr.io/you/notes:latest      # or a locally built `notes` tag
 ```
 
 `-p 127.0.0.1:8080:8080` publishes only on loopback: the proxy reaches it, the LAN does not.
 
-Set `NOTES_SECURE_COOKIES` (the `--secure-cookies` flag) whenever users reach the server over
+Set `LEMMATE_SECURE_COOKIES` (the `--secure-cookies` flag) whenever users reach the server over
 HTTPS. It marks the browser session cookie `Secure`; without it a proxy-terminated HTTPS site
 still works, but the cookie is also allowed to travel over plain HTTP. Do not set it if you are
 genuinely serving over `http://` — the browser will refuse to store the cookie and login will
@@ -81,7 +81,7 @@ appear to silently fail.
 
 **Volume ownership.** The container runs as uid `10001`. A *named* volume (as above) inherits
 `/data`'s ownership from the image, so it just works. A *bind mount* does not — the host
-directory keeps its own ownership and the server cannot create `notes.db`:
+directory keeps its own ownership and the server cannot create `lemmate.db`:
 
 ```sh
 mkdir -p /srv/notes/data && chown -R 10001:10001 /srv/notes/data
@@ -115,8 +115,8 @@ dropped, and `client_max_body_size 0;`.
 ### First login
 
 ```sh
-notes login --server https://notes.example.org --email you@example.org --register
-notes sync  --vault ~/vault --server https://notes.example.org
+lemmate login --server https://notes.example.org --email you@example.org --register
+lemmate sync  --vault ~/vault --server https://notes.example.org
 ```
 
 ---
@@ -133,7 +133,7 @@ fly launch --no-deploy
 
 # 2. Create the volume the [[mounts]] block refers to, in the app's primary region.
 #    3 GB is a comfortable start; `fly volumes extend` grows it later.
-fly volumes create notes_data --size 3
+fly volumes create lemmate_data --size 3
 
 # 3. Build the Dockerfile and release it.
 fly deploy
@@ -146,40 +146,40 @@ fly logs
 Then register the first account against the deployed URL:
 
 ```sh
-notes login --server https://notes-yourname.fly.dev --email you@example.org --register
-notes sync  --vault ~/vault --server https://notes-yourname.fly.dev
+lemmate login --server https://lemmate-yourname.fly.dev --email you@example.org --register
+lemmate sync  --vault ~/vault --server https://lemmate-yourname.fly.dev
 ```
 
-`fly.toml` sets `NOTES_SECURE_COOKIES = "true"` because `force_https = true` guarantees HTTPS,
+`fly.toml` sets `LEMMATE_SECURE_COOKIES = "true"` because `force_https = true` guarantees HTTPS,
 and `auto_stop_machines = "off"` with `min_machines_running = 1` because the relay must stay
 reachable for clients holding sync sockets — a suspended machine looks like an outage and
 pushes every client into reconnect backoff.
 
-**One machine only.** `notes.db` is a single SQLite file on a single volume; two machines cannot
+**One machine only.** `lemmate.db` is a single SQLite file on a single volume; two machines cannot
 share it and Fly will not attach one volume to two machines. Scale up (`fly scale vm`), never
 out (`fly scale count`).
 
 **Volume ownership on Fly.** Fly attaches volumes as an empty root-owned filesystem, so the
 non-root container cannot write to `/data` on the very first boot. If the first deploy crashes
-with a permission error creating `notes.db`, fix it once:
+with a permission error creating `lemmate.db`, fix it once:
 
 ```sh
 fly ssh console --user root -C "chown -R 10001:10001 /data"
-fly apps restart notes-yourname
+fly apps restart lemmate-yourname
 ```
 
 ---
 
 ## (c) Backups
 
-Everything that matters is `notes.db` plus `attachments/`. Do **not** copy `notes.db` with `cp`
+Everything that matters is `lemmate.db` plus `attachments/`. Do **not** copy `lemmate.db` with `cp`
 while the server is running — it is in WAL mode and you would capture a torn database. Use
 SQLite's own online backup, which is safe against a live writer:
 
 ```sh
 # Inside the container (sqlite3 is not in the runtime image — install it, or run from the host
 # against the volume's path).
-sqlite3 /data/notes.db ".backup '/data/backup/notes-$(date +%F).db'"
+sqlite3 /data/lemmate.db ".backup '/data/backup/notes-$(date +%F).db'"
 
 # Attachments are immutable content-addressed blobs, so a plain incremental copy is fine.
 rsync -a /data/attachments/ /backup/notes/attachments/
@@ -190,13 +190,13 @@ From the host, with the container running and the data in a named volume:
 ```sh
 mkdir -p backup
 
-# notes.db, via SQLite's online backup (alpine's sqlite package, no third-party image).
-docker run --rm -v notes_data:/data -v "$PWD/backup:/backup" alpine:3 \
+# lemmate.db, via SQLite's online backup (alpine's sqlite package, no third-party image).
+docker run --rm -v lemmate_data:/data -v "$PWD/backup:/backup" alpine:3 \
   sh -c "apk add --no-cache sqlite >/dev/null && \
-         sqlite3 /data/notes.db \".backup '/backup/notes-\$(date +%F).db'\""
+         sqlite3 /data/lemmate.db \".backup '/backup/notes-\$(date +%F).db'\""
 
 # attachments/ — immutable content-addressed blobs, so a plain copy is enough.
-docker run --rm -v notes_data:/data -v "$PWD/backup:/backup" alpine:3 \
+docker run --rm -v lemmate_data:/data -v "$PWD/backup:/backup" alpine:3 \
   cp -a /data/attachments /backup/attachments
 ```
 
@@ -207,7 +207,7 @@ On fly.io, `fly volumes snapshots list <volume-id>` shows the automatic daily sn
 (retained 5 days by default); `fly ssh console` + the `.backup` command above gets you an
 off-platform copy, which the snapshots are not a substitute for.
 
-Restoring is the reverse: stop the server, put `notes.db` and `attachments/` back in the data
+Restoring is the reverse: stop the server, put `lemmate.db` and `attachments/` back in the data
 directory, start it. Sync clients reconcile from their own journals on reconnect, so a restore
 to a slightly older state does not lose work that is still on a client.
 
@@ -222,16 +222,16 @@ losing fine-grained history older than that window.
 **Never run `--no-auth` on a network.** It is a development switch: it sets
 `AuthMode::Disabled`, and every request — REST, relay frames, attachment uploads — is then
 treated as a local owner with no token at all. Anyone who can reach the port owns every vault.
-The server logs a warning at startup when it is on. The same applies to `NOTES_NO_AUTH`, which
+The server logs a warning at startup when it is on. The same applies to `LEMMATE_NO_AUTH`, which
 is the same switch by another name; keep it out of Compose files and `fly secrets`.
 
 **The first registered account is the admin.** Registration is allowed when *any* of these hold
 (`crates/server/src/auth.rs`): the user table is empty, `--allow-registration` is set, or the
 request carries the session of an existing admin. So on a fresh server the very first
-`POST /api/v1/auth/register` — i.e. `notes login --register` — succeeds without credentials and
+`POST /api/v1/auth/register` — i.e. `lemmate login --register` — succeeds without credentials and
 creates an admin; every later attempt is `403` unless one of the other two conditions applies.
 
-Deploy and register immediately. Between `fly deploy` and your first `notes login --register`,
+Deploy and register immediately. Between `fly deploy` and your first `lemmate login --register`,
 whoever reaches the URL first becomes the admin.
 
 **`--allow-registration` opens self-service signup to the whole internet.** Leave it off for a
@@ -244,7 +244,7 @@ contains `@` and the password is at least 8 characters.
 **Other things worth doing:**
 
 - Set `--secure-cookies` on every HTTPS deployment (see above).
-- Sessions are opaque bearer tokens, hashed at rest. `notes logout --server <url>` forgets the
+- Sessions are opaque bearer tokens, hashed at rest. `lemmate logout --server <url>` forgets the
   local copy.
 - There is no end-to-end encryption by design (SPEC §15) — the server reads note content in
   order to index, search, and share it. Encrypt the disk or volume if that matters.

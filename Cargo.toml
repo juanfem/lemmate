@@ -10,7 +10,7 @@ repository = ""
 rust-version = "1.95"
 
 [workspace.dependencies]
-notes-core = { path = "crates/core" }
+lemmate-core = { path = "crates/core" }
 
 [profile.release]
 lto = "thin"
