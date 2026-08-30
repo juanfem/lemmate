@@ -1,6 +1,6 @@
 # Notes — Specification
 
-Status: draft v0.3 (2026-08-30) — M0/M1 implemented; M2 largely implemented (see README status)
+Status: draft v0.4 (2026-08-30) — M0–M2 implemented, M3 partly (export, REST/relay writes, MCP); see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
