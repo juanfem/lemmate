@@ -8,20 +8,36 @@ specification; this README covers the repository and the current milestone.
 | Crate / package | Path | What it is |
 |---|---|---|
 | `notes-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
-| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, REST (`/api/v1`), serves the web client. **No auth yet (M2).** |
-| `notes-cli` | `crates/cli` | `notes` binary: `sync` (with `--serve` relay), `index`, `search`, `import obsidian`, `export zip`, `doctor`. |
+| `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
+| `notes-cli` | `crates/cli` | `notes` binary: `login`/`logout`, `sync` (with `--serve` relay), `index`, `search`, `import obsidian`, `export zip`, `doctor`. |
 | `notes-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
 | `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, daily notes + templates, paste/drop attachments. Also the markdown indexer sharing `corpus/` with `notes-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
-M0 is complete. M1 so far: everything in the table. Remaining for M1: split panes, note
-version history UI, and a first-run setup screen for the desktop app (today it reads
-`~/.config/notes/desktop.toml`). M2 (accounts, sharing, presence UI, web deployment recipe)
-follows.
+M0 and M1 are complete except split panes and a first-run setup screen for the desktop app
+(today it reads `~/.config/notes/desktop.toml`). M2 in progress: accounts and vault roles are
+done; per-note shares, public links, version history UI, presence UI, and the fly.io recipe
+remain.
 
 Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
 `NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for
 headless-Chrome smoke runs against a running server.
+
+## Accounts and access
+
+`notes-server` has accounts on by default. The first account to register becomes the admin;
+after that only admins create accounts unless `--allow-registration` is set. Sessions are
+opaque tokens (hashed at rest), sent as `Authorization: Bearer …` by native clients and as an
+HttpOnly cookie by the browser. Vaults have members with roles — **owner** (manages members),
+**editor**, **viewer** — and a vault nobody owns yet is claimed by the first user who syncs it.
+The relay checks every frame: viewers can read, editors write. `--no-auth` turns all of this
+off for local development (the server warns loudly; never expose it that way).
+
+```sh
+notes-server --data-dir ./data --web-dir ui/dist            # accounts on
+notes login --server https://notes.example.org --email you@example.org --register   # first account
+notes sync  --vault ~/vault --server https://notes.example.org   # uses the saved token
+```
 
 ## `notes sync`
 
