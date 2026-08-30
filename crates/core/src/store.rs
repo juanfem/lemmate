@@ -480,6 +480,66 @@ impl Store {
         Ok(())
     }
 
+    /// Live vaults known to this store: every vault doc in the journal, with its note count.
+    pub fn vaults(&self) -> Result<Vec<(VaultId, u32)>> {
+        let mut out = Vec::new();
+        for id in self.doc_ids()? {
+            if let DocId::Vault(v) = id {
+                let n: u32 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM notes WHERE vault_id = ?1 AND deleted_at IS NULL",
+                    params![v.to_string()],
+                    |r| r.get(0),
+                )?;
+                out.push((v, n));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Notes in `vault_id` whose wikilinks resolve to `note`: by full path, path without
+    /// extension, or basename without extension (SPEC §5.4 resolution order, loosely).
+    pub fn backlinks_to(&self, note: &NoteRow) -> Result<Vec<NoteRow>> {
+        let stem = note.path.trim_end_matches(".md").trim_end_matches(".qmd").to_owned();
+        let base = stem.rsplit('/').next().unwrap_or(&stem).to_owned();
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT n.id, n.vault_id, n.path, n.title FROM note_links l JOIN notes n ON n.id = l.note_id
+             WHERE n.vault_id = ?1 AND n.deleted_at IS NULL AND n.id != ?2 AND l.kind IN ('wikilink','embed')
+               AND (l.target = ?3 OR l.target = ?4 OR l.target = ?5) ORDER BY n.path",
+        )?;
+        let rows = stmt.query_map(
+            params![note.vault_id.to_string(), note.id.to_string(), note.path, stem, base],
+            row_to_note,
+        )?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    pub fn tags_in_vault(&self, vault_id: VaultId) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id = t.note_id
+             WHERE n.vault_id = ?1 AND n.deleted_at IS NULL GROUP BY t.tag ORDER BY t.tag",
+        )?;
+        let rows = stmt.query_map(params![vault_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Full-text search restricted to one vault.
+    pub fn search_in_vault(&self, vault_id: VaultId, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[', ']', '…', 12), bm25(notes_fts)
+             FROM notes_fts f JOIN notes n ON n.id = f.note_id
+             WHERE notes_fts MATCH ?1 AND n.deleted_at IS NULL AND n.vault_id = ?3
+             ORDER BY bm25(notes_fts) LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, limit, vault_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.map(|r| {
+            let (id, title, snippet, rank) = r?;
+            Ok(SearchHit { note_id: id.parse()?, title, snippet, rank })
+        })
+        .collect()
+    }
+
     pub fn backlinks(&self, target: &str) -> Result<Vec<NoteId>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT note_id FROM note_links WHERE target = ?1 AND kind IN ('wikilink','embed')",
@@ -712,6 +772,12 @@ mod tests {
             Some("Alpha")
         );
         assert_eq!(store.backlinks("Alpha").unwrap(), vec![b]);
+        let alpha = store.note_by_id(a).unwrap().unwrap();
+        assert_eq!(store.backlinks_to(&alpha).unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![b]);
+        assert_eq!(store.vaults().unwrap(), vec![]); // no vault doc journaled in this test
+        assert_eq!(store.tags_in_vault(vault).unwrap().len(), 2);
+        assert_eq!(store.search_in_vault(vault, "quick fox", 10).unwrap().len(), 1);
+        assert_eq!(store.search_in_vault(VaultId::new(), "quick fox", 10).unwrap().len(), 0);
         assert_eq!(store.tags().unwrap(), vec![("daily".to_owned(), 1), ("project".to_owned(), 2)]);
         let hits = store.search("quick fox", 10).unwrap();
         assert_eq!(hits.len(), 1);

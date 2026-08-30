@@ -19,6 +19,7 @@ use notes_core::sync::{Frame, Message, SyncMessage};
 use notes_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use yrs::StateVector;
@@ -30,6 +31,8 @@ pub struct ServerOptions {
     pub attachments_dir: std::path::PathBuf,
     /// How long an unreferenced blob is kept before it is purged (SPEC §9: trash window).
     pub attachment_grace: std::time::Duration,
+    /// Built web client (`ui/dist`) to serve at `/`; none → API and sync only.
+    pub web_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServerOptions {
@@ -38,6 +41,7 @@ impl Default for ServerOptions {
             policy: RetentionPolicy::default(),
             attachments_dir: std::env::temp_dir().join("notes-attachments"),
             attachment_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+            web_dir: None,
         }
     }
 }
@@ -163,16 +167,27 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let web_dir = state.options.web_dir.clone();
+    let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
+        .route("/api/v1/vaults", get(list_vaults))
         .route("/api/v1/vaults/{vault}/notes", get(list_notes))
         .route("/api/v1/vaults/{vault}/notes/{id}", get(get_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/api/v1/vaults/{vault}/tags", get(tags))
+        .route("/api/v1/vaults/{vault}/search", get(search_vault))
         .route("/api/v1/search", get(search))
         .route("/api/v1/vaults/{vault}/attachments/{hash}", get(get_attachment).put(put_attachment))
-        .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize));
+    let router = match web_dir {
+        // Single-page app: unknown paths fall back to index.html so `#/v/<id>` links work.
+        Some(dir) => {
+            router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
+        }
+        None => router,
+    };
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 // ---- Sync over WebSocket --------------------------------------------------------------------
@@ -393,6 +408,12 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> notes_core::Resu
 // ---- REST -------------------------------------------------------------------------------------
 
 #[derive(Serialize)]
+struct VaultSummary {
+    id: String,
+    notes: u32,
+}
+
+#[derive(Serialize)]
 struct NoteSummary {
     id: String,
     path: String,
@@ -423,6 +444,65 @@ struct SearchHitOut {
     note_id: String,
     title: Option<String>,
     snippet: String,
+}
+
+async fn list_vaults(State(state): State<Arc<AppState>>) -> Result<Json<Vec<VaultSummary>>, StatusCode> {
+    let rows = state.store.lock().await.vaults().map_err(internal)?;
+    Ok(Json(rows.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect()))
+}
+
+async fn backlinks(
+    State(state): State<Arc<AppState>>,
+    Path((vault, id)): Path<(String, String)>,
+) -> Result<Json<Vec<NoteSummary>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = state.store.lock().await;
+    let note = store
+        .note_by_id(id)
+        .map_err(internal)?
+        .filter(|n| n.vault_id == vault)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let rows = store.backlinks_to(&note).map_err(internal)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+struct TagCount {
+    tag: String,
+    count: u32,
+}
+
+async fn tags(
+    State(state): State<Arc<AppState>>,
+    Path(vault): Path<String>,
+) -> Result<Json<Vec<TagCount>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let rows = state.store.lock().await.tags_in_vault(vault).map_err(internal)?;
+    Ok(Json(rows.into_iter().map(|(tag, count)| TagCount { tag, count }).collect()))
+}
+
+async fn search_vault(
+    State(state): State<Arc<AppState>>,
+    Path(vault): Path<String>,
+    Query(p): Query<SearchParams>,
+) -> Result<Json<Vec<SearchHitOut>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hits = state
+        .store
+        .lock()
+        .await
+        .search_in_vault(vault, &p.q, p.limit.min(100))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(
+        hits.into_iter()
+            .map(|h| SearchHitOut { note_id: h.note_id.to_string(), title: h.title, snippet: h.snippet })
+            .collect(),
+    ))
 }
 
 async fn list_notes(

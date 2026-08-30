@@ -32,6 +32,9 @@ struct Config {
     /// Keep raw updates (fine-grained history) for this many days; versions are kept forever.
     #[arg(long, env = "NOTES_RETAIN_DAYS", default_value_t = 90)]
     retain_days: u64,
+    /// Directory with the built web client (ui/dist) to serve at /; omit for API + sync only.
+    #[arg(long, env = "NOTES_WEB_DIR")]
+    web_dir: Option<PathBuf>,
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "NOTES_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
@@ -52,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),
+        web_dir: cfg.web_dir.clone(),
         attachment_grace: Duration::from_secs(cfg.attachment_grace_days * 24 * 60 * 60),
         policy: RetentionPolicy {
             snapshot_every_updates: cfg.snapshot_every_updates,
