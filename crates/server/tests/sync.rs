@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
 use notes_core::sync::{Frame, Message, SyncMessage};
-use notes_core::{DocId, NoteDoc, NoteId, Store};
+use notes_core::{DocId, NoteDoc, NoteId, Store, VaultId};
 use notes_server::{ServerOptions, build_state, router};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as TMsg;
@@ -130,4 +130,136 @@ async fn malformed_frames_are_ignored_and_connection_survives() {
     let doc = NoteDoc::new();
     handshake(&mut c, &DocId::Note(NoteId::new()).to_string(), &doc).await;
     assert_eq!(doc.text(), "");
+}
+
+/// The REST write side: create/replace/rename/delete land in the CRDT stream and reach a
+/// connected client like any other update.
+#[tokio::test]
+async fn rest_writes_are_crdt_edits() {
+    let (addr, state) = start().await;
+    let vault = VaultId::new();
+    let vdoc_id = DocId::Vault(vault).to_string();
+    let mut c = connect(addr).await;
+    let vdoc = notes_core::VaultDoc::new();
+    // Subscribe to the vault doc first.
+    send(&mut c, &vdoc_id, Message::Sync(SyncMessage::SyncStep1(vdoc.state_vector()))).await;
+    let _ = recv(&mut c).await;
+    let _ = recv(&mut c).await;
+
+    let base = format!("http://{addr}/api/v1/vaults/{vault}");
+    let created: serde_json::Value = tokio::task::spawn_blocking({
+        let base = base.clone();
+        move || {
+            let mut r = ureq::post(format!("{base}/notes"))
+                .header("content-type", "application/json")
+                .send(r##"{"path":"Inbox/From API","content":"# Hello\n\nvia REST\n"}"##.as_bytes())
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 201);
+            serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(created["path"], "Inbox/From API.md");
+    assert!(created["content"].as_str().unwrap().starts_with("---\nid: "));
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // The connected client receives the vault entry.
+    let (doc, m) = recv(&mut c).await;
+    assert_eq!(doc, vdoc_id);
+    let Message::Sync(SyncMessage::Update(u)) = m else { panic!("expected vault update, got {m:?}") };
+    vdoc.apply_update(&u).unwrap();
+    assert_eq!(vdoc.path_of(id.parse().unwrap()).as_deref(), Some("Inbox/From API.md"));
+
+    // Replace merges as a diff: a concurrent client edit survives.
+    let ndoc = NoteDoc::new();
+    send(&mut c, &id, Message::Sync(SyncMessage::SyncStep1(ndoc.state_vector()))).await;
+    let Some((_, Message::Sync(SyncMessage::SyncStep2(u)))) = Some(recv(&mut c).await) else { panic!() };
+    ndoc.apply_update(&u).unwrap();
+    let _ = recv(&mut c).await;
+    let mine = ndoc.set_text(&format!("{}client line\n", ndoc.text()));
+    send(&mut c, &id, Message::Sync(SyncMessage::Update(mine))).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let replaced: serde_json::Value = tokio::task::spawn_blocking({
+        let base = base.clone();
+        let id = id.clone();
+        move || {
+            let mut r = ureq::put(format!("{base}/notes/{id}"))
+                .header("content-type", "application/json")
+                .send(r##"{"content":"# Hello!\n\nvia REST\nclient line\n"}"##.as_bytes())
+                .unwrap();
+            serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    let (_, m) = recv(&mut c).await;
+    let Message::Sync(SyncMessage::Update(u)) = m else { panic!("expected note update, got {m:?}") };
+    ndoc.apply_update(&u).unwrap();
+    assert!(ndoc.text().contains("# Hello!") && ndoc.text().contains("client line"), "{}", ndoc.text());
+    assert_eq!(replaced["title"], "Hello!");
+
+    // Rename, daily get-or-create, delete.
+    let status = tokio::task::spawn_blocking({
+        let base = base.clone();
+        let id = id.clone();
+        move || {
+            ureq::patch(format!("{base}/notes/{id}"))
+                .header("content-type", "application/json")
+                .send(r##"{"path":"Archive/Moved"}"##.as_bytes())
+                .map(|r| r.status().as_u16())
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 204);
+    let (_, m) = recv(&mut c).await;
+    if let Message::Sync(SyncMessage::Update(u)) = m {
+        vdoc.apply_update(&u).unwrap();
+    }
+    assert_eq!(vdoc.path_of(id.parse().unwrap()).as_deref(), Some("Archive/Moved.md"));
+    let daily: serde_json::Value = tokio::task::spawn_blocking({
+        let base = base.clone();
+        move || {
+            serde_json::from_str(
+                &ureq::get(format!("{base}/daily/2026-08-30"))
+                    .call()
+                    .unwrap()
+                    .body_mut()
+                    .read_to_string()
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(daily["path"], "Daily/2026-08-30.md");
+    let again: serde_json::Value = tokio::task::spawn_blocking({
+        let base = base.clone();
+        move || {
+            serde_json::from_str(
+                &ureq::get(format!("{base}/daily/2026-08-30"))
+                    .call()
+                    .unwrap()
+                    .body_mut()
+                    .read_to_string()
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(again["id"], daily["id"], "get-or-create is idempotent");
+    let status = tokio::task::spawn_blocking({
+        let base = base.clone();
+        let id = id.clone();
+        move || ureq::delete(format!("{base}/notes/{id}")).call().map(|r| r.status().as_u16()).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 204);
+    assert!(state.store.lock().await.note_by_id(id.parse().unwrap()).unwrap().is_none(), "trashed");
 }

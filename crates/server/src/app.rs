@@ -180,8 +180,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))
-        .route("/api/v1/vaults/{vault}/notes", get(list_notes))
-        .route("/api/v1/vaults/{vault}/notes/{id}", get(get_note))
+        .route("/api/v1/vaults/{vault}/notes", get(list_notes).post(create_note))
+        .route(
+            "/api/v1/vaults/{vault}/notes/{id}",
+            get(get_note).put(put_note).patch(patch_note).delete(delete_note),
+        )
+        .route("/api/v1/vaults/{vault}/daily/{date}", get(daily_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
@@ -495,6 +499,210 @@ fn index_note_text(
         }
     }
     store.set_note_attachments(id, &paths)
+}
+
+// ---- Writes through the API (SPEC §13.1) ------------------------------------------------------
+
+/// Apply a change produced on the server to a room doc: journal it, run maintenance, derive
+/// metadata, and fan it out to every subscriber exactly like a client update.
+async fn commit_change(state: &Arc<AppState>, room: &Arc<Room>, update: Vec<u8>) -> Result<(), StatusCode> {
+    if update.is_empty() {
+        return Ok(());
+    }
+    {
+        let doc = room.doc.lock().await;
+        let mut store = state.store.lock().await;
+        store.append_update(room.id, &update, Some("api")).map_err(internal)?;
+        let _ = store.maintain(room.id, &state.options.policy, now_ms(), || doc.encode_full());
+    }
+    derive_metadata(state, room).await.map_err(internal)?;
+    let doc_id = room.id.to_string();
+    let frame = Frame::new(&doc_id, &Message::Sync(SyncMessage::Update(update))).encode();
+    let _ = state.bus.send(Outbound { from: 0, doc_id: doc_id.into(), bytes: Arc::new(frame) });
+    Ok(())
+}
+
+async fn note_room(state: &Arc<AppState>, id: NoteId) -> Result<Arc<Room>, StatusCode> {
+    get_room(state, DocId::Note(id)).await.map_err(internal)
+}
+
+async fn vault_room(state: &Arc<AppState>, vault: VaultId) -> Result<Arc<Room>, StatusCode> {
+    get_room(state, DocId::Vault(vault)).await.map_err(internal)
+}
+
+fn normalize_path(path: &str) -> Result<String, StatusCode> {
+    let p = path.trim().trim_start_matches('/');
+    if p.is_empty() || p.contains("..") || p.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(if p.ends_with(".md") || p.ends_with(".qmd") { p.to_owned() } else { format!("{p}.md") })
+}
+
+#[derive(Deserialize)]
+struct NewNote {
+    path: String,
+    #[serde(default)]
+    content: String,
+}
+
+async fn create_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Json(body): Json<NewNote>,
+) -> Result<(StatusCode, Json<NoteBody>), StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let path = normalize_path(&body.path)?;
+    let vroom = vault_room(&state, vault).await?;
+    {
+        let doc = vroom.doc.lock().await;
+        if let RoomDoc::Vault(v) = &*doc
+            && v.entries().iter().any(|(_, p)| *p == path)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    let id = NoteId::new();
+    let text =
+        notes_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
+    // Content first, then the entry, so nobody sees an empty note (same order as the UI).
+    let nroom = note_room(&state, id).await?;
+    state.note_vault_claims.lock().await.insert(id, vault);
+    let update = match &*nroom.doc.lock().await {
+        RoomDoc::Note(d) => d.set_text(&text),
+        RoomDoc::Vault(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &nroom, update).await?;
+    let vupdate = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.set_path(id, &path),
+        RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &vroom, vupdate).await?;
+    let title = state.store.lock().await.note_by_id(id).map_err(internal)?.and_then(|r| r.title);
+    Ok((StatusCode::CREATED, Json(NoteBody { id: id.to_string(), path, title, content: text })))
+}
+
+#[derive(Deserialize)]
+struct PutNote {
+    content: String,
+}
+
+/// Replace the text; applied as a diff so it merges with concurrent editors (SPEC §13.1).
+async fn put_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<PutNote>,
+) -> Result<Json<NoteBody>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::note_role(&state, &user, vault, id).await.is_none_or(|r| r < Role::Editor) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let row = state
+        .store
+        .lock()
+        .await
+        .note_by_id(id)
+        .map_err(internal)?
+        .filter(|r| r.vault_id == vault)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let room = note_room(&state, id).await?;
+    let text =
+        notes_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
+    let update = match &*room.doc.lock().await {
+        RoomDoc::Note(d) => d.set_text(&text),
+        RoomDoc::Vault(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &room, update).await?;
+    let title = state.store.lock().await.note_by_id(id).map_err(internal)?.and_then(|r| r.title);
+    Ok(Json(NoteBody { id: id.to_string(), path: row.path, title, content: text }))
+}
+
+#[derive(Deserialize)]
+struct PatchNote {
+    path: String,
+}
+
+async fn patch_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<PatchNote>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let path = normalize_path(&body.path)?;
+    let vroom = vault_room(&state, vault).await?;
+    let update = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => {
+            if v.path_of(id).is_none() {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            if v.entries().iter().any(|(other, p)| *p == path && *other != id) {
+                return Err(StatusCode::CONFLICT);
+            }
+            v.set_path(id, &path)
+        }
+        RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &vroom, update).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let vroom = vault_room(&state, vault).await?;
+    let update = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => {
+            if v.path_of(id).is_none() {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            v.remove(id)
+        }
+        RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    commit_change(&state, &vroom, update).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `Daily/YYYY-MM-DD.md`, created with a heading when missing (SPEC §9, §13.1).
+async fn daily_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, date)): Path<(String, String)>,
+) -> Result<Json<NoteBody>, StatusCode> {
+    let vault_id: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault_id, Role::Editor).await?;
+    if !date.chars().all(|c| c.is_ascii_digit() || c == '-') || date.len() != 10 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = format!("Daily/{date}.md");
+    let existing = state.store.lock().await.note_by_path(vault_id, &path).map_err(internal)?;
+    if let Some(row) = existing {
+        let room = note_room(&state, row.id).await?;
+        let content = match &*room.doc.lock().await {
+            RoomDoc::Note(d) => d.text(),
+            RoomDoc::Vault(_) => String::new(),
+        };
+        return Ok(Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }));
+    }
+    let (_, Json(body)) = create_note(
+        State(state),
+        user,
+        Path(vault),
+        Json(NewNote { path, content: format!("# {date}\n\n") }),
+    )
+    .await?;
+    Ok(Json(body))
 }
 
 // ---- REST -------------------------------------------------------------------------------------
