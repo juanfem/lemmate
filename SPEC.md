@@ -1,6 +1,8 @@
 # Lemmate — Specification
 
-Status: draft v0.4 (2026-08-30) — M0–M2 implemented, M3 partly (export, REST/relay writes, MCP); see README status
+Status: draft v0.4 (2026-08-30) — M0–M2 implemented, accounts through single-use invites and
+password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI), with mobile and
+Quarto render outstanding; see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
@@ -86,7 +88,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
   **Svelte 5 [decided]** (small bundle, matters on mobile webviews). Identical bundle in
   desktop, mobile, and web.
 - **`desktop`, `mobile`** — Tauri 2 shells. Expose `core` to the UI via Tauri commands.
-- **`cli`** — `notes` binary. Talks to a server over the REST API, or to a local vault
+- **`cli`** — `lemmate` binary. Talks to a server over the REST API, or to a local vault
   directly via `core` **[recommended: server-only in v1, direct-local later]**.
 
 ### 3.2 Topology **[decided]**
@@ -490,7 +492,7 @@ applies the result as CRDT edits, so API writes merge with concurrent editors.
 
 ### 13.2 CLI
 
-`lemmate login` (`--invite <link>` to redeem one), `notes vault ls`,
+`lemmate login` (`--invite <link>` to redeem one), `lemmate vaults`,
 `lemmate ls|cat|new|edit|mv|rm`, `lemmate search`, `lemmate daily [date]`, `lemmate export`,
 `lemmate import obsidian`, `lemmate passwd` (own, or `--email` to reset another as admin),
 `lemmate invite` (`--list`, `--revoke`), `lemmate sync` (native projection folder without the
