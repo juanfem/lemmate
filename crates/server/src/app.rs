@@ -35,6 +35,8 @@ pub struct ServerOptions {
     /// Built web client (`ui/dist`) to serve at `/`; none → API and sync only.
     pub web_dir: Option<std::path::PathBuf>,
     pub auth: AuthMode,
+    /// `pandoc` binary for exports (default: on PATH); exports answer 501 when it is missing.
+    pub pandoc: Option<std::path::PathBuf>,
 }
 
 impl Default for ServerOptions {
@@ -45,6 +47,7 @@ impl Default for ServerOptions {
             attachment_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
             web_dir: None,
             auth: AuthMode::Disabled,
+            pandoc: None,
         }
     }
 }
@@ -187,6 +190,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
@@ -780,6 +784,51 @@ async fn backlinks(
             .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
             .collect(),
     ))
+}
+
+#[derive(Deserialize)]
+struct ExportIn {
+    format: String,
+}
+
+/// Render a note through pandoc (SPEC §12). Attachments resolve against the server's blob
+/// store is future work; today links stay relative.
+async fn export_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<ExportIn>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::note_role(&state, &user, vault, id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let format = notes_core::pandoc::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    if !notes_core::pandoc::pandoc_available(state.options.pandoc.as_deref()) {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    let row = state.store.lock().await.note_by_id(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let room = note_room(&state, id).await?;
+    let text = match &*room.doc.lock().await {
+        RoomDoc::Note(d) => d.text(),
+        RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let opts =
+        notes_core::pandoc::ExportOptions { pandoc: state.options.pandoc.clone(), ..Default::default() };
+    let (bytes, mime) = tokio::task::spawn_blocking(move || notes_core::pandoc::render(&text, format, &opts))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            warn!(%e, "export");
+            StatusCode::UNPROCESSABLE_ENTITY
+        })?;
+    let stem = std::path::Path::new(&row.path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "note".into());
+    let disposition = format!("attachment; filename=\"{}.{}\"", stem.replace('"', ""), format.extension());
+    Ok(([(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)], bytes))
 }
 
 #[derive(Serialize)]

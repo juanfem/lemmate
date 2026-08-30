@@ -71,7 +71,7 @@
 </script>
 
 <div class="backdrop" onmousedown={onClose} role="presentation">
-  <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-label="Quick switcher">
+  <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-label="Quick switcher">
     <input bind:this={input} bind:value={query} onkeydown={onKey} placeholder="Open or create a note…" />
     <ul>
       {#each results as n, i (n.id)}

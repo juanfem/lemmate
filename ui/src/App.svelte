@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte'
-  import { api, authState, type VaultInfo, type NoteSummary, type User } from './lib/api.ts'
+  import { api, authState, type VaultInfo, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
+  import Setup from './components/Setup.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { ulid } from './lib/ulid.ts'
   import Tree from './components/Tree.svelte'
-  import Editor from './components/Editor.svelte'
+  import Pane, { type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -16,6 +17,17 @@
   import SharedView from './components/SharedView.svelte'
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
+
+  // ---- first run (desktop): the relay serves the UI in setup mode until configured
+  let setup = $state<{ config_path: string; suggested_vault_dir: string } | null>(null)
+  let setupStarting = $state(false)
+  if (!readPublicToken())
+    fetch('/api/v1/local/setup')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { configured?: boolean; config_path?: string; suggested_vault_dir?: string } | null) => {
+        if (j && j.configured === false) setup = { config_path: j.config_path ?? '', suggested_vault_dir: j.suggested_vault_dir ?? '' }
+      })
+      .catch(() => {})
 
   // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
   let authRequired = $state(false)
@@ -81,15 +93,21 @@
     untrack(() => {
       session?.destroy()
       session = id ? new VaultSession(id, { noteOnly: !!only }) : null
+      layoutRestored = false
+      pinned = []
+      closed = []
       if (session && only) {
-        tabs = [only]
-        active = only
+        // A directly shared note (SPEC §11.2): one pane, one tab, no splits.
+        panes = [{ id: ++paneSeq, tabs: [only], active: only }]
+        focusedPane = 0
         return
       }
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
       ;(window as unknown as { notes?: unknown }).notes = { session }
-      tabs = []
-      active = null
+      const restored = id ? loadLayout(id) : { panes: [blankPane()], focused: 0 }
+      panes = restored.panes
+      focusedPane = restored.focused
+      pinned = id ? loadPinned(id) : []
     })
     if (!id) api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
     if (!vaultId)
@@ -111,17 +129,88 @@
     openVault(ulid())
   }
 
-  // ---- tabs
-  let tabs: string[] = $state([])
-  let active = $state<string | null>(null)
+  // ---- tabs and panes (SPEC §9)
+  const MAX_PANES = 3
+  let paneSeq = 0
+  let panes: PaneState[] = $state([blankPane()])
+  let focusedPane = $state(0)
+  /** Recently closed note ids, most recent last (Ctrl+Shift+T reopens). */
+  let closed: string[] = $state([])
+  let pinned: string[] = $state([])
+  let headingsByPane: Record<number, OutlineItem[]> = $state({})
+  let presenceByPane: Record<number, string[]> = $state({})
+  let jumpers: Record<number, ((pos: number) => void) | undefined> = $state({})
+  let layoutRestored = $state(false)
+
   let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' | 'history' = $state('files')
   let switcher = $state(false)
   let palette = $state(false)
-  let backlinks: NoteSummary[] = $state([])
-  let headings: OutlineItem[] = $state([])
-  let presence: string[] = $state([])
-  let jumpTo: ((pos: number) => void) | undefined = $state()
   let tagsVersion = $state(0)
+
+  function blankPane(): PaneState {
+    return { id: ++paneSeq, tabs: [], active: null }
+  }
+  let focused = $derived(panes[Math.min(focusedPane, panes.length - 1)] ?? panes[0]!)
+  /** The focused pane's note: everything outside the panes (commands, sidebar) acts on it. */
+  let active = $derived(focused.active)
+  let headings = $derived(headingsByPane[focused.id] ?? [])
+  let presence = $derived(presenceByPane[focused.id] ?? [])
+
+  // ---- layout persistence, per vault and per device
+  interface StoredLayout {
+    panes?: { tabs?: string[]; active?: string | null }[]
+    focused?: number
+  }
+  function loadLayout(vault: string): { panes: PaneState[]; focused: number } {
+    try {
+      const raw = localStorage.getItem(`notes.layout.${vault}`)
+      const data = raw ? (JSON.parse(raw) as StoredLayout) : null
+      const list = (data?.panes ?? [])
+        .filter((p) => Array.isArray(p.tabs) && p.tabs.length > 0)
+        .slice(0, MAX_PANES)
+        .map((p) => {
+          const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string')
+          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null) }
+        })
+      if (list.length) return { panes: list, focused: Math.min(Math.max(data?.focused ?? 0, 0), list.length - 1) }
+    } catch {
+      /* ignore unreadable layouts */
+    }
+    return { panes: [blankPane()], focused: 0 }
+  }
+  function loadPinned(vault: string): string[] {
+    try {
+      const raw = localStorage.getItem(`notes.pins.${vault}`)
+      const list = raw ? (JSON.parse(raw) as unknown) : null
+      return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  $effect(() => {
+    const s = session
+    if (!s || s.noteOnly) return
+    const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active })), focused: focusedPane })
+    try {
+      localStorage.setItem(`notes.layout.${s.id}`, data)
+    } catch {
+      /* storage may be unavailable */
+    }
+  })
+  // Once the vault doc has synced, drop restored tabs whose notes no longer exist.
+  $effect(() => {
+    const s = session
+    if (!s || s.noteOnly || !s.vaultSynced || layoutRestored) return
+    const known = new Set(s.notes.map((n) => n.id))
+    untrack(() => {
+      layoutRestored = true
+      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
+      const live = kept.filter((p) => p.tabs.length > 0)
+      panes = live.length ? live : [blankPane()]
+      focusedPane = Math.min(focusedPane, panes.length - 1)
+      pinned = pinned.filter((id) => known.has(id))
+    })
+  })
 
   // ---- in-app prompt/confirm (native dialogs are unreliable in the Tauri webview)
   interface AskOptions {
@@ -145,18 +234,61 @@
     m?.settle(value)
   }
 
+  /** Open a note in the focused pane. */
   function open(id: string) {
-    if (!tabs.includes(id)) tabs = [...tabs, id]
-    active = id
+    const p = focused
+    if (!p.tabs.includes(id)) p.tabs = [...p.tabs, id]
+    p.active = id
     switcher = false
     palette = false
-    headings = []
-    refreshBacklinks()
+    headingsByPane[p.id] = []
+    closed = closed.filter((c) => c !== id)
     tagsVersion++
   }
   function openPath(path: string) {
     const id = session?.idOf(path)
     if (id) open(id)
+  }
+  /** Close a tab wherever it is open; the pane goes away with its last tab. */
+  function close(id: string, force = false) {
+    if (!force && pinned.includes(id)) return
+    const p = panes.find((x) => x === focused && x.tabs.includes(id)) ?? panes.find((x) => x.tabs.includes(id))
+    if (!p) return
+    const i = p.tabs.indexOf(id)
+    p.tabs = p.tabs.filter((t) => t !== id)
+    if (p.active === id) p.active = p.tabs[Math.min(i, p.tabs.length - 1)] ?? null
+    closed = [...closed.filter((c) => c !== id), id].slice(-20)
+    if (p.tabs.length === 0 && panes.length > 1) closePane(panes.indexOf(p))
+  }
+  function splitRight() {
+    if (!session || session.noteOnly || panes.length >= MAX_PANES) return
+    const id = focused.active
+    if (!id) return
+    const i = panes.indexOf(focused)
+    panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id }, ...panes.slice(i + 1)]
+    focusedPane = i + 1
+  }
+  function closePane(i = focusedPane) {
+    if (panes.length <= 1) return
+    panes = panes.filter((_, j) => j !== i)
+    focusedPane = Math.min(focusedPane > i ? focusedPane - 1 : focusedPane, panes.length - 1)
+  }
+  function focusPane(delta: number) {
+    focusedPane = (focusedPane + delta + panes.length) % panes.length
+  }
+  function reopenClosed() {
+    const id = closed[closed.length - 1]
+    closed = closed.slice(0, -1)
+    if (id && session?.pathOf(id)) open(id)
+  }
+  function togglePin(id: string) {
+    pinned = pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
+    if (session)
+      try {
+        localStorage.setItem(`notes.pins.${session.id}`, JSON.stringify(pinned))
+      } catch {
+        /* storage may be unavailable */
+      }
   }
   function bookmarkActive() {
     if (!session || !active) return
@@ -177,14 +309,14 @@
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
     { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => active && close(active) },
+    { id: 'pin', label: active && pinned.includes(active) ? 'Unpin tab' : 'Pin tab', run: () => active && togglePin(active) },
+    { id: 'reopen', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T', run: reopenClosed },
+    { id: 'split', label: 'Split right', shortcut: 'Ctrl+\\', run: splitRight },
+    { id: 'closepane', label: 'Close pane', run: () => closePane() },
+    { id: 'nextpane', label: 'Focus next pane', shortcut: 'Ctrl+Alt+→', run: () => focusPane(1) },
     { id: 'vault', label: 'Switch vault', run: () => (location.hash = '') },
     ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
-  function close(id: string) {
-    const i = tabs.indexOf(id)
-    tabs = tabs.filter((t) => t !== id)
-    if (active === id) active = tabs[Math.min(i, tabs.length - 1)] ?? null
-  }
   /** Templates (SPEC §9): `Templates/<name>.md` with {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. */
   async function template(name: string, title: string, fallback: string): Promise<string> {
     if (!session) return fallback
@@ -248,22 +380,22 @@
     const ok = await ask({ kind: 'confirm', title: `Move “${path}” to trash?`, confirmLabel: 'Move to trash', danger: true })
     if (ok === null) return
     session?.deleteNote(id)
-    close(id)
-  }
-  async function refreshBacklinks() {
-    if (!session || !active) return (backlinks = [])
-    try {
-      backlinks = await api.backlinks(session.id, active)
-    } catch {
-      backlinks = []
-    }
+    // The note is gone: close it in every pane, pinned or not.
+    for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
+    closed = closed.filter((c) => c !== id)
   }
 
   function onKey(e: KeyboardEvent) {
     if (modal) return
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
-    if ((e.key === 'o' || e.key === 'p') && !e.shiftKey) {
+    if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+      focusPane(e.key === 'ArrowRight' ? 1 : -1)
+      e.preventDefault()
+    } else if (e.key === '\\') {
+      splitRight()
+      e.preventDefault()
+    } else if ((e.key === 'o' || e.key === 'p') && !e.shiftKey) {
       switcher = !switcher
       palette = false
       e.preventDefault()
@@ -272,6 +404,9 @@
       e.preventDefault()
     } else if (e.key === 'w') {
       if (active) close(active)
+      e.preventDefault()
+    } else if ((e.key === 't' || e.key === 'T') && e.shiftKey) {
+      reopenClosed()
       e.preventDefault()
     } else if (e.key === 'd' && e.shiftKey) {
       daily()
@@ -296,6 +431,10 @@
 
 {#if publicToken}
   <SharedView token={publicToken} />
+{:else if setup && !setupStarting}
+  <Setup status={setup} onDone={() => (setupStarting = true)} />
+{:else if setupStarting}
+  <main class="welcome"><h1>notes</h1><p class="muted">Starting your vault…</p></main>
 {:else if authRequired}
   <Login onDone={signedIn} />
 {:else if !session}
@@ -340,7 +479,7 @@
       {:else if sidebar === 'tags'}
         <TagsPane vault={session.id} version={tagsVersion} onOpen={open} />
       {:else if sidebar === 'outline'}
-        <OutlinePane items={headings} onJump={(pos) => jumpTo?.(pos)} />
+        <OutlinePane items={headings} onJump={(pos) => jumpers[focused.id]?.(pos)} />
       {:else if sidebar === 'history'}
         <HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />
       {:else}
@@ -354,48 +493,29 @@
       <footer class="status" class:offline={session.status !== 'online'}>
         <span class="dot"></span>
         {session.status}{#if session.status === 'online' && !session.vaultSynced} · syncing…{/if}
-        · {session.notes.length} notes
+        · {session.notes.length} notes{#if presence.length} · {presence.length} editing{/if}
       </footer>
     </aside>
     <section class="main">
-      <div class="tabs">
-        {#each tabs as id (id)}
-          <button class="tab" class:active={id === active} onclick={() => open(id)} title={session.pathOf(id)}>
-            {displayName(session.pathOf(id) ?? id)}
-            <span class="x" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); close(id) }} onkeydown={() => {}}>×</span>
-          </button>
-        {/each}
-      </div>
-      {#if active}
-        {#key active}
-          <div class="note-head">
-            <span class="path">{activePath}</span>
-            {#if presence.length}
-              <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
-            {/if}
-            <span class="spacer"></span>
-            <button onclick={bookmarkActive} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
-            {#if !session.noteOnly}<button onclick={() => (shareOpen = true)} title="Share">Share</button>{/if}
-            <button onclick={renameActive} title="Rename / move">Rename</button>
-            <button onclick={deleteActive} title="Move to trash">Delete</button>
-          </div>
-          <div class="editor-wrap">
-            <Editor {session} noteId={active} onOpen={open} onHeadings={(h) => (headings = h)} onPresence={(p) => (presence = p)} bind:jumpTo />
-          </div>
-          {#if backlinks.length}
-            <div class="backlinks">
-              <strong>Linked from</strong>
-              {#each backlinks as b (b.id)}
-                <button onclick={() => open(b.id)}>{b.title ?? displayName(b.path)}</button>
-              {/each}
-            </div>
-          {/if}
-        {/key}
-      {:else}
-        <div class="placeholder">
-          <p>Open a note from the tree, or press <kbd>Ctrl</kbd>+<kbd>O</kbd>.</p>
-        </div>
-      {/if}
+      {#each panes as p, i (p.id)}
+        <Pane
+          {session}
+          pane={p}
+          focused={i === focusedPane}
+          {pinned}
+          onActivate={(id) => { focusedPane = i; open(id) }}
+          onClose={(id) => { focusedPane = i; close(id) }}
+          onFocus={() => (focusedPane = i)}
+          onBookmark={bookmarkActive}
+          onShare={() => (shareOpen = true)}
+          onRename={renameActive}
+          onDelete={deleteActive}
+          onOpen={(id) => { focusedPane = i; open(id) }}
+          onHeadings={(h) => (headingsByPane[p.id] = h)}
+          onPresence={(names) => (presenceByPane[p.id] = names)}
+          bind:jumpTo={jumpers[p.id]}
+        />
+      {/each}
     </section>
   </div>
   {#if switcher}
@@ -475,9 +595,7 @@
     padding: 0.4rem;
     border-bottom: 1px solid var(--border);
   }
-  .side-tabs button,
-  .note-head button,
-  .backlinks button {
+  .side-tabs button {
     font: inherit;
     font-size: 0.85rem;
     border: 0;
@@ -512,44 +630,15 @@
   .offline .dot {
     background: #f59e0b;
   }
+  /* Panes sit side by side; each one manages its own tabs, editor and backlinks. */
   .main {
-    display: grid;
-    grid-template-rows: auto auto 1fr auto;
+    display: flex;
+    min-width: 0;
     min-height: 0;
   }
-  .tabs {
-    display: flex;
-    overflow-x: auto;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-  }
-  .tab {
-    font: inherit;
-    font-size: 0.85rem;
-    border: 0;
-    border-right: 1px solid var(--border);
-    background: none;
-    color: var(--muted);
-    padding: 0.4rem 0.8rem;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .tab.active {
-    color: var(--fg);
-    background: var(--bg);
-  }
-  .tab .x {
-    margin-left: 0.5rem;
-    opacity: 0.6;
-  }
-  .note-head {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.2rem 1rem;
-    font-size: 0.8rem;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
+  /* One-pixel divider between neighbouring panes (the class lives in Pane.svelte). */
+  .main > :global(.pane + .pane) {
+    border-left: 1px solid var(--border);
   }
   .link {
     font: inherit;
@@ -558,24 +647,6 @@
     color: var(--accent);
     cursor: pointer;
     padding: 0;
-  }
-  .presence {
-    color: var(--accent);
-  }
-  .editor-wrap {
-    min-height: 0;
-  }
-  .backlinks {
-    border-top: 1px solid var(--border);
-    padding: 0.4rem 1rem;
-    font-size: 0.85rem;
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-  .backlinks button {
-    color: var(--accent);
   }
   .bookmarks-pane {
     display: flex;
@@ -600,10 +671,5 @@
   .pad {
     padding: 0.6rem;
     font-size: 0.85rem;
-  }
-  .placeholder {
-    display: grid;
-    place-items: center;
-    color: var(--muted);
   }
 </style>

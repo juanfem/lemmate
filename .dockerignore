@@ -1,0 +1,23 @@
+# Build output and local state — never belongs in the image or the build context.
+target/
+ui/node_modules/
+ui/dist/
+node_modules/
+crates/desktop/gen/
+
+# .cargo/config.toml redirects the cargo target dir to a machine-local path (gitignored).
+# The Dockerfile must not see it.
+.cargo/
+
+.git/
+.github/
+data/
+*.db
+*.db-wal
+*.db-shm
+**/.notes/
+
+# Docs and fixtures: not needed to build the server, the CLI, or the web client.
+corpus/
+docs/
+*.md

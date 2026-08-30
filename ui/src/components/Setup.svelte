@@ -1,8 +1,9 @@
 <script lang="ts">
   // First-run setup for the desktop app (SPEC §14): the relay runs in setup mode until the
   // shell has a vault directory, a server, and (if the server has accounts) a session.
+  import { untrack } from 'svelte'
   let { status, onDone }: { status: { config_path: string; suggested_vault_dir: string }; onDone: () => void } = $props()
-  let vaultDir = $state(status.suggested_vault_dir)
+  let vaultDir = $state(untrack(() => status.suggested_vault_dir))
   let serverUrl = $state('')
   let vaultId = $state('')
   let email = $state('')
@@ -29,6 +30,8 @@
         }),
       })
       if (!r.ok) throw new Error(`${r.status}`)
+      // The desktop shell now writes the config, signs in, starts the relay and navigates
+      // this window; if that takes long, keep showing the busy state.
       onDone()
     } catch (err) {
       error = `Setup failed (${String(err)}). Check the values and try again.`

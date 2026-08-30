@@ -36,15 +36,18 @@ struct Config {
     #[arg(long, env = "NOTES_WEB_DIR")]
     web_dir: Option<PathBuf>,
     /// Disable accounts entirely (development only): every request acts as a local owner.
-    #[arg(long, env = "NOTES_NO_AUTH")]
+    #[arg(long, env = "NOTES_NO_AUTH", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     no_auth: bool,
     /// Let anyone register. Without it, only the first account (the admin) can register and
     /// the admin creates further accounts.
-    #[arg(long, env = "NOTES_ALLOW_REGISTRATION")]
+    #[arg(long, env = "NOTES_ALLOW_REGISTRATION", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     allow_registration: bool,
     /// Mark session cookies Secure (set when the server is reached over HTTPS).
-    #[arg(long, env = "NOTES_SECURE_COOKIES")]
+    #[arg(long, env = "NOTES_SECURE_COOKIES", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     secure_cookies: bool,
+    /// pandoc binary for exports (default: `pandoc` on PATH).
+    #[arg(long, env = "NOTES_PANDOC")]
+    pandoc: Option<PathBuf>,
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "NOTES_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
@@ -66,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),
         web_dir: cfg.web_dir.clone(),
+        pandoc: cfg.pandoc.clone(),
         auth: if cfg.no_auth {
             AuthMode::Disabled
         } else {

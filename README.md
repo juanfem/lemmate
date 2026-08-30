@@ -14,10 +14,9 @@ specification; this README covers the repository and the current milestone.
 | `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `notes-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
-M0 and M1 are complete except split panes and a first-run setup screen for the desktop app
-(today it reads `~/.config/notes/desktop.toml`). M2: accounts and vault roles, per-note shares
-and public read-only links, version history, and presence are done; see `docs/deploy.md` for
-Docker and fly.io.
+M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
+`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST writes; MCP server and
+remote CLI in progress; mobile and Quarto rendering remain.
 
 Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
 `NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for
@@ -38,6 +37,20 @@ notes-server --data-dir ./data --web-dir ui/dist            # accounts on
 notes login --server https://notes.example.org --email you@example.org --register   # first account
 notes sync  --vault ~/vault --server https://notes.example.org   # uses the saved token
 ```
+
+## Export
+
+`POST /api/v1/vaults/{v}/notes/{id}/export {"format": "html"|"docx"|"pdf"|"revealjs"|"beamer"|"markdown"}`
+renders a note through **pandoc** (`--pandoc PATH` / `NOTES_PANDOC`, default: on `PATH`; 501 when
+absent) with the SPEC §5 reader extensions, wikilinks included; a vault `export/` folder may
+provide `defaults.yaml`, `references.bib`, `style.csl`. PDF/Beamer need a LaTeX engine next to
+pandoc.
+
+## Desktop
+
+`notes-desktop` reads `~/.config/notes/desktop.toml`; without one it opens a setup screen
+(vault folder, server, optional account) and writes it. Sessions come from `notes login` or the
+setup screen. The window is the web client served by the embedded relay, so it works offline.
 
 ## `notes sync`
 

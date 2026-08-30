@@ -22,6 +22,7 @@ pub mod ids;
 pub mod import;
 pub mod local;
 pub mod markdown;
+pub mod pandoc;
 pub mod projection;
 pub mod store;
 pub mod sync;

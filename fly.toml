@@ -1,0 +1,63 @@
+# fly.io deployment for notes-server (SPEC §14: single binary + persistent volume for
+# notes.db and attachments/). Copy this file, replace the two placeholders below, then:
+#
+#   fly launch --no-deploy          # claims the app name, does not overwrite this file
+#   fly volumes create notes_data --size 3 --region <your region>
+#   fly deploy
+#
+# See docs/deploy.md for the full walkthrough.
+
+# Replace with your own app name — must be globally unique across fly.io.
+app = "notes-yourname"
+
+# Replace with the region nearest you (`fly platform regions` lists them; e.g. "cdg", "iad",
+# "ams"). The volume below must live in this same region — a machine can only mount a volume
+# in its own region.
+primary_region = "<region>"
+
+[build]
+  # Build the multi-stage image in this repo rather than pulling a published one, so the web
+  # client and the binaries always come from the same commit.
+  dockerfile = "Dockerfile"
+
+[env]
+  # The server sits behind fly's TLS terminator, so sessions are always delivered over HTTPS
+  # and the session cookie must carry the Secure attribute (--secure-cookies).
+  NOTES_SECURE_COOKIES = "true"
+  # tracing-subscriber EnvFilter. Use "info,notes_server=debug" while debugging.
+  RUST_LOG = "info"
+
+[http_service]
+  # Matches EXPOSE 8080 and the --bind 0.0.0.0:8080 in the image's CMD.
+  internal_port = 8080
+  # Redirect plain http:// to https://; also what makes NOTES_SECURE_COOKIES correct.
+  force_https = true
+  # The sync relay is a long-lived WebSocket and clients reconnect with backoff, so the machine
+  # must not be suspended between requests — an idle relay is still a relay clients depend on.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  # Exactly one machine: notes.db is a single SQLite file on one volume and cannot be shared
+  # between machines. Scale by making the machine bigger, never by adding machines.
+  min_machines_running = 1
+
+[[mounts]]
+  # Everything stateful: /data/notes.db (+ -wal, -shm) and /data/attachments/.
+  # Must be created first: fly volumes create notes_data --size 3
+  source = "notes_data"
+  destination = "/data"
+
+[checks]
+  [checks.health]
+    # Unauthenticated liveness endpoint (crates/server/src/app.rs: GET /healthz -> "ok").
+    type = "http"
+    port = 8080
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+
+[[vm]]
+  # 512 MB is enough for a small vault; raise memory_mb if indexing large vaults gets OOM-killed.
+  size = "shared-cpu-1x"
+  memory = "512mb"
