@@ -11,6 +11,7 @@
   import TagsPane from './components/TagsPane.svelte'
   import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
+  import HistoryPane from './components/HistoryPane.svelte'
   import Modal from './components/Modal.svelte'
 
   // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
@@ -80,7 +81,7 @@
   // ---- tabs
   let tabs: string[] = $state([])
   let active = $state<string | null>(null)
-  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' = $state('files')
+  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' | 'history' = $state('files')
   let switcher = $state(false)
   let palette = $state(false)
   let backlinks: NoteSummary[] = $state([])
@@ -136,6 +137,7 @@
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
     { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
+    { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
@@ -279,6 +281,7 @@
         <button class:on={sidebar === 'tags'} onclick={() => (sidebar = 'tags')} title="Tags">Tags</button>
         <button class:on={sidebar === 'outline'} onclick={() => (sidebar = 'outline')} title="Outline">Outline</button>
         <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
+        <button class:on={sidebar === 'history'} onclick={() => (sidebar = 'history')} title="Version history">⏱</button>
         <span class="spacer"></span>
         <button title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
         <button title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
@@ -291,6 +294,8 @@
         <TagsPane vault={session.id} version={tagsVersion} onOpen={open} />
       {:else if sidebar === 'outline'}
         <OutlinePane items={headings} onJump={(pos) => jumpTo?.(pos)} />
+      {:else if sidebar === 'history'}
+        <HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />
       {:else}
         <nav class="bookmarks-pane">
           {#each session.bookmarks as b, i (b.kind + b.target + i)}

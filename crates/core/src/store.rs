@@ -12,7 +12,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::NoteIndex;
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS doc_snapshots (
     seq        INTEGER NOT NULL,
     bytes      BLOB    NOT NULL,
     created_ms INTEGER NOT NULL,
+    label      TEXT,               -- set for user-saved versions, which are kept forever (§9)
+    author_id  TEXT,
     PRIMARY KEY (doc_id, seq)
 );
 CREATE TABLE IF NOT EXISTS attachments (
@@ -127,6 +129,14 @@ pub struct Maintenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionRow {
+    pub seq: i64,
+    pub created_ms: i64,
+    pub label: Option<String>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRow {
     pub hash: String,
     pub size: u64,
@@ -214,6 +224,11 @@ impl Store {
         if version == 3 {
             conn.execute_batch("ALTER TABLE attachments ADD COLUMN orphaned_ms INTEGER;")?;
         }
+        if (4..=5).contains(&version) {
+            conn.execute_batch(
+                "ALTER TABLE doc_snapshots ADD COLUMN label TEXT; ALTER TABLE doc_snapshots ADD COLUMN author_id TEXT;",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -286,6 +301,18 @@ impl Store {
 
     /// Persist a doc's full state (`encode_full()`) as a snapshot at the current head.
     pub fn snapshot_at(&mut self, doc_id: DocId, full_state: &[u8], now_ms: i64) -> Result<i64> {
+        self.snapshot_labeled_at(doc_id, full_state, now_ms, None, None)
+    }
+
+    /// A snapshot with a user-visible label (a *version*, SPEC §9): never pruned.
+    pub fn snapshot_labeled_at(
+        &mut self,
+        doc_id: DocId,
+        full_state: &[u8],
+        now_ms: i64,
+        label: Option<&str>,
+        author: Option<&str>,
+    ) -> Result<i64> {
         let id = doc_id.to_string();
         let head: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) FROM (SELECT seq FROM doc_updates WHERE doc_id = ?1 UNION ALL SELECT seq FROM doc_snapshots WHERE doc_id = ?1)",
@@ -293,10 +320,46 @@ impl Store {
             |r| r.get(0),
         )?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO doc_snapshots (doc_id, seq, bytes, created_ms) VALUES (?1, ?2, ?3, ?4)",
-            params![id, head, full_state, now_ms],
+            "INSERT OR REPLACE INTO doc_snapshots (doc_id, seq, bytes, created_ms, label, author_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, head, full_state, now_ms, label, author],
         )?;
         Ok(head)
+    }
+
+    /// Addressable points in a doc's history: every snapshot, newest first.
+    pub fn versions(&self, doc_id: DocId) -> Result<Vec<VersionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, created_ms, label, author_id FROM doc_snapshots WHERE doc_id = ?1 ORDER BY seq DESC",
+        )?;
+        let rows = stmt.query_map(params![doc_id.to_string()], |r| {
+            Ok(VersionRow { seq: r.get(0)?, created_ms: r.get(1)?, label: r.get(2)?, author: r.get(3)? })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// The doc as it was at sequence `seq`: newest snapshot at or before it, plus the updates
+    /// up to it that are still in the journal.
+    pub fn load_doc_at(&self, doc_id: DocId, seq: i64) -> Result<NoteDoc> {
+        let id = doc_id.to_string();
+        let snapshot: Option<(i64, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT seq, bytes FROM doc_snapshots WHERE doc_id = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
+                params![id, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (from_seq, mut updates) = match snapshot {
+            Some((s, bytes)) => (s, vec![bytes]),
+            None => (0, Vec::new()),
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT bytes FROM doc_updates WHERE doc_id = ?1 AND seq > ?2 AND seq <= ?3 ORDER BY seq",
+        )?;
+        for row in stmt.query_map(params![id, from_seq, seq], |r| r.get::<_, Vec<u8>>(0))? {
+            updates.push(row?);
+        }
+        NoteDoc::from_updates(updates.iter().map(Vec::as_slice))
     }
 
     /// Apply the snapshot/pruning policy (SPEC §6.1, §9) to one doc:
@@ -348,9 +411,10 @@ impl Store {
             out.pruned_updates = self
                 .conn
                 .execute("DELETE FROM doc_updates WHERE doc_id = ?1 AND seq <= ?2", params![id, cut])?;
-            out.pruned_snapshots = self
-                .conn
-                .execute("DELETE FROM doc_snapshots WHERE doc_id = ?1 AND seq < ?2", params![id, cut])?;
+            out.pruned_snapshots = self.conn.execute(
+                "DELETE FROM doc_snapshots WHERE doc_id = ?1 AND seq < ?2 AND label IS NULL",
+                params![id, cut],
+            )?;
         }
         Ok(out)
     }
@@ -946,6 +1010,36 @@ mod tests {
         push(&mut store, "a b c d e", t);
         assert_eq!(store.load_doc(id).unwrap().text(), "a b c d e");
         assert_eq!(store.doc_ids().unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn versions_and_history() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = DocId::Note(NoteId::new());
+        let doc = NoteDoc::new();
+        for (i, text) in ["one", "one two", "one two three", "one two three four"].iter().enumerate() {
+            let u = doc.set_text(text);
+            store.append_update_at(id, &u, None, i as i64 * 1000).unwrap();
+        }
+        let v = store
+            .snapshot_labeled_at(id, &doc.encode_full(), 5000, Some("before rewrite"), Some("ann"))
+            .unwrap();
+        assert_eq!(v, 4);
+        let u = doc.set_text("rewritten");
+        store.append_update_at(id, &u, None, 6000).unwrap();
+        assert_eq!(store.load_doc_at(id, 2).unwrap().text(), "one two");
+        assert_eq!(store.load_doc_at(id, 4).unwrap().text(), "one two three four");
+        assert_eq!(store.load_doc(id).unwrap().text(), "rewritten");
+        let versions = store.versions(id).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].label.as_deref(), Some("before rewrite"));
+        // Pruning far in the future keeps the labelled version but drops the raw updates.
+        let policy = RetentionPolicy { snapshot_every_updates: 1, ..Default::default() };
+        let later = 6000 + 200 * 24 * 3600 * 1000;
+        let m = store.maintain(id, &policy, later, || doc.encode_full()).unwrap();
+        assert!(m.snapshotted && m.pruned_updates == 4 && m.pruned_snapshots == 0, "{m:?}");
+        assert_eq!(store.versions(id).unwrap().len(), 2);
+        assert_eq!(store.load_doc_at(id, 4).unwrap().text(), "one two three four");
     }
 
     #[test]

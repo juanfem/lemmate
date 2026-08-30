@@ -42,6 +42,9 @@ pub enum LocalQuery {
     Backlinks(NoteId),
     Tags,
     Tagged(String),
+    Versions(NoteId),
+    VersionAt(NoteId, i64),
+    SaveVersion(NoteId, String),
     Attachment(String),
     /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
     StoreAttachment {
@@ -58,6 +61,9 @@ pub enum LocalReply {
     Backlinks(Vec<NoteRow>),
     Tags(Vec<(String, u32)>),
     Tagged(Vec<NoteRow>),
+    Versions(Vec<crate::store::VersionRow>),
+    VersionAt(Option<String>),
+    SavedVersion(crate::store::VersionRow),
     Attachment(Option<(Vec<u8>, String)>),
     Stored { path: String, hash: String },
     Error(String),
@@ -91,6 +97,8 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/notes", get(notes))
         .route("/api/v1/vaults/{vault}/notes/{id}", get(note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(versions).post(save_version))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
         .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search))
@@ -235,6 +243,62 @@ async fn backlinks(
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     match ask(&s, LocalQuery::Backlinks(id)).await? {
         LocalReply::Backlinks(rows) => Ok(axum::Json(summaries(rows))),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Serialize)]
+struct VersionOut {
+    seq: i64,
+    created_ms: i64,
+    label: Option<String>,
+    author: Option<String>,
+}
+#[derive(Serialize)]
+struct VersionBody {
+    seq: i64,
+    content: String,
+}
+#[derive(Deserialize)]
+struct SaveVersion {
+    #[serde(default)]
+    label: Option<String>,
+}
+fn version_out(v: crate::store::VersionRow) -> VersionOut {
+    VersionOut { seq: v.seq, created_ms: v.created_ms, label: v.label, author: v.author }
+}
+
+async fn versions(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+) -> Resp<Vec<VersionOut>> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::Versions(id)).await? {
+        LocalReply::Versions(v) => Ok(axum::Json(v.into_iter().map(version_out).collect())),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn save_version(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<SaveVersion>,
+) -> Resp<VersionOut> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::SaveVersion(id, body.label.unwrap_or_else(|| "saved version".into()))).await? {
+        LocalReply::SavedVersion(v) => Ok(axum::Json(version_out(v))),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn version_at(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id, seq)): Path<(String, String, i64)>,
+) -> Resp<VersionBody> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::VersionAt(id, seq)).await? {
+        LocalReply::VersionAt(Some(content)) => Ok(axum::Json(VersionBody { seq, content })),
+        LocalReply::VersionAt(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

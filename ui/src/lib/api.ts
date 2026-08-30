@@ -9,6 +9,12 @@ export interface NoteSummary {
   path: string
   title: string | null
 }
+export interface Version {
+  seq: number
+  created_ms: number
+  label: string | null
+  author: string | null
+}
 export interface SearchHit {
   note_id: string
   title: string | null
@@ -62,6 +68,9 @@ export const api = {
     const r = await fetch(`/api/v1/vaults/${vault}/members/${userId}`, { method: 'DELETE' })
     if (!r.ok) throw new ApiError(r.status, `${r.status} for members`)
   },
+  versions: (vault: string, id: string) => get<Version[]>(`/vaults/${vault}/notes/${id}/versions`),
+  versionAt: (vault: string, id: string, seq: number) => get<{ seq: number; content: string }>(`/vaults/${vault}/notes/${id}/versions/${seq}`),
+  saveVersion: (vault: string, id: string, label: string) => post<Version>(`/vaults/${vault}/notes/${id}/versions`, { label }),
   vaults: () => get<VaultInfo[]>('/vaults'),
   notes: (vault: string) => get<NoteSummary[]>(`/vaults/${vault}/notes`),
   search: (vault: string, q: string, limit = 20) =>

@@ -183,6 +183,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes", get(list_notes))
         .route("/api/v1/vaults/{vault}/notes/{id}", get(get_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
         .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search_vault))
@@ -569,6 +571,77 @@ async fn backlinks(
             .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
             .collect(),
     ))
+}
+
+#[derive(Serialize)]
+struct VersionOut {
+    seq: i64,
+    created_ms: i64,
+    label: Option<String>,
+    author: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SaveVersion {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+async fn list_versions(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+) -> Result<Json<Vec<VersionOut>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
+    let rows = state.store.lock().await.versions(DocId::Note(id)).map_err(internal)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|v| VersionOut { seq: v.seq, created_ms: v.created_ms, label: v.label, author: v.author })
+            .collect(),
+    ))
+}
+
+/// Snapshot the note now with a label (SPEC §9 "save version"); kept forever.
+async fn save_version(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<SaveVersion>,
+) -> Result<Json<VersionOut>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let room = get_room(&state, DocId::Note(id)).await.map_err(internal)?;
+    let doc = room.doc.lock().await;
+    let label = body.label.unwrap_or_else(|| "saved version".to_owned());
+    let now = now_ms();
+    let seq = state
+        .store
+        .lock()
+        .await
+        .snapshot_labeled_at(DocId::Note(id), &doc.encode_full(), now, Some(&label), Some(&user.display_name))
+        .map_err(internal)?;
+    Ok(Json(VersionOut { seq, created_ms: now, label: Some(label), author: Some(user.display_name) }))
+}
+
+#[derive(Serialize)]
+struct VersionBody {
+    seq: i64,
+    content: String,
+}
+
+async fn get_version(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id, seq)): Path<(String, String, i64)>,
+) -> Result<Json<VersionBody>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
+    let doc = state.store.lock().await.load_doc_at(DocId::Note(id), seq).map_err(internal)?;
+    Ok(Json(VersionBody { seq, content: doc.text() }))
 }
 
 #[derive(Serialize)]

@@ -1152,6 +1152,33 @@ impl Engine {
                     let path = self.store_attachment(&name, &bytes)?;
                     LocalReply::Stored { path, hash: hash_bytes(&bytes) }
                 }
+                LocalQuery::Versions(id) => LocalReply::Versions(self.store.versions(DocId::Note(id))?),
+                LocalQuery::VersionAt(id, seq) => LocalReply::VersionAt(
+                    self.notes
+                        .contains_key(&id)
+                        .then(|| self.store.load_doc_at(DocId::Note(id), seq))
+                        .transpose()?
+                        .map(|d| d.text()),
+                ),
+                LocalQuery::SaveVersion(id, label) => {
+                    let Some(doc) = self.doc_for(id) else {
+                        return Ok(LocalReply::Error("unknown note".into()));
+                    };
+                    let now = now_ms();
+                    let seq = self.store.snapshot_labeled_at(
+                        DocId::Note(id),
+                        &doc.encode_full(),
+                        now,
+                        Some(&label),
+                        None,
+                    )?;
+                    LocalReply::SavedVersion(crate::store::VersionRow {
+                        seq,
+                        created_ms: now,
+                        label: Some(label),
+                        author: None,
+                    })
+                }
                 LocalQuery::Attachment(hash) => {
                     let path =
                         self.vault.attachment_entries().into_iter().find(|(_, h)| *h == hash).map(|(p, _)| p);
