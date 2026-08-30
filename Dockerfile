@@ -46,6 +46,8 @@ RUN mkdir -p crates/core/src crates/server/src crates/cli/src crates/desktop/src
     && echo '' > crates/core/src/lib.rs \
     && echo 'fn main() {}' > crates/server/src/main.rs \
     && echo 'fn main() {}' > crates/cli/src/main.rs \
+    && echo '' > crates/cli/src/lib.rs \
+    && echo '' > crates/server/src/lib.rs \
     && echo 'fn main() {}' > crates/desktop/src/main.rs \
     && echo 'fn main() {}' > crates/desktop/build.rs \
     && cargo build --release --locked -p lemmate-server -p lemmate-cli
