@@ -8,6 +8,8 @@ import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
 
 export interface LivePreviewOptions {
+  /** Never reveal markup (read-only views have no meaningful cursor). */
+  alwaysFolded?: boolean
   /** Called when a wikilink widget is activated. */
   openLink: (target: string) => void
   /** Resolve an embed target to a URL (attachments) or undefined. */
@@ -175,13 +177,14 @@ function frontMatterSummary(body: string): string {
 }
 
 /** Does any selection range touch the lines spanned by [from, to]? */
-function revealed(state: EditorState, from: number, to: number): boolean {
+function revealedBySelection(state: EditorState, from: number, to: number): boolean {
   const a = state.doc.lineAt(from).from
   const b = state.doc.lineAt(to).to
   return state.selection.ranges.some((r) => r.from <= b && r.to >= a)
 }
 
 function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
+  const revealed = opts.alwaysFolded ? () => false : revealedBySelection
   const items: { from: number; to: number; deco: Decoration }[] = []
   const push = (from: number, to: number, deco: Decoration) => items.push({ from, to, deco })
 

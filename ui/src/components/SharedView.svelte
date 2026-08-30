@@ -22,6 +22,7 @@
       createEditor(host, doc.getText('content'), new Awareness(doc), {
         openLink: () => {},
         embedUrl: () => undefined,
+        alwaysFolded: true,
         extra: [EditorView.editable.of(false)],
       })
     } catch {
