@@ -32,7 +32,7 @@
   async function makeLink() {
     try {
       const s = await api.share(vault, noteId, { kind: 'link' })
-      newLink = s.link ? `${location.origin}/${s.link}` : ''
+      newLink = s.link ? `${location.origin}${s.link}` : ''
       reload()
     } catch (err) {
       error = String(err)
