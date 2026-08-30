@@ -1,8 +1,10 @@
 # Lemmate — working notes for Claude
 
 Lemmate is a self-hosted, open-source, multi-user markdown note app (an Obsidian replacement).
-The product name is **Lemmate**; crate, binary and path names still say `notes` (`lemmate-core`,
-`lemmate-server`, `notes` CLI, `~/.config/lemmate/`) pending a rename.
+Crates are `lemmate-core`/`lemmate-server`/`lemmate-cli`/`lemmate-desktop`, binaries `lemmate`
+and `lemmate-server`, config under `~/.config/lemmate/`, env vars `LEMMATE_*`, vault sidecar
+`.lemmate/`. The repository directory is still called `notes`. The vault-doc CRDT map key
+`"notes"` (`NOTES_FIELD`) is wire format and keeps its name.
 
 `SPEC.md` is the design authority (decisions marked **[decided]** are settled — do not
 re-litigate: CRDT is the truth and files are a projection; CodeMirror 6 live preview, not
