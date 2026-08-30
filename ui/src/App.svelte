@@ -305,6 +305,10 @@
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
     { id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) },
+    { id: 'export-html', label: 'Export note as HTML', run: () => exportActive('html') },
+    { id: 'export-docx', label: 'Export note as DOCX', run: () => exportActive('docx') },
+    { id: 'export-pdf', label: 'Export note as PDF', run: () => exportActive('pdf') },
+    { id: 'export-slides', label: 'Export note as slides (reveal.js)', run: () => exportActive('revealjs') },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
@@ -383,6 +387,27 @@
     // The note is gone: close it in every pane, pinned or not.
     for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
     closed = closed.filter((c) => c !== id)
+  }
+
+  /** Server-side pandoc export (SPEC §12); the browser saves the result as a download. */
+  async function exportActive(format: string) {
+    if (!session || !active) return
+    const id = active
+    const r = await fetch(`/api/v1/vaults/${session.id}/notes/${id}/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ format }),
+    })
+    if (r.status === 501) return void ask({ kind: 'confirm', title: 'Export needs pandoc on the server (see the deployment guide).', confirmLabel: 'OK' })
+    if (!r.ok) return void ask({ kind: 'confirm', title: `Export failed (${r.status}).`, confirmLabel: 'OK' })
+    const blob = await r.blob()
+    const name = (r.headers.get('content-disposition')?.match(/filename="([^"]+)"/u)?.[1] ?? `${displayName(session.pathOf(id) ?? 'note')}.${format}`).replace(/[/\\]/gu, '-')
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
   function onKey(e: KeyboardEvent) {
