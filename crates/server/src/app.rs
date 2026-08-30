@@ -360,49 +360,72 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> notes_core::Resu
                     store.trash_note(row.id)?;
                 }
             }
+            let attachment_paths: Vec<String> = v.attachment_entries().into_iter().map(|(p, _)| p).collect();
             for (id, path) in entries {
-                let title = store.note_by_id(id)?.and_then(|r| r.title).or_else(|| {
+                let existing = store.note_by_id(id)?;
+                let title = existing.as_ref().and_then(|r| r.title.clone()).or_else(|| {
                     std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
                 });
                 store.upsert_note(id, vault_id, &path, title.as_deref())?;
+                // Content may have arrived before the entry did (a browser creates the text
+                // first): index it now that the row exists.
+                if existing.is_none() {
+                    let text = store.load_doc(DocId::Note(id))?.text();
+                    if !text.is_empty() {
+                        index_note_text(&mut store, id, &path, &text, &attachment_paths)?;
+                    }
+                }
             }
         }
         (RoomDoc::Note(n), DocId::Note(id)) => {
-            let ix = markdown::index(&n.text())?;
-            store.index_note(id, &ix)?;
-            // Which vault-doc attachments this note references (for the API and cleanup UIs).
             if let Some(row) = store.note_by_id(id)? {
-                let entries: Vec<String> = store
+                let attachment_paths: Vec<String> = store
                     .load_vault_doc(row.vault_id)?
                     .attachment_entries()
                     .into_iter()
                     .map(|(p, _)| p)
                     .collect();
-                let mut paths: Vec<String> = Vec::new();
-                let targets = ix
-                    .wikilinks
-                    .iter()
-                    .filter(|w| w.embed)
-                    .map(|w| (w.target.clone(), true))
-                    .chain(ix.links.iter().map(|l| (l.clone(), false)));
-                for (target, wiki) in targets {
-                    if let Some(p) = notes_core::attachments::resolve_reference(
-                        &row.path,
-                        &target,
-                        wiki,
-                        |c| entries.iter().any(|e| e == c),
-                        || entries.clone(),
-                    ) && !paths.contains(&p)
-                    {
-                        paths.push(p);
-                    }
-                }
-                store.set_note_attachments(id, &paths)?;
+                index_note_text(&mut store, id, &row.path, &n.text(), &attachment_paths)?;
+            } else {
+                // No vault entry yet: keep the FTS/tags fresh; the title lands when the entry does.
+                store.index_note(id, &markdown::index(&n.text())?)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Index one note's text: tags, links, FTS, title, and which vault attachments it references.
+fn index_note_text(
+    store: &mut Store,
+    id: NoteId,
+    path: &str,
+    text: &str,
+    attachment_paths: &[String],
+) -> notes_core::Result<()> {
+    let ix = markdown::index(text)?;
+    store.index_note(id, &ix)?;
+    let mut paths: Vec<String> = Vec::new();
+    let targets = ix
+        .wikilinks
+        .iter()
+        .filter(|w| w.embed)
+        .map(|w| (w.target.clone(), true))
+        .chain(ix.links.iter().map(|l| (l.clone(), false)));
+    for (target, wiki) in targets {
+        if let Some(p) = notes_core::attachments::resolve_reference(
+            path,
+            &target,
+            wiki,
+            |c| attachment_paths.iter().any(|e| e == c),
+            || attachment_paths.to_vec(),
+        ) && !paths.contains(&p)
+        {
+            paths.push(p);
+        }
+    }
+    store.set_note_attachments(id, &paths)
 }
 
 // ---- REST -------------------------------------------------------------------------------------

@@ -15,11 +15,12 @@ export interface LivePreviewOptions {
 }
 
 class MathWidget extends WidgetType {
-  constructor(
-    readonly tex: string,
-    readonly display: boolean,
-  ) {
+  readonly tex: string
+  readonly display: boolean
+  constructor(tex: string, display: boolean) {
     super()
+    this.tex = tex
+    this.display = display
   }
   eq(other: MathWidget) {
     return other.tex === this.tex && other.display === this.display
@@ -40,12 +41,14 @@ class MathWidget extends WidgetType {
 }
 
 class LinkWidget extends WidgetType {
-  constructor(
-    readonly label: string,
-    readonly target: string,
-    readonly open: (t: string) => void,
-  ) {
+  readonly label: string
+  readonly target: string
+  readonly open: (t: string) => void
+  constructor(label: string, target: string, open: (t: string) => void) {
     super()
+    this.label = label
+    this.target = target
+    this.open = open
   }
   eq(other: LinkWidget) {
     return other.label === this.label && other.target === this.target
@@ -67,11 +70,12 @@ class LinkWidget extends WidgetType {
 }
 
 class ImageWidget extends WidgetType {
-  constructor(
-    readonly url: string,
-    readonly alt: string,
-  ) {
+  readonly url: string
+  readonly alt: string
+  constructor(url: string, alt: string) {
     super()
+    this.url = url
+    this.alt = alt
   }
   eq(other: ImageWidget) {
     return other.url === this.url
@@ -86,8 +90,10 @@ class ImageWidget extends WidgetType {
 }
 
 class CheckboxWidget extends WidgetType {
-  constructor(readonly checked: boolean) {
+  readonly checked: boolean
+  constructor(checked: boolean) {
     super()
+    this.checked = checked
   }
   eq(other: CheckboxWidget) {
     return other.checked === this.checked

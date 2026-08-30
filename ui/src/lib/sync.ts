@@ -29,8 +29,10 @@ export class SyncClient {
   status: SyncStatus = 'connecting'
   onStatus: (s: SyncStatus) => void = () => {}
   onSynced: (docId: string) => void = () => {}
+  private url: string
 
-  constructor(private url: string) {
+  constructor(url: string) {
+    this.url = url
     this.connect()
   }
 
@@ -107,6 +109,7 @@ export class SyncClient {
     e.doc.off('update', e.onUpdate)
     e.awareness.off('update', e.onAwareness)
     awarenessProtocol.removeAwarenessStates(e.awareness, [e.doc.clientID], 'close')
+    e.awareness.destroy() // stops its keep-alive timer
     this.docs.delete(docId)
   }
 

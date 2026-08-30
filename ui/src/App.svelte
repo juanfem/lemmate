@@ -9,9 +9,9 @@
   import SearchPane from './components/SearchPane.svelte'
 
   // ---- vault selection: #/v/<ULID>
-  let vaultId = $state(readHash())
+  let vaultId = $state<string | null>(readHash())
   let vaults: VaultInfo[] = $state([])
-  let session: VaultSession | null = $state(null)
+  let session = $state<VaultSession | null>(null)
 
   function readHash(): string | null {
     const m = /^#\/v\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
@@ -37,7 +37,7 @@
 
   // ---- tabs
   let tabs: string[] = $state([])
-  let active: string | null = $state(null)
+  let active = $state<string | null>(null)
   let sidebar: 'files' | 'search' = $state('files')
   let switcher = $state(false)
   let backlinks: NoteSummary[] = $state([])
