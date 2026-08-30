@@ -11,13 +11,13 @@ specification; this README covers the repository and the current milestone.
 | `notes-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
 | `notes-cli` | `crates/cli` | `notes` binary: `login`/`logout`, `sync` (with `--serve` relay), `index`, `search`, `import obsidian`, `export zip`, `doctor`. |
 | `notes-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
-| `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, daily notes + templates, paste/drop attachments. Also the markdown indexer sharing `corpus/` with `notes-core`. |
+| `notes-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `notes-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0 and M1 are complete except split panes and a first-run setup screen for the desktop app
-(today it reads `~/.config/notes/desktop.toml`). M2 in progress: accounts and vault roles are
-done; per-note shares, public links, version history UI, presence UI, and the fly.io recipe
-remain.
+(today it reads `~/.config/notes/desktop.toml`). M2: accounts and vault roles, per-note shares
+and public read-only links, version history, and presence are done; see `docs/deploy.md` for
+Docker and fly.io.
 
 Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
 `NOTES_SERVER_BIN`/`NOTES_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for

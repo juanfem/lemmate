@@ -1,6 +1,6 @@
 # Notes — Specification
 
-Status: draft v0.2 (2026-08-30) — open questions resolved
+Status: draft v0.3 (2026-08-30) — M0/M1 implemented; M2 largely implemented (see README status)
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
