@@ -9,7 +9,7 @@ specification; this README covers the repository and the current milestone.
 |---|---|---|
 | `lemmate-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
 | `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
-| `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
+| `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
 | `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
@@ -18,9 +18,11 @@ M0, M1 and M2 are complete (split panes and the desktop setup screen included); 
 `docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server and remote CLI; mobile and Quarto
 rendering remain.
 
-Verification: `cargo test --workspace` (Rust), `cd ui && npm test` (corpus + live e2e when
-`LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built binaries), and `ui/scripts/cdp.mjs` for
-headless-Chrome smoke runs against a running server.
+Verification: `cargo test --workspace --exclude lemmate-desktop` (Rust — the Tauri crate needs
+webkit2gtk and an existing `ui/dist`, so CI type-checks it instead), `cd ui && npm test` (corpus
+plus live e2e when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built binaries), and
+`ui/scripts/cdp.mjs` for headless-Chrome smoke runs against a running server. CI additionally
+compiles the whole workspace, Tauri shell included, on macOS and Windows.
 
 User guide (writing, organising, sharing, shortcuts, CLI, export, Obsidian migration):
 [`docs/guide.md`](docs/guide.md).
@@ -34,6 +36,12 @@ HttpOnly cookie by the browser. Vaults have members with roles — **owner** (ma
 **editor**, **viewer** — and a vault nobody owns yet is claimed by the first user who syncs it.
 The relay checks every frame: viewers can read, editors write. `--no-auth` turns all of this
 off for local development (the server warns loudly; never expose it that way).
+
+On a server with registration closed, `lemmate invite` mints **single-use registration invites**
+(admin only; `--list`, `--revoke`, `--expires-days`). The recipient redeems one with `lemmate
+login --invite <link-or-token>`, which implies `--register`, or by opening the link in a browser.
+`lemmate passwd` changes a password: your own, which asks for the current one and drops your
+other sessions, or — with `--email`, as an admin — someone else's, which does not.
 
 ```sh
 lemmate-server --data-dir ./data --web-dir ui/dist            # accounts on
@@ -93,8 +101,8 @@ updates older than 90 days that a snapshot makes redundant are pruned (server fl
 ## Build and test
 
 ```sh
-cargo build
-cargo test
+cargo build --workspace --exclude lemmate-desktop
+cargo test  --workspace --exclude lemmate-desktop      # desktop: `cargo check -p lemmate-desktop`
 cargo run -p lemmate-cli -- doctor
 cargo run -p lemmate-cli -- index corpus/basic.md --json
 cargo run -p lemmate-cli -- search /path/to/vault "quick fox"
@@ -117,4 +125,5 @@ as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 
 ## Layout to come
 
-`crates/mobile` (Tauri 2 shell for Android/iOS), and the CodeMirror 6 + Svelte 5 app in `ui/`.
+`crates/mobile` — the Tauri 2 shell for Android and iOS (M3). Everything else in the table above
+exists today.

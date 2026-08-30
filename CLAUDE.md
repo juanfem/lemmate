@@ -1,11 +1,11 @@
 # Lemmate — working notes for Claude
 
 Lemmate is a self-hosted, open-source, multi-user markdown note app (an Obsidian replacement).
-Crates are `lemmate-core`/`lemmate-server`/`lemmate-cli`/`lemmate-desktop`, binaries `lemmate`
-and `lemmate-server`, config under `lemmate_core::paths::config_dir()` (`~/.config/lemmate` here),
-env vars `LEMMATE_*`, vault sidecar
-`.lemmate/`. The repository directory is still called `notes`. The vault-doc CRDT map key
-`"notes"` (`NOTES_FIELD`) is wire format and keeps its name.
+Crates are `lemmate-core`/`lemmate-server`/`lemmate-cli`/`lemmate-desktop`, binaries `lemmate` and
+`lemmate-server`, env vars `LEMMATE_*`, vault sidecar `.lemmate/`, per-user config wherever
+`lemmate_core::paths::config_dir()` points (`~/.config/lemmate` on this machine). The repository
+directory is still called `notes`. The vault-doc CRDT map key `"notes"` (`NOTES_FIELD`) is wire
+format and keeps its name.
 
 `SPEC.md` is the design authority (decisions marked **[decided]** are settled — do not
 re-litigate: CRDT is the truth and files are a projection; CodeMirror 6 live preview, not
@@ -16,11 +16,11 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 
 | Path | What |
 |---|---|
-| `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials, import/export, pandoc |
+| `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials + per-platform config paths (`paths.rs`), import/export, pandoc |
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
 | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it |
-| `ui/` | Svelte 5 + CodeMirror 6 client; `src/lib/sync.ts` (frame protocol), `vault.svelte.ts`, `editor/`, `components/` |
+| `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts`, `api.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
 
 ## Commands
@@ -36,7 +36,10 @@ lemmate-server --no-auth --data-dir ./data --web-dir ui/dist   # dev server (aut
 node ui/scripts/cdp.mjs <url> <outdir> 'waitfor:…' 'click:…' 'eval:…' 'shot:name'   # headless-Chrome smoke runs
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly the checks above; keep them green before committing.
+CI (`.github/workflows/ci.yml`) runs the checks above on Linux, and three more jobs you cannot
+reproduce here: `cargo check -p lemmate-desktop` with Tauri's system deps, a workspace check plus
+the credentials tests on macOS and Windows, and a Docker image build. Keep the local ones green
+before committing; the cross-platform legs mostly catch unix-only assumptions.
 
 ## Conventions
 
@@ -73,4 +76,8 @@ CI (`.github/workflows/ci.yml`) runs exactly the checks above; keep them green b
 - Rust raw strings: `r#"…"}"#…"#` terminates early on `"#` — use `r##"…"##`.
 - Node's type stripping rejects TS parameter properties; `erasableSyntaxOnly` is on for a reason.
 - CodeMirror block widgets must come from a `StateField`, not a `ViewPlugin`.
+- `tauri-build` resolves `bundle.resources` (`../../ui/dist/`) in the build script, so *any*
+  `cargo check`/`build`/`run` touching `lemmate-desktop` fails with "resource path … doesn't
+  exist" unless `ui/dist` exists. The contents do not matter — `mkdir -p ui/dist` is enough, and
+  that is what CI does. It passes here only because `npm run build` has left the directory behind.
 - Env bool flags use `BoolishValueParser` (`1/0/yes/no` work); `LEMMATE_*` names are in `crates/server/src/main.rs`.
