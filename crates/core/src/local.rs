@@ -46,6 +46,21 @@ pub enum LocalQuery {
     VersionAt(NoteId, i64),
     SaveVersion(NoteId, String),
     Attachment(String),
+    // Writes (SPEC §13.1), performed on the projected files so the usual machinery applies.
+    CreateNote {
+        path: String,
+        content: String,
+    },
+    ReplaceNote {
+        id: NoteId,
+        content: String,
+    },
+    RenameNote {
+        id: NoteId,
+        path: String,
+    },
+    DeleteNote(NoteId),
+    Daily(String),
     /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
     StoreAttachment {
         name: String,
@@ -65,7 +80,14 @@ pub enum LocalReply {
     VersionAt(Option<String>),
     SavedVersion(crate::store::VersionRow),
     Attachment(Option<(Vec<u8>, String)>),
-    Stored { path: String, hash: String },
+    /// A note after a write: row + content. `None` → not found.
+    Written(Option<(NoteRow, String)>),
+    Conflict(String),
+    Done,
+    Stored {
+        path: String,
+        hash: String,
+    },
     Error(String),
 }
 
@@ -95,8 +117,12 @@ pub(crate) async fn serve(
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/local/setup", get(configured))
         .route("/api/v1/vaults", get(vaults))
-        .route("/api/v1/vaults/{vault}/notes", get(notes))
-        .route("/api/v1/vaults/{vault}/notes/{id}", get(note))
+        .route("/api/v1/vaults/{vault}/notes", get(notes).post(create_note))
+        .route(
+            "/api/v1/vaults/{vault}/notes/{id}",
+            get(note).put(replace_note).patch(rename_note).delete(delete_note),
+        )
+        .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at))
@@ -244,6 +270,94 @@ async fn backlinks(
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     match ask(&s, LocalQuery::Backlinks(id)).await? {
         LocalReply::Backlinks(rows) => Ok(axum::Json(summaries(rows))),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Deserialize)]
+struct NewNote {
+    path: String,
+    #[serde(default)]
+    content: String,
+}
+#[derive(Deserialize)]
+struct PutNote {
+    content: String,
+}
+#[derive(Deserialize)]
+struct PatchNote {
+    path: String,
+}
+
+fn written(
+    reply: LocalReply,
+    created: bool,
+) -> std::result::Result<(StatusCode, axum::Json<NoteBody>), StatusCode> {
+    match reply {
+        LocalReply::Written(Some((row, content))) => Ok((
+            if created { StatusCode::CREATED } else { StatusCode::OK },
+            axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }),
+        )),
+        LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
+        LocalReply::Conflict(_) => Err(StatusCode::CONFLICT),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn create_note(
+    State(s): State<Arc<LocalState>>,
+    Path(_vault): Path<String>,
+    axum::Json(body): axum::Json<NewNote>,
+) -> std::result::Result<(StatusCode, axum::Json<NoteBody>), StatusCode> {
+    written(ask(&s, LocalQuery::CreateNote { path: body.path, content: body.content }).await?, true)
+}
+
+async fn replace_note(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<PutNote>,
+) -> std::result::Result<(StatusCode, axum::Json<NoteBody>), StatusCode> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    written(ask(&s, LocalQuery::ReplaceNote { id, content: body.content }).await?, false)
+}
+
+async fn rename_note(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<PatchNote>,
+) -> std::result::Result<StatusCode, StatusCode> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::RenameNote { id, path: body.path }).await? {
+        LocalReply::Done => Ok(StatusCode::NO_CONTENT),
+        LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
+        LocalReply::Conflict(_) => Err(StatusCode::CONFLICT),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn delete_note(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, id)): Path<(String, String)>,
+) -> std::result::Result<StatusCode, StatusCode> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    match ask(&s, LocalQuery::DeleteNote(id)).await? {
+        LocalReply::Done => Ok(StatusCode::NO_CONTENT),
+        LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn daily(
+    State(s): State<Arc<LocalState>>,
+    Path((_vault, date)): Path<(String, String)>,
+) -> Resp<NoteBody> {
+    if date.len() != 10 || !date.chars().all(|c| c.is_ascii_digit() || c == '-') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    match ask(&s, LocalQuery::Daily(date)).await? {
+        LocalReply::Written(Some((row, content))) => {
+            Ok(axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }))
+        }
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

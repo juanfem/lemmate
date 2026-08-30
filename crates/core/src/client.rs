@@ -741,6 +741,79 @@ impl Engine {
         self.discover_attachments(rel, &ix)
     }
 
+    // ---- Writes through the local API (SPEC §13.1) ------------------------------------------
+    //
+    // Performed on the projected files: the same code path as an editor saving the file, so
+    // ids, uploads, indexing, and the vault entry all follow.
+
+    fn api_note(&self, id: NoteId) -> Result<LocalReply> {
+        Ok(LocalReply::Written(match (self.store.note_by_id(id)?, self.doc_for(id)) {
+            (Some(row), Some(doc)) => Some((row, doc.text())),
+            _ => None,
+        }))
+    }
+
+    fn api_path(path: &str) -> Option<String> {
+        let p = path.trim().trim_start_matches('/');
+        if p.is_empty() || p.contains("..") || p.contains('\\') {
+            return None;
+        }
+        Some(if p.ends_with(".md") || p.ends_with(".qmd") { p.to_owned() } else { format!("{p}.md") })
+    }
+
+    fn api_create(&mut self, path: &str, content: &str) -> Result<LocalReply> {
+        let Some(rel) = Self::api_path(path) else { return Ok(LocalReply::Conflict("bad path".into())) };
+        if self.by_path.contains_key(&rel) || self.proj.resolve(&rel)?.exists() {
+            return Ok(LocalReply::Conflict(rel));
+        }
+        self.proj.write(&rel, content)?;
+        self.process_path(&rel)?;
+        match self.by_path.get(&rel).copied() {
+            Some(id) => self.api_note(id),
+            None => Ok(LocalReply::Written(None)),
+        }
+    }
+
+    fn api_replace(&mut self, id: NoteId, content: &str) -> Result<LocalReply> {
+        let Some(path) = self.notes.get(&id).map(|s| s.path.clone()) else {
+            return Ok(LocalReply::Written(None));
+        };
+        let text = frontmatter::normalize(content, &id.to_string()).unwrap_or_else(|| content.to_owned());
+        self.proj.write(&path, &text)?;
+        self.local_edit(id, &path)?;
+        self.api_note(id)
+    }
+
+    fn api_rename(&mut self, id: NoteId, path: &str) -> Result<LocalReply> {
+        let Some(old) = self.notes.get(&id).map(|s| s.path.clone()) else {
+            return Ok(LocalReply::Written(None));
+        };
+        let Some(new) = Self::api_path(path) else { return Ok(LocalReply::Conflict("bad path".into())) };
+        if new == old {
+            return Ok(LocalReply::Done);
+        }
+        if self.by_path.contains_key(&new) || self.proj.resolve(&new)?.exists() {
+            return Ok(LocalReply::Conflict(new));
+        }
+        let (from, to) = (self.proj.resolve(&old)?, self.proj.resolve(&new)?);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&from, &to)?;
+        self.apply_local_rename(id, &new)?;
+        Ok(LocalReply::Done)
+    }
+
+    fn api_delete(&mut self, id: NoteId) -> Result<LocalReply> {
+        let Some(path) = self.notes.get(&id).map(|s| s.path.clone()) else {
+            return Ok(LocalReply::Written(None));
+        };
+        self.proj.remove(&path)?;
+        self.local_remove(&path)?;
+        self.finalize_removals(true)?;
+        Ok(LocalReply::Done)
+    }
+
     // ---- Attachments ------------------------------------------------------------------------
 
     /// Every local file a note references becomes an attachment: hashed, uploaded when the
@@ -1178,6 +1251,17 @@ impl Engine {
                         label: Some(label),
                         author: None,
                     })
+                }
+                LocalQuery::CreateNote { path, content } => self.api_create(&path, &content)?,
+                LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
+                LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
+                LocalQuery::DeleteNote(id) => self.api_delete(id)?,
+                LocalQuery::Daily(date) => {
+                    let path = format!("Daily/{date}.md");
+                    match self.by_path.get(&path).copied() {
+                        Some(id) => self.api_note(id)?,
+                        None => self.api_create(&path, &format!("# {date}\n\n"))?,
+                    }
                 }
                 LocalQuery::Attachment(hash) => {
                     let path =
