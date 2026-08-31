@@ -27,7 +27,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 
 ```sh
 cargo test --workspace --exclude lemmate-desktop        # Rust tests (desktop needs webkit2gtk; `cargo check -p lemmate-desktop`)
-LEMMATE_TEST_PANDOC=/path/to/pandoc cargo test -p lemmate-core pandoc::   # pandoc tests are skipped without it
+LEMMATE_TEST_PANDOC=/usr/bin/pandoc cargo test -p lemmate-core pandoc::    # skipped unless the var is set
 cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings && cargo fmt --all --check
 cd ui && npm run check && npm test                     # svelte-check + tsc; corpus + codec tests
 LEMMATE_SERVER_BIN=<target>/debug/lemmate-server LEMMATE_CLI_BIN=<target>/debug/lemmate npm test   # live e2e too
@@ -69,7 +69,12 @@ before committing; the cross-platform legs mostly catch unix-only assumptions.
 - `google-chrome-stable` is installed; there is no Chrome MCP/extension — use `ui/scripts/cdp.mjs`.
   `click:` does not focus inputs (use `eval:…focus()` before `type:`); reap stale Chrome with
   `pgrep -f "remote-debugging-por[t]"` patterns, never a `pkill -f` that can match your own shell.
-- pandoc is not installed system-wide; quarto is absent; no Android SDK.
+- pandoc 3.10.1 (`/usr/bin/pandoc`) and quarto 1.10.18 (`~/.local/bin/quarto`) are installed, so
+  export and render can be exercised here. The pandoc tests still gate on `LEMMATE_TEST_PANDOC`
+  rather than on `PATH` — set it to `/usr/bin/pandoc` and all three run.
+- The Android SDK is at `/opt/android-sdk`, but it holds only `cmdline-tools/latest`: no
+  platforms, build-tools or NDK, and `ANDROID_HOME` is unset. Bootstrapped, not yet buildable —
+  a Tauri Android target needs those installed first.
 - Registry sources live under `~/.cargo/registry/src/*/` — check crate APIs there; versions have
   moved past training data (yrs 0.27 with built-in `sync`, ulid 3 `Ulid::generate()`, ureq 3,
   axum 0.8, notify 8, similar 3, tauri 2).
