@@ -20,15 +20,17 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
 | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it |
+| `crates/mobile` | Tauri 2 Android/iOS shell: same relay, `ui/dist` compiled in with `include_dir!` and unpacked into app storage. Host-checkable (`cargo check -p lemmate-mobile`); no Android toolchain here yet — `crates/mobile/README.md` lists what it needs |
 | `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts` one vault, `workspace.svelte.ts` all of them on one socket, `api.ts`, `import.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
 
 ## Commands
 
 ```sh
-cargo test --workspace --exclude lemmate-desktop        # Rust tests (desktop needs webkit2gtk; `cargo check -p lemmate-desktop`)
+cargo test --workspace --exclude lemmate-desktop --exclude lemmate-mobile   # both shells need webkit2gtk
+cargo check -p lemmate-desktop -p lemmate-mobile && cargo test -p lemmate-mobile   # …which this machine has
 LEMMATE_TEST_PANDOC=/usr/bin/pandoc cargo test -p lemmate-core pandoc::    # skipped unless the var is set
-cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings && cargo fmt --all --check
+cargo clippy --workspace --exclude lemmate-desktop --exclude lemmate-mobile --all-targets -- -D warnings && cargo fmt --all --check
 cd ui && npm run check && npm test                     # svelte-check + tsc; corpus + codec tests
 LEMMATE_SERVER_BIN=<target>/debug/lemmate-server LEMMATE_CLI_BIN=<target>/debug/lemmate npm test   # live e2e too
 npm run build                                          # → ui/dist, served by `lemmate-server --web-dir ui/dist`

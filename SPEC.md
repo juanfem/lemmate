@@ -87,7 +87,12 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 - **`ui`** — TypeScript, framework-agnostic core around CodeMirror 6 + Yjs; app shell in
   **Svelte 5 [decided]** (small bundle, matters on mobile webviews). Identical bundle in
   desktop, mobile, and web.
-- **`desktop`, `mobile`** — Tauri 2 shells. Expose `core` to the UI via Tauri commands.
+- **`desktop`, `mobile`** — Tauri 2 shells. Both run `core`'s local relay in-process and point
+  the webview at it over loopback HTTP, rather than exposing `core` through Tauri commands
+  **[decided: built that way]** — the UI then speaks one protocol to a server, a relay and a
+  phone alike, and the bundle stays identical. Nothing crosses Tauri IPC. The mobile shell
+  additionally compiles the web assets in, because an APK's resources are not files a static
+  file server can open.
 - **`cli`** — `lemmate` binary. Talks to a server over the REST API, or to a local vault
   directly via `core` **[recommended: server-only in v1, direct-local later]**.
 

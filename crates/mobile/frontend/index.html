@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Lemmate</title>
+<!--
+  Placeholder frontend, exactly as in crates/desktop.
+
+  Tauri requires `build.frontendDist` to exist at compile time, but this shell never shows
+  it: the webview is pointed at the local relay's http://127.0.0.1:<port> URL and the relay
+  serves the real UI. On mobile those assets cannot come from `bundle.resources` the way
+  they do on the desktop — an APK's resources are not plain files a `ServeDir` can read — so
+  they are compiled into the binary and unpacked into the app's data directory on first run.
+  See `web::unpack` in src/lib.rs.
+-->
+<body>
+  <p>lemmate mobile shell — the interface is served by the local relay.</p>
+</body>

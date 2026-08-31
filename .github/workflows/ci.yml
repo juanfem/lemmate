@@ -13,8 +13,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # lemmate-core / lemmate-server / lemmate-cli. lemmate-desktop is excluded: it pulls in Tauri, which
-  # needs webkit2gtk and friends — see the `desktop` job below.
+  # lemmate-core / lemmate-server / lemmate-cli. The two Tauri shells are excluded: they pull in
+  # Tauri, which needs webkit2gtk and friends — see the `shells` job below.
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
@@ -31,15 +31,17 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude lemmate-desktop --exclude lemmate-mobile --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --exclude lemmate-desktop
+        run: cargo test --workspace --exclude lemmate-desktop --exclude lemmate-mobile
 
-  # Type-check only: building the Tauri shell would also need a bundler toolchain, and nothing
-  # here produces a desktop artifact. The system packages are Tauri 2's Linux prerequisites.
-  desktop:
-    name: Rust (desktop, check only)
+  # Type-check the two Tauri shells: building either would also need a bundler toolchain (and,
+  # for Android, an NDK and an SDK), and nothing here produces an artifact. The system packages
+  # are Tauri 2's Linux prerequisites. lemmate-mobile's own tests run here rather than in the
+  # `rust` job because this is where those packages are.
+  shells:
+    name: Rust (desktop + mobile, check only)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,14 +62,18 @@ jobs:
           key: desktop
 
       # tauri-build resolves bundle.resources ("../../ui/dist/") and fails the build script if the
-      # path is missing. ui/dist is gitignored and nothing here produces a bundle, so an empty
-      # directory is all the type-check needs; the real assets only matter to `cargo tauri build`.
+      # path is missing, and lemmate-mobile compiles the same directory in with `include_dir!`.
+      # ui/dist is gitignored and nothing here produces a bundle, so an empty directory is all
+      # the type-check needs; the real assets only matter to `cargo tauri build`.
       - name: Placeholder for the bundled web assets
         shell: bash
         run: mkdir -p ui/dist
 
       - name: cargo check
-        run: cargo check -p lemmate-desktop
+        run: cargo check -p lemmate-desktop -p lemmate-mobile
+
+      - name: cargo test (mobile)
+        run: cargo test -p lemmate-mobile
 
   # macOS and Windows never run the full suite here — no runner has a vault, a server or a
   # webview to drive — but they do have to compile, including the Tauri shell (WKWebView and

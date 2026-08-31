@@ -11,6 +11,7 @@ specification; this README covers the repository and the current milestone.
 | `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
 | `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
+| `lemmate-mobile` | `crates/mobile` | Tauri 2 shell for Android and iOS: the same relay, with the web assets compiled in and the vault inside app storage. Type-checks and tests in CI; no APK is built yet — see [crates/mobile/README.md](crates/mobile/README.md). |
 | `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
@@ -162,7 +163,9 @@ is missing) and its own `SyncStep1`; thereafter both sides exchange `Update` mes
 server persists and fans out to other subscribers of that doc. Awareness messages are relayed
 as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 
-## Layout to come
+## Still to come
 
-`crates/mobile` — the Tauri 2 shell for Android and iOS (M3). Everything else in the table above
-exists today.
+Everything in the table above exists today. What M3 still owes: an actual Android build (the
+shell compiles, but the toolchain steps in [crates/mobile/README.md](crates/mobile/README.md)
+have not been run), projecting the vault out of app storage through the Storage Access
+Framework and the Files app, the on-screen keyboard toolbar, and Quarto rendering.

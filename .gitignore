@@ -9,5 +9,8 @@
 node_modules/
 ui/dist/
 
-# Tauri build output (crates/desktop)
-/crates/desktop/gen/
+# Tauri's generated ACL schemas, rewritten by tauri-build on every compile. The rest of
+# gen/ is not ignored: `cargo tauri android init` puts a real Gradle project under
+# gen/android/ whose manifest we edit and keep.
+/crates/desktop/gen/schemas/
+/crates/mobile/gen/schemas/
