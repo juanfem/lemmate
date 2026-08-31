@@ -97,4 +97,12 @@
   .preview { border-top: 1px solid var(--border); margin-top: 0.4rem; }
   pre { white-space: pre-wrap; font-family: var(--prose); font-size: 0.85rem; padding: 0 0.6rem 0.6rem; margin: 0; max-height: 40vh; overflow: auto; }
   .muted { color: var(--muted); padding: 0.4rem; }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    li button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

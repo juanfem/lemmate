@@ -85,7 +85,7 @@
 </div>
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.3); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 10; }
+  .backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.3); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 10; overflow: auto; }
   .dialog { width: min(34rem, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 40px rgb(0 0 0 / 0.3); padding: 1rem 1.2rem; display: flex; flex-direction: column; gap: 0.6rem; }
   h2 { margin: 0; font-size: 1.05rem; }
   .row { display: flex; gap: 0.4rem; align-items: center; }
@@ -96,4 +96,11 @@
   li { display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
   .muted { color: var(--muted); font-size: 0.8rem; margin: 0; }
   .error { color: #dc2626; margin: 0; font-size: 0.85rem; }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 5vh;
+    }
+  }
 </style>

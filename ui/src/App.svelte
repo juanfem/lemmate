@@ -12,6 +12,7 @@
   import { plan, type DragPayload } from './lib/moves.ts'
   import type { ViewMode } from './lib/editor/setup.ts'
   import { clamp, dragResize } from './lib/resize.ts'
+  import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
@@ -198,6 +199,15 @@
   let switcher = $state(false)
   let palette = $state(false)
   let tagsVersion = $state(0)
+
+  // ---- narrow shell: a phone has room for the sidebar or a note, not both
+  //
+  // The sidebar becomes a drawer over the editor, the splitter goes away, and only the focused
+  // pane is drawn — the others keep their tabs and scroll positions behind it, so widening the
+  // window brings them straight back. Everything here is layout: the panes themselves, the
+  // sessions and the sockets are untouched by how many of them are on screen.
+  const narrow = media(NARROW)
+  let drawer = $state(false)
 
   // ---- sidebar width: drag the divider, double-click it to go back to the default
   const SIDE_MIN = 180
@@ -401,6 +411,8 @@
     p.active = id
     switcher = false
     palette = false
+    // On a phone the drawer is covering the note you just picked.
+    drawer = false
     headingsByPane[p.id] = []
     closed = closed.filter((c) => c !== id)
     const vault = workspace?.vaultOfNote(id)
@@ -423,7 +435,7 @@
     if (p.tabs.length === 0 && panes.length > 1) closePane(panes.indexOf(p))
   }
   function splitRight() {
-    if (solo || panes.length >= MAX_PANES) return
+    if (solo || narrow.current || panes.length >= MAX_PANES) return
     const id = focused.active
     if (!id) return
     const i = panes.indexOf(focused)
@@ -461,7 +473,7 @@
   }
   /** Open a note beside the current one, splitting if there is room and reusing a pane if not. */
   function openInNewPane(id: string) {
-    if (!solo && panes.length < MAX_PANES) {
+    if (!solo && !narrow.current && panes.length < MAX_PANES) {
       const i = panes.indexOf(focused)
       panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id, mode: focused.mode }, ...panes.slice(i + 1)]
       focusedPane = i + 1
@@ -691,6 +703,8 @@
 
   function onKey(e: KeyboardEvent) {
     if (modal) return
+    // Not preventDefault'd: Escape still reaches whatever else is listening for it.
+    if (e.key === 'Escape' && drawer) drawer = false
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
     if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
@@ -735,6 +749,8 @@
   }
 
   let activePath = $derived(session && active ? (session.pathOf(active) ?? (solo ? 'shared note' : '(deleted)')) : '')
+  /** What the narrow top bar names, where there is no tab strip wide enough to read. */
+  let activeTitle = $derived(active && !isBlank(active) && activePath ? displayName(activePath) : 'Lemmate')
   let denied = $derived(solo ? solo.denied : (workspace?.denied ?? null))
   let status = $derived(solo ? solo.status : (workspace?.status ?? 'connecting'))
   let noteCount = $derived(solo ? solo.notes.length : (workspace?.noteCount ?? 0))
@@ -766,8 +782,22 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout" style:--side="{sideWidth}px">
-    <aside>
+  <div class="layout" class:narrow={narrow.current} style:--side="{sideWidth}px">
+    <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
+         two shortcuts (new note, commands) that have no keyboard to be reached from. -->
+    <header class="topbar">
+      <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
+      <span class="here" title={activePath}>{activeTitle}</span>
+      <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
+      <button class="icon" onclick={() => (switcher = true)} aria-label="Open or create a note">＋</button>
+      <button class="icon" onclick={() => (palette = true)} aria-label="Command palette">⌘</button>
+    </header>
+    {#if narrow.current && drawer}
+      <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
+    {/if}
+    <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
+         screen reader to wander into. -->
+    <aside class:open={drawer} inert={narrow.current && !drawer}>
       <div class="side-tabs">
         <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')} title="Files">Files</button>
         <button class:on={sidebar === 'search'} onclick={() => (sidebar = 'search')} title="Search (Ctrl+Shift+F)">Search</button>
@@ -776,8 +806,8 @@
         <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
         <button class:on={sidebar === 'history'} onclick={() => (sidebar = 'history')} title="Version history">⏱</button>
         <span class="spacer"></span>
-        <button title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
-        <button title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
+        <button class="quick" title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
+        <button class="quick" title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
       </div>
       {#if solo}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
@@ -947,11 +977,15 @@
   }
   .layout {
     display: grid;
-    /* The divider draws the border between the two, so it can light up while you drag it. */
-    grid-template-columns: var(--side, 17rem) auto 1fr;
+    /* The divider draws the border between the two, so it can light up while you drag it.
+       `min(…, 60vw)` caps a width dragged wide on a big monitor and then reopened in a small
+       window: the stored preference survives, it just cannot eat the editor. */
+    grid-template-columns: min(var(--side, 17rem), 60vw) auto 1fr;
+    grid-template-areas: 'side split main';
     height: 100%;
   }
   aside {
+    grid-area: side;
     background: var(--panel);
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto auto;
@@ -960,11 +994,14 @@
   }
   /* Grab area wider than the hairline it draws, so the drag is not a pixel hunt. */
   .vsplit {
+    grid-area: split;
     width: 7px;
     margin: 0 -3px;
     cursor: col-resize;
     position: relative;
     z-index: 1;
+    /* Own the gesture: without this a drag on a touchscreen scrolls the sidebar instead. */
+    touch-action: none;
   }
   .vsplit::after {
     content: '';
@@ -1021,12 +1058,15 @@
     height: 0.5rem;
     border-radius: 50%;
     background: #22c55e;
+    flex: none;
   }
-  .offline .dot {
+  .offline .dot,
+  .dot.offline {
     background: #f59e0b;
   }
   /* Panes sit side by side; each one manages its own tabs, editor and backlinks. */
   .main {
+    grid-area: main;
     display: flex;
     min-width: 0;
     min-height: 0;
@@ -1086,5 +1126,102 @@
   .pad {
     padding: 0.6rem;
     font-size: 0.85rem;
+  }
+
+  /* ---- the narrow shell (see `NARROW` in lib/media.svelte.ts for the matching breakpoint)
+
+     The sidebar leaves the grid entirely and becomes a fixed drawer, so opening it costs a
+     transform rather than a re-layout of the editor underneath it. */
+  .topbar {
+    display: none;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.4rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar .icon {
+    font: inherit;
+    font-size: 1.05rem;
+    line-height: 1;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    padding: 0.45rem 0.6rem;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .topbar .here {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    background: rgb(0 0 0 / 0.35);
+  }
+  .layout.narrow {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: 'top' 'main';
+  }
+  .layout.narrow .topbar {
+    display: flex;
+    grid-area: top;
+  }
+  .layout.narrow .vsplit {
+    display: none;
+  }
+  .layout.narrow aside {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(21rem, 86vw);
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+  .layout.narrow aside.open {
+    transform: none;
+    /* Only once it is out: a shadow on the parked drawer bleeds along the left edge. */
+    box-shadow: 0 0 40px rgb(0 0 0 / 0.35);
+  }
+  /* The top bar already carries these two; a second copy only costs the drawer a row. */
+  .layout.narrow .side-tabs .quick {
+    display: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .layout.narrow aside {
+      transition: none;
+    }
+  }
+  /* One pane at a time. The rest keep their state; they are simply not drawn, and the accent
+     rule that says which pane has focus has nothing left to distinguish. */
+  .layout.narrow .main > :global(.pane:not(.focused)) {
+    display: none;
+  }
+  .layout.narrow .main > :global(.pane.focused) {
+    border-top-color: transparent;
+  }
+
+  /* ---- touch: no hover to reveal anything, and a finger is not a pixel */
+  @media (pointer: coarse) {
+    .side-tabs {
+      gap: 0.3rem;
+      padding: 0.5rem 0.4rem;
+    }
+    .side-tabs button {
+      padding: 0.45rem 0.7rem;
+    }
+    .bookmarks-pane button,
+    .shared button {
+      padding: 0.5rem;
+    }
   }
 </style>

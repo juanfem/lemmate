@@ -156,6 +156,7 @@
     justify-content: center;
     padding-top: 12vh;
     z-index: 10;
+    overflow: auto;
   }
   .dialog {
     width: min(34rem, 92vw);
@@ -235,5 +236,12 @@
   .error {
     color: #c33;
     font-size: 0.85rem;
+  }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 5vh;
+    }
   }
 </style>

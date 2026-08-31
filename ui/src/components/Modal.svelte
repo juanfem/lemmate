@@ -90,6 +90,7 @@
     justify-content: center;
     padding-top: 18vh;
     z-index: 20;
+    overflow: auto;
   }
   .dialog {
     width: min(32rem, 90vw);
@@ -156,5 +157,12 @@
   .actions button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 8vh;
+    }
   }
 </style>

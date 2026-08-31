@@ -1,6 +1,7 @@
 <script lang="ts">
   import { buildTree, countNotes, folderKey, type BrowserApi, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
   import Icon from './Icon.svelte'
+  import { longpress } from '../lib/longpress.ts'
 
   /** Folders only, for the top half of the split view: one row per vault root and folder,
    *  clicking a name selects it and `NoteList` below shows what is in it. */
@@ -56,6 +57,7 @@
       ondragleave={() => browser.onDragLeave(vault, sub.path)}
       ondrop={(e) => browser.onDrop(vault, sub.path, e)}
       oncontextmenu={(e) => browser.onFolderMenu(vault, sub.path, e)}
+      use:longpress
     >
       {#if sub.folders.length}
         <button
@@ -98,6 +100,7 @@
       ondragleave={() => browser.onDragLeave(t.vault.id, '')}
       ondrop={(e) => browser.onDrop(t.vault.id, '', e)}
       oncontextmenu={(e) => browser.onFolderMenu(t.vault.id, '', e)}
+      use:longpress
     >
       <button
         class="chev"
@@ -253,5 +256,29 @@
     color: var(--muted);
     padding: 1rem;
     font-size: 0.85rem;
+  }
+
+  /* ---- touch: hover reveals nothing on a finger, and a row is a target rather than a pixel.
+     Holding one opens its menu (lib/longpress.ts), so the platform must not select the text
+     or raise its own callout underneath. */
+  /* Both halves matter: some browsers report `hover: none` with a mouse attached (headless
+     Chrome does), and a desktop must not grow a permanent row of buttons because of it. */
+  @media (hover: none) and (pointer: coarse) {
+    .actions {
+      display: inline-flex;
+    }
+  }
+  @media (pointer: coarse) {
+    .row {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    .actions button {
+      font-size: 1em;
+      padding: 0.3rem 0.45rem;
+    }
   }
 </style>

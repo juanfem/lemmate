@@ -1,6 +1,7 @@
 <script lang="ts">
   import { displayName, type NoteEntry } from '../lib/vault.svelte.ts'
   import { folderOf, type BrowserApi } from '../lib/tree.ts'
+  import { longpress } from '../lib/longpress.ts'
 
   /** The bottom half of the split view: a flat list of the selected folder's notes. With
    *  subfolders included, each row carries the folder it came from so the list stays readable. */
@@ -41,6 +42,7 @@
       oncontextmenu={(e) => browser.onNoteMenu(n.id, e)}
       ondragstart={(e) => browser.onNoteDragStart(n.id, e)}
       ondragend={browser.onDragEnd}
+      use:longpress
       title={n.path}
     >
       <span class="name">{displayName(n.path)}</span>
@@ -106,5 +108,16 @@
     color: var(--muted);
     padding: 0.8rem 0.6rem;
     font-size: 0.85rem;
+  }
+
+  /* Holding a row opens its menu (lib/longpress.ts): no text selection, no platform callout. */
+  @media (pointer: coarse) {
+    .row {
+      padding-top: 0.55rem;
+      padding-bottom: 0.55rem;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
   }
 </style>

@@ -103,4 +103,12 @@
     color: #c33;
     padding: 0 0.6rem;
   }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    li button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

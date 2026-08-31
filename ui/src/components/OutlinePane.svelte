@@ -19,4 +19,12 @@
   button { font: inherit; font-size: 0.85rem; text-align: left; border: 0; background: none; color: inherit; padding: 0.2rem 0.5rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px; }
   button:hover { background: var(--hover); }
   .empty { color: var(--muted); padding: 0.5rem; font-size: 0.85rem; }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

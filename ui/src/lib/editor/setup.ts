@@ -32,7 +32,9 @@ const highlight = HighlightStyle.define([
 const theme = EditorView.theme({
   '&': { height: '100%', fontSize: '16px' },
   '.cm-scroller': { fontFamily: 'var(--prose)', lineHeight: '1.6', padding: '1rem 0' },
-  '.cm-content': { maxWidth: '46rem', margin: '0 auto', padding: '0 2rem', caretColor: 'var(--fg)' },
+  // The side padding is a comfortable margin on a monitor and half the line length on a
+  // phone, so it shrinks with the viewport instead of staying a fixed 2rem.
+  '.cm-content': { maxWidth: '46rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2rem)', caretColor: 'var(--fg)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-line': { padding: '0' },
   '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--muted)' },

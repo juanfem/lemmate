@@ -6,6 +6,7 @@
 //   type:<text>      Input.insertText
 //   key:<key>        keyDown+keyUp, e.g. Enter, Escape, ArrowDown, Ctrl+o
 //   wait:<ms>        sleep
+//   viewport:<w>x<h>[:desktop]  resize; a phone by default (touch on, coarse pointer, no hover)
 //   waitfor:<js>     poll expression every 100ms until truthy (10s timeout)
 // Console messages / page exceptions are echoed to stderr. Exit 1 on failure.
 import { spawn } from 'node:child_process';
@@ -96,6 +97,16 @@ async function runStep(cdp, step, outdir) {
     case 'wait':
       await sleep(Number(arg) || 0);
       return;
+    case 'viewport': {
+      const m = /^(\d+)x(\d+)(?::(\w+))?$/.exec(arg) ?? die(`bad viewport (expected WxH): ${arg}`);
+      const mobile = m[3] !== 'desktop';
+      await cdp.send('Emulation.setDeviceMetricsOverride',
+        { width: Number(m[1]), height: Number(m[2]), deviceScaleFactor: 1, mobile });
+      // What makes `(pointer: coarse)` and `(hover: none)` match, so the touch rules apply.
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: mobile, maxTouchPoints: 5 });
+      await cdp.send('Emulation.setEmitTouchEventsForMouse', { enabled: mobile, configuration: 'mobile' });
+      return;
+    }
     case 'waitfor': {
       for (let t = 0; t < 10000; t += 100) {
         if (await evaluate(cdp, `!!(${arg})`)) return;

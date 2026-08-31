@@ -48,4 +48,12 @@
   li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
   button { font: inherit; font-size: 0.8rem; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 6px; padding: 0.2rem 0.6rem; cursor: pointer; }
   .muted { color: var(--muted); }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

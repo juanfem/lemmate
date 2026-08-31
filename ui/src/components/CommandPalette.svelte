@@ -44,11 +44,26 @@
 </div>
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.3); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 10; }
+  .backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.3); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 10; overflow: auto; }
   .dialog { width: min(36rem, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 40px rgb(0 0 0 / 0.3); overflow: hidden; }
   input { width: 100%; font: inherit; font-size: 1.05rem; padding: 0.7rem 1rem; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: inherit; outline: none; }
   ul { list-style: none; margin: 0; padding: 0.3rem; max-height: 50vh; overflow: auto; }
   li button { width: 100%; display: flex; justify-content: space-between; align-items: center; border: 0; background: none; color: inherit; font: inherit; padding: 0.4rem 0.7rem; border-radius: 6px; text-align: left; cursor: pointer; }
   li.selected button, li button:hover { background: var(--accent-bg); }
   kbd { color: var(--muted); }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 5vh;
+    }
+  }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    li button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

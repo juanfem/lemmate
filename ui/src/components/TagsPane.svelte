@@ -44,4 +44,12 @@
   li button:hover { background: var(--hover); }
   .path { color: var(--muted); font-size: 0.8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { color: var(--muted); padding: 0.5rem; font-size: 0.85rem; }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    li button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+  }
 </style>

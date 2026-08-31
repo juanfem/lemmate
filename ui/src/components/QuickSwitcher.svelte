@@ -117,6 +117,7 @@
     justify-content: center;
     padding-top: 12vh;
     z-index: 10;
+    overflow: auto;
   }
   .dialog {
     width: min(40rem, 90vw);
@@ -175,5 +176,20 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 5vh;
+    }
+  }
+
+  /* Touch: a list row is a target, not a line of text. */
+  @media (pointer: coarse) {
+    li button {
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
   }
 </style>

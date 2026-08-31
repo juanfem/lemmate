@@ -95,6 +95,27 @@ bar is always a link back to what you are reading.
 
 The local relay serves exactly one vault, so in the desktop app the tree has a single root.
 
+### (e) On a phone or a narrow window
+
+Below about 720px the shell folds down to one column. A bar across the top carries the sidebar
+handle (**☰**), the name of the note you are on, the connection dot, and the two things you
+would otherwise reach for with a keyboard: **＋** to open or create a note and **⌘** for the
+command palette. The sidebar becomes a drawer over the editor — it slides in from the left and
+closes again the moment you open a note, and tapping the dimmed editor or pressing Escape
+dismisses it.
+
+Only the focused pane is drawn. Split panes are not lost when the window narrows: they keep
+their tabs and scroll positions, and they come back as soon as there is room for them again.
+
+Touch has no right-click, so **press and hold** a note or folder for half a second to get the
+menu you would otherwise right-click for — rename, move, share, copy path, trash. Holding is
+also how you move things: dragging notes between folders is a mouse gesture the browser does
+not offer on touch, so use *Rename / move…* instead.
+
+The note header measures the **pane**, not the window, so it adapts in a split on a big screen
+too: as a pane narrows, share, rename and delete fold into a **⋯** menu, and narrower still the
+path takes a line of its own. The view-mode switch and the bookmark star never move.
+
 ---
 
 ## 2. Writing

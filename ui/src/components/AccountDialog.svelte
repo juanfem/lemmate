@@ -167,4 +167,11 @@
   .muted { color: var(--muted); font-size: 0.8rem; margin: 0; }
   .error { color: #dc2626; margin: 0; font-size: 0.85rem; }
   .ok { color: #16a34a; margin: 0; font-size: 0.85rem; }
+
+  /* A phone has no room to spare above an overlay, and a long one must be able to scroll. */
+  @media (max-width: 720px) {
+    .backdrop {
+      padding-top: 4vh;
+    }
+  }
 </style>

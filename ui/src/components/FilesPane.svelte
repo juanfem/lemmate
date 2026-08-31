@@ -484,6 +484,8 @@
     background: none;
     position: relative;
     z-index: 1;
+    /* Own the gesture: without this a drag on a touchscreen scrolls the folder list instead. */
+    touch-action: none;
   }
   .hsplit::after {
     content: '';
@@ -518,5 +520,23 @@
   .list-head .n {
     color: var(--muted);
     font-size: 0.72rem;
+  }
+
+  /* A folder height dragged tall on a monitor would fill a phone on its own, leaving no room
+     for the notes underneath; the drag itself still clamps against the live pane height. */
+  @media (max-width: 720px) {
+    .folders-wrap {
+      max-height: 45dvh;
+    }
+  }
+  @media (pointer: coarse) {
+    .toolbar {
+      gap: 0.25rem;
+      padding: 0.4rem;
+    }
+    .toolbar button,
+    .list-head button {
+      padding: 0.45rem;
+    }
   }
 </style>

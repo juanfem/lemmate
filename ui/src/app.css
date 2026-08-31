@@ -34,10 +34,19 @@ body,
   height: 100%;
   margin: 0;
 }
+/* A phone's browser chrome grows and shrinks as you scroll; `dvh` follows it, `vh` and `%`
+   do not, and the difference is the status footer sliding under the address bar. */
+html {
+  height: 100dvh;
+}
 body {
   font-family: var(--ui);
   background: var(--bg);
   color: var(--fg);
+  /* The panes scroll; the app itself never does, so nothing should rubber-band behind them. */
+  overscroll-behavior-y: none;
+  /* Turning the device sideways must not re-flow the UI font. */
+  -webkit-text-size-adjust: 100%;
 }
 kbd {
   font-family: var(--mono);

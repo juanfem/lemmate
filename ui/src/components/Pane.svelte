@@ -26,6 +26,7 @@
   import Editor from './Editor.svelte'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
   import Icon from './Icon.svelte'
+  import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
   import type { OutlineItem } from './OutlinePane.svelte'
 
   let {
@@ -86,6 +87,19 @@
   // Pinned tabs sort first; the rest keep the order they were opened in.
   let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
 
+  // In a narrow pane three word-buttons push the header onto a third row. Share, rename and
+  // delete are the rare ones, so they fold into `⋯` while the two you reach for as you read —
+  // the mode switch and the bookmark — stay put. Which of the two sets is shown is decided by
+  // the container query below, not here: only the pane's own width can answer it, and both
+  // sets are cheap enough to render and let CSS pick.
+  let menu: MenuState | null = $state(null)
+  let moreItems = $derived([
+    ...(session?.noteOnly ? [] : [{ label: 'Share…', run: onShare }]),
+    { label: 'Rename / move…', run: onRename },
+    { label: '', separator: true },
+    { label: 'Move to trash', danger: true, run: onDelete },
+  ])
+
   $effect(() => {
     const id = pane.active
     const s = session
@@ -143,9 +157,12 @@
           {/each}
         </span>
         <button onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
-        {#if !session.noteOnly}<button onclick={onShare} title="Share">Share</button>{/if}
-        <button onclick={onRename} title="Rename / move">Rename</button>
-        <button onclick={onDelete} title="Move to trash">Delete</button>
+        <span class="wide-actions">
+          {#if !session.noteOnly}<button onclick={onShare} title="Share">Share</button>{/if}
+          <button onclick={onRename} title="Rename / move">Rename</button>
+          <button onclick={onDelete} title="Move to trash">Delete</button>
+        </span>
+        <button class="more" onclick={(e) => (menu = menuAt(e, moreItems))} title="More" aria-label="More actions">⋯</button>
       </div>
       <div class="editor-wrap">
         <Editor
@@ -174,6 +191,10 @@
   {/if}
 </section>
 
+{#if menu}
+  <ContextMenu {menu} onClose={() => (menu = null)} />
+{/if}
+
 <style>
   .pane {
     display: grid;
@@ -182,6 +203,12 @@
     min-height: 0;
     flex: 1 1 0;
     border-top: 2px solid transparent;
+    /* The header has to fit *this pane*, not the window: two panes side by side on a wide
+       monitor are each narrower than a phone, so the window is the wrong thing to ask.
+       `flex: 1 1 0` with `min-width: 0` gives the width from the flex line rather than from
+       the contents, which is what inline-size containment requires. */
+    container-type: inline-size;
+    container-name: pane;
   }
   .pane.focused {
     border-top-color: var(--accent);
@@ -250,6 +277,15 @@
     font-size: 0.8rem;
     color: var(--muted);
     border-bottom: 1px solid var(--border);
+    /* A pane is as narrow as a third of the window; when the controls stop fitting they take
+       a second row instead of being squeezed until their labels clip. */
+    flex-wrap: wrap;
+  }
+  .note-head .path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .note-head button,
   .backlinks button {
@@ -268,6 +304,8 @@
   /* One segmented control, so the three modes read as a choice rather than three buttons. */
   .modes {
     display: inline-flex;
+    /* Never shrink: a clipped “Reading” is worse than a wrapped row. */
+    flex: none;
     border: 1px solid var(--border);
     border-radius: 5px;
     overflow: hidden;
@@ -307,5 +345,68 @@
     display: grid;
     place-items: center;
     color: var(--muted);
+    padding: 1rem;
+    text-align: center;
+  }
+
+  /* `contents` so the three stay direct flex children of the header — the wrapper exists only
+     to give the container query one thing to switch off. */
+  .wide-actions {
+    display: contents;
+  }
+  .more {
+    display: none;
+  }
+
+  /* ---- a narrow pane, in two steps.
+
+     First the rare actions fold away: below roughly this width the full set stops fitting
+     beside a path you can still read, and folding keeps the header on one row. */
+  @container pane (max-width: 560px) {
+    .wide-actions {
+      display: none;
+    }
+    .more {
+      display: block;
+    }
+    .note-head {
+      padding: 0.25rem 0.6rem;
+    }
+    .backlinks {
+      padding: 0.4rem 0.6rem;
+    }
+  }
+
+  /* Then, on a pane no wider than a phone, the row splits in two — the title is the main thing
+     telling you where you are, and it should not be sharing its line with a segmented control.
+     The spacer already sits exactly where the break belongs, so it becomes the break. */
+  @container pane (max-width: 420px) {
+    .spacer {
+      flex-basis: 100%;
+      height: 0;
+    }
+  }
+
+  /* ---- touch: a finger needs somewhere to land */
+  @media (pointer: coarse) {
+    .tabs {
+      /* Flicking the strip must not drag the note behind it. */
+      overscroll-behavior-x: contain;
+    }
+    .tab {
+      padding: 0.6rem 0.9rem;
+    }
+    .tab .x {
+      padding: 0 0.3rem;
+    }
+    .newtab {
+      padding: 0.6rem 0.9rem;
+    }
+    .note-head button {
+      padding: 0.4rem 0.6rem;
+    }
+    .modes button {
+      padding: 0.35rem 0.6rem;
+    }
   }
 </style>
