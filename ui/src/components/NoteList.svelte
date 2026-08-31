@@ -1,6 +1,6 @@
 <script lang="ts">
   import { displayName, type NoteEntry } from '../lib/vault.svelte.ts'
-  import { folderOf } from '../lib/tree.ts'
+  import { folderOf, type BrowserApi } from '../lib/tree.ts'
 
   /** The bottom half of the split view: a flat list of the selected folder's notes. With
    *  subfolders included, each row carries the folder it came from so the list stays readable. */
@@ -10,7 +10,7 @@
     activeId,
     showFolders = false,
     empty = 'No notes here.',
-    onOpen,
+    browser,
   }: {
     notes: NoteEntry[]
     /** Selected folder path, stripped from the sub-folder hint on each row. */
@@ -18,7 +18,7 @@
     activeId: string | null
     showFolders?: boolean
     empty?: string
-    onOpen: (id: string) => void
+    browser: BrowserApi
   } = $props()
 
   function hint(path: string): string {
@@ -31,7 +31,18 @@
 
 <nav class="notes">
   {#each notes as n (n.id)}
-    <button class="row" class:active={n.id === activeId} data-note={n.id} onclick={() => onOpen(n.id)} title={n.path}>
+    <button
+      class="row"
+      class:active={n.id === activeId}
+      class:selected={browser.selected.has(n.id)}
+      data-note={n.id}
+      draggable="true"
+      onclick={(e) => browser.onNoteClick(n.id, e)}
+      oncontextmenu={(e) => browser.onNoteMenu(n.id, e)}
+      ondragstart={(e) => browser.onNoteDragStart(n.id, e)}
+      ondragend={browser.onDragEnd}
+      title={n.path}
+    >
       <span class="name">{displayName(n.path)}</span>
       {#if showFolders && hint(n.path)}<span class="hint">{hint(n.path)}</span>{/if}
     </button>
@@ -65,9 +76,15 @@
   .row:hover {
     background: var(--hover);
   }
+  .row.selected {
+    background: var(--accent-bg);
+  }
   .row.active {
     background: var(--accent-bg);
     color: var(--accent);
+  }
+  .row.active.selected {
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   .name {
     overflow: hidden;

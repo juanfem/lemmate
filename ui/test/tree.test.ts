@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ancestors, buildTree, countNotes, findFolder, folderOf, folderPaths, notesIn } from '../src/lib/tree.ts'
+import { ancestors, basename, buildTree, countNotes, findFolder, folderOf, folderPaths, notesIn, rangeBetween, visibleNotes } from '../src/lib/tree.ts'
 
 const notes = [
   { id: '1', path: 'inbox.md' },
@@ -67,4 +67,31 @@ test('a folder that only holds folders still shows up', () => {
   assert.deepEqual(folderPaths(root), ['a', 'a/b'])
   assert.deepEqual(notesIn(root, 'a', false), [])
   assert.equal(notesIn(root, 'a', true).length, 1)
+})
+
+test('basename', () => {
+  assert.equal(basename('a/b/c.md'), 'c.md')
+  assert.equal(basename('c.md'), 'c.md')
+  assert.equal(basename(''), '')
+})
+
+test('visibleNotes draws sub-folders before a folder\'s own notes, and skips folded ones', () => {
+  const vaults = [
+    { id: 'v1', label: 'One', notes },
+    { id: 'v2', label: 'Two', notes: [{ id: '9', path: 'other.md' }] },
+  ]
+  assert.deepEqual(visibleNotes(vaults, {}), ['4', '3', '2', '5', '1', '9'])
+  // Folding Daily hides its notes but not the folders after it.
+  assert.deepEqual(visibleNotes(vaults, { 'v1/Daily': true }), ['5', '1', '9'])
+  // Folding Daily/Weekly keeps Daily's own notes.
+  assert.deepEqual(visibleNotes(vaults, { 'v1/Daily/Weekly': true }), ['3', '2', '5', '1', '9'])
+  assert.deepEqual(visibleNotes(vaults, { v1: true }), ['9'])
+})
+
+test('rangeBetween works in either direction and survives a stale anchor', () => {
+  const order = ['a', 'b', 'c', 'd']
+  assert.deepEqual(rangeBetween(order, 'b', 'd'), ['b', 'c', 'd'])
+  assert.deepEqual(rangeBetween(order, 'd', 'b'), ['b', 'c', 'd'])
+  assert.deepEqual(rangeBetween(order, 'c', 'c'), ['c'])
+  assert.deepEqual(rangeBetween(order, 'gone', 'c'), ['c'])
 })

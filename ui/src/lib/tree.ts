@@ -3,6 +3,7 @@
 // and `test/tree.test.ts` exercises it without a DOM.
 
 import type { NoteEntry } from './vault.svelte.ts'
+import type { DragPayload } from './moves.ts'
 
 export interface FolderNode {
   /** Last path segment; `''` for a vault root. */
@@ -13,6 +14,12 @@ export interface FolderNode {
   folders: FolderNode[]
   /** Notes sitting directly in this folder, sorted by path. */
   notes: NoteEntry[]
+}
+
+/** The last segment of a path: `a/b/c.md` → `c.md`. */
+export function basename(path: string): string {
+  const i = path.lastIndexOf('/')
+  return i === -1 ? path : path.slice(i + 1)
 }
 
 /** The folder a note lives in, `''` when it sits at the vault root. */
@@ -104,7 +111,11 @@ export interface VaultNode {
   notes: NoteEntry[]
 }
 
-/** Row actions the sidebar views offer on vaults and folders; each is optional per view. */
+/**
+ * What the sidebar can ask the shell to do — the hover buttons on a row, the right-click menu,
+ * and the drop at the end of a drag. All optional: an entry with nothing behind it is shown
+ * disabled rather than hidden, so the menu keeps the same shape wherever you open it.
+ */
 export interface TreeActions {
   onCreateIn?: (vault: string, folder: string) => void
   onRenameFolder?: (vault: string, folder: string) => void
@@ -113,9 +124,66 @@ export interface TreeActions {
   onRenameVault?: (vault: string) => void
   onImportInto?: (vault: string) => void
   onNewVault?: () => void
+  onRenameNote?: (vault: string, id: string) => void
+  onTrashNotes?: (vault: string, ids: string[]) => void
+  onOpenInPane?: (id: string) => void
+  onShareNote?: (id: string) => void
+  onBookmarkNote?: (vault: string, id: string) => void
+  /** A completed drag: move what it carries into `folder` of `vault`. */
+  onMove?: (drag: DragPayload, toVault: string, folder: string) => void
 }
 
 /** Collapse state is keyed by vault so two vaults with a `Daily/` folder fold apart. */
 export function folderKey(vault: string, folder: string): string {
   return `${vault}/${folder}`
+}
+
+/**
+ * What the row components need from `FilesPane` beyond drawing themselves: which notes are
+ * selected, and the handlers for clicking, right-clicking and dragging. Bundled rather than
+ * passed one prop at a time because three components take the whole set.
+ */
+export interface BrowserApi {
+  /** Note ids currently selected. */
+  selected: ReadonlySet<string>
+  /** The folder a drag is hovering over, so exactly one row lights up. */
+  dropTarget: { vault: string; folder: string } | null
+  onNoteClick: (id: string, e: MouseEvent) => void
+  onNoteMenu: (id: string, e: MouseEvent) => void
+  /** `folder` is `''` for a vault row — a vault root is a folder like any other here. */
+  onFolderMenu: (vault: string, folder: string, e: MouseEvent) => void
+  onNoteDragStart: (id: string, e: DragEvent) => void
+  onFolderDragStart: (vault: string, folder: string, e: DragEvent) => void
+  onDragEnd: () => void
+  onDragOver: (vault: string, folder: string, e: DragEvent) => void
+  onDragLeave: (vault: string, folder: string) => void
+  onDrop: (vault: string, folder: string, e: DragEvent) => void
+}
+
+/**
+ * Note ids in the order the unified tree draws them, folded folders skipped. Shift-click needs
+ * a range, and a range only means something against what is actually on screen — so this has
+ * to stay in step with `Tree.svelte`: sub-folders first, then the folder's own notes.
+ */
+export function visibleNotes(vaults: VaultNode[], collapsed: Record<string, boolean>): string[] {
+  const out: string[] = []
+  const walk = (vault: string, f: FolderNode) => {
+    for (const sub of f.folders) {
+      if (!collapsed[folderKey(vault, sub.path)]) walk(vault, sub)
+    }
+    for (const n of f.notes) out.push(n.id)
+  }
+  for (const v of vaults) {
+    if (collapsed[v.id]) continue
+    walk(v.id, buildTree(v.notes))
+  }
+  return out
+}
+
+/** The slice of `order` between two ids, in `order`'s own direction. */
+export function rangeBetween(order: string[], a: string, b: string): string[] {
+  const i = order.indexOf(a)
+  const j = order.indexOf(b)
+  if (i === -1 || j === -1) return [b]
+  return order.slice(Math.min(i, j), Math.max(i, j) + 1)
 }

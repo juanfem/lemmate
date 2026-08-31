@@ -1,12 +1,12 @@
 <script lang="ts">
   import { displayName } from '../lib/vault.svelte.ts'
-  import { buildTree, countNotes, folderKey, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
+  import { buildTree, countNotes, folderKey, type BrowserApi, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
   import Icon from './Icon.svelte'
 
   /**
    * The unified view: every vault as a root, folders and notes interleaved beneath it.
-   * Collapse state lives in `FilesPane` because expand-all / collapse-all / reveal drive it
-   * from outside, and the split view folds the same folders.
+   * Collapse state and selection live in `FilesPane` — expand-all, reveal, shift-click ranges
+   * and drag-and-drop all reach across both views, so neither view may own them.
    */
   let {
     vaults,
@@ -14,7 +14,7 @@
     activeVault,
     collapsed,
     onToggle,
-    onOpen,
+    browser,
     actions = {},
   }: {
     vaults: VaultNode[]
@@ -22,17 +22,33 @@
     activeVault?: string | null
     collapsed: Record<string, boolean>
     onToggle: (key: string) => void
-    onOpen: (id: string) => void
+    browser: BrowserApi
     actions?: TreeActions
   } = $props()
 
   let trees = $derived(vaults.map((v) => ({ vault: v, root: buildTree(v.notes) })))
+  const isDrop = (vault: string, folder: string) => browser.dropTarget?.vault === vault && browser.dropTarget.folder === folder
 </script>
 
 {#snippet folder(vault: string, f: FolderNode, depth: number)}
   {#each f.folders as sub (sub.path)}
     {@const key = folderKey(vault, sub.path)}
-    <div class="row folder" style:padding-left="{depth * 0.9 + 0.4}rem">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="row folder"
+      class:drop={isDrop(vault, sub.path)}
+      style:padding-left="{depth * 0.9 + 0.4}rem"
+      draggable="true"
+      role="treeitem"
+      aria-selected="false"
+      tabindex="-1"
+      ondragstart={(e) => browser.onFolderDragStart(vault, sub.path, e)}
+      ondragend={browser.onDragEnd}
+      ondragover={(e) => browser.onDragOver(vault, sub.path, e)}
+      ondragleave={() => browser.onDragLeave(vault, sub.path)}
+      ondrop={(e) => browser.onDrop(vault, sub.path, e)}
+      oncontextmenu={(e) => browser.onFolderMenu(vault, sub.path, e)}
+    >
       <button class="folder-main" onclick={() => onToggle(key)}>
         <span class="chev" class:open={!collapsed[key]}>▸</span>
         <span class="name">{sub.name}</span>
@@ -52,9 +68,14 @@
     <button
       class="row note"
       class:active={n.id === activeId}
+      class:selected={browser.selected.has(n.id)}
       data-note={n.id}
+      draggable="true"
       style:padding-left="{depth * 0.9 + 1.3}rem"
-      onclick={() => onOpen(n.id)}
+      onclick={(e) => browser.onNoteClick(n.id, e)}
+      oncontextmenu={(e) => browser.onNoteMenu(n.id, e)}
+      ondragstart={(e) => browser.onNoteDragStart(n.id, e)}
+      ondragend={browser.onDragEnd}
       title={n.path}
     >
       <span class="name">{displayName(n.path)}</span>
@@ -64,7 +85,19 @@
 
 <nav class="tree">
   {#each trees as t (t.vault.id)}
-    <div class="row vault" class:current={t.vault.id === activeVault}>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="row vault"
+      class:current={t.vault.id === activeVault}
+      class:drop={isDrop(t.vault.id, '')}
+      role="treeitem"
+      aria-selected="false"
+      tabindex="-1"
+      ondragover={(e) => browser.onDragOver(t.vault.id, '', e)}
+      ondragleave={() => browser.onDragLeave(t.vault.id, '')}
+      ondrop={(e) => browser.onDrop(t.vault.id, '', e)}
+      oncontextmenu={(e) => browser.onFolderMenu(t.vault.id, '', e)}
+    >
       <button class="folder-main" onclick={() => onToggle(t.vault.id)} title={t.vault.id}>
         <span class="chev" class:open={!collapsed[t.vault.id]}>▸</span>
         <Icon name="vault" size={12} />
@@ -114,9 +147,20 @@
   .row:hover {
     background: var(--hover);
   }
+  /* Selection is the weaker mark, the open note the stronger one: a note can be both. */
+  .row.selected {
+    background: var(--accent-bg);
+  }
   .row.active {
     background: var(--accent-bg);
     color: var(--accent);
+  }
+  .row.active.selected {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .row.drop {
+    background: var(--accent-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .name {
     flex: 1;

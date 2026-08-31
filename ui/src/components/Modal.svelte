@@ -3,6 +3,7 @@
 
   let {
     title,
+    body = '',
     kind,
     initial = '',
     placeholder = '',
@@ -12,6 +13,8 @@
     onCancel,
   }: {
     title: string
+    /** Optional detail under the title; blank lines and newlines are kept. */
+    body?: string
     kind: 'prompt' | 'confirm'
     initial?: string
     placeholder?: string
@@ -57,6 +60,7 @@
 <div class="backdrop" onmousedown={onCancel} role="presentation">
   <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
     <h2>{title}</h2>
+    {#if body}<p class="body">{body}</p>{/if}
     {#if kind === 'prompt'}
       <input bind:this={input} bind:value {placeholder} />
     {/if}
@@ -68,6 +72,15 @@
 </div>
 
 <style>
+  .body {
+    margin: 0 0 0.9rem;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--muted);
+    white-space: pre-wrap;
+    max-height: 12rem;
+    overflow: auto;
+  }
   .backdrop {
     position: fixed;
     inset: 0;

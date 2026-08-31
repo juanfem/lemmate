@@ -4,8 +4,24 @@
   import FolderTree from './FolderTree.svelte'
   import NoteList from './NoteList.svelte'
   import Icon from './Icon.svelte'
-  import { ancestors, buildTree, folderKey, folderOf, folderPaths, notesIn, type TreeActions, type VaultNode } from '../lib/tree.ts'
+  import ContextMenu, { menuAt, type MenuItem, type MenuState } from './ContextMenu.svelte'
+  import {
+    ancestors,
+    buildTree,
+    folderKey,
+    folderOf,
+    folderPaths,
+    notesIn,
+    rangeBetween,
+    visibleNotes,
+    type BrowserApi,
+    type TreeActions,
+    type VaultNode,
+  } from '../lib/tree.ts'
+  import { canDrop, isInside, type DragPayload } from '../lib/moves.ts'
+  import { beginDrag, endDrag, readDrag } from '../lib/dnd.ts'
   import { clamp, dragResize } from '../lib/resize.ts'
+  import { displayName } from '../lib/vault.svelte.ts'
 
   /**
    * The Files sidebar. Two layouts over the same folders:
@@ -14,7 +30,8 @@
    * - `split` — folders on top, the selected folder's notes below, after Obsidian's File Tree
    *   Alternative. The bottom list either stops at the folder or reaches into its subfolders.
    *
-   * Collapse state is shared by both, which is why it lives here rather than in `Tree`.
+   * Collapse state, note selection and the drag in flight all live here rather than in the
+   * views, because they outlive a switch between them.
    */
   let {
     vaults,
@@ -58,6 +75,13 @@
   type Selection = { vault: string; folder: string }
   let selected: Selection | null = $state(stored<Selection | null>('lemmate.files.selected', null))
   let host: HTMLElement | undefined = $state()
+
+  // ---- note selection: click replaces, Ctrl/Cmd toggles, Shift takes the range on screen
+  let picks: string[] = $state([])
+  let anchor: string | null = $state(null)
+  let pickSet = $derived(new Set(picks))
+  let menu: MenuState | null = $state(null)
+  let dropTarget: { vault: string; folder: string } | null = $state(null)
 
   function setMode(next: Mode) {
     mode = next
@@ -124,6 +148,14 @@
     })
   })
 
+  // A note that was deleted (or moved to another vault) must not stay selected.
+  $effect(() => {
+    const live = new Set(vaults.flatMap((v) => v.notes.map((n) => n.id)))
+    untrack(() => {
+      if (picks.some((id) => !live.has(id))) picks = picks.filter((id) => live.has(id))
+    })
+  })
+
   let picked = $derived.by(() => {
     const s = selected
     return s ? vaults.find((v) => v.id === s.vault) : undefined
@@ -138,9 +170,164 @@
     if (!s) return ''
     return s.folder ? s.folder.slice(s.folder.lastIndexOf('/') + 1) : (picked?.label ?? '')
   })
+
+  /** note id → its vault and path, for drags, menus and the range order. */
+  let index = $derived.by(() => {
+    const m = new Map<string, { vault: string; path: string }>()
+    for (const v of vaults) for (const n of v.notes) m.set(n.id, { vault: v.id, path: n.path })
+    return m
+  })
+  const pathOf = (id: string) => index.get(id)?.path
+  const vaultOf = (id: string) => index.get(id)?.vault
+  /** What Shift-click ranges over: the rows actually on screen, in the order they are drawn. */
+  let order = $derived(mode === 'tree' ? visibleNotes(vaults, collapsed) : listed.map((n) => n.id))
+
+  function noteClick(id: string, e: MouseEvent) {
+    if (e.shiftKey && anchor) {
+      picks = rangeBetween(order, anchor, id)
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
+      picks = pickSet.has(id) ? picks.filter((x) => x !== id) : [...picks, id]
+      anchor = id
+      return
+    }
+    picks = [id]
+    anchor = id
+    onOpen(id)
+  }
+
+  /** The notes a menu or drag on `id` acts on: the whole selection when `id` is part of it. */
+  function actOn(id: string): string[] {
+    if (pickSet.has(id) && picks.length > 1) return picks
+    picks = [id]
+    anchor = id
+    return [id]
+  }
+
+  // ---- drag and drop
+  function noteDragStart(id: string, e: DragEvent) {
+    const ids = actOn(id)
+    const vault = vaultOf(id)
+    if (!vault) return
+    // A drag carries one vault; a cross-vault selection drags only the part under the pointer.
+    beginDrag(e, { vault, notes: ids.filter((n) => vaultOf(n) === vault) })
+  }
+  function folderDragStart(vault: string, folder: string, e: DragEvent) {
+    const v = vaults.find((x) => x.id === vault)
+    if (!v) return
+    beginDrag(e, { vault, folder, notes: v.notes.filter((n) => isInside(n.path, folder)).map((n) => n.id) })
+  }
+  function dragOver(vault: string, folder: string, e: DragEvent) {
+    const drag = readDrag()
+    if (!drag || !canDrop(drag, vault, folder, pathOf)) return
+    e.preventDefault()
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+    dropTarget = { vault, folder }
+  }
+  function dragLeave(vault: string, folder: string) {
+    if (dropTarget?.vault === vault && dropTarget.folder === folder) dropTarget = null
+  }
+  function drop(vault: string, folder: string, e: DragEvent) {
+    e.preventDefault()
+    const drag = readDrag(e)
+    dropTarget = null
+    endDrag()
+    if (drag && canDrop(drag, vault, folder, pathOf)) actions.onMove?.(drag, vault, folder)
+  }
+  function dragEnd() {
+    dropTarget = null
+    endDrag()
+  }
+
+  // ---- context menus
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      /* no clipboard permission: the menu entry simply does nothing */
+    }
+  }
+
+  function noteItems(ids: string[]): MenuItem[] {
+    const vault = vaultOf(ids[0]!) ?? ''
+    const paths = ids.map((id) => pathOf(id)).filter((p): p is string => p !== undefined)
+    if (ids.length > 1) {
+      return [
+        { label: `${ids.length} notes selected`, disabled: true },
+        { label: '', separator: true },
+        { label: 'Copy paths', run: () => void copy(paths.join('\n')) },
+        { label: '', separator: true },
+        { label: `Move ${ids.length} notes to trash`, danger: true, run: () => actions.onTrashNotes?.(vault, ids) },
+      ]
+    }
+    const id = ids[0]!
+    const path = paths[0] ?? ''
+    return [
+      { label: 'Open', run: () => onOpen(id) },
+      { label: 'Open in a new pane', run: () => actions.onOpenInPane?.(id), disabled: !actions.onOpenInPane },
+      { label: '', separator: true },
+      { label: 'Rename / move…', run: () => actions.onRenameNote?.(vault, id) },
+      { label: 'Copy path', run: () => void copy(path) },
+      { label: 'Copy wikilink', run: () => void copy(`[[${displayName(path)}]]`) },
+      { label: '', separator: true },
+      { label: 'Bookmark', run: () => actions.onBookmarkNote?.(vault, id) },
+      { label: 'Share…', run: () => actions.onShareNote?.(id), disabled: !actions.onShareNote },
+      { label: '', separator: true },
+      { label: 'Move to trash', danger: true, run: () => actions.onTrashNotes?.(vault, [id]) },
+    ]
+  }
+
+  function folderItems(vault: string, folder: string): MenuItem[] {
+    if (folder === '') {
+      return [
+        { label: 'New note in this vault', run: () => actions.onCreateInVault?.(vault) },
+        { label: '', separator: true },
+        { label: 'Rename vault…', run: () => actions.onRenameVault?.(vault) },
+        { label: 'Import an Obsidian vault…', run: () => actions.onImportInto?.(vault) },
+        { label: '', separator: true },
+        { label: 'Expand all', run: expandAll },
+        { label: 'Collapse all', run: collapseAll },
+        { label: '', separator: true },
+        { label: 'New vault…', run: () => actions.onNewVault?.() },
+      ]
+    }
+    return [
+      { label: 'New note here', run: () => actions.onCreateIn?.(vault, folder) },
+      { label: '', separator: true },
+      { label: 'Rename / move folder…', run: () => actions.onRenameFolder?.(vault, folder) },
+      { label: 'Copy path', run: () => void copy(folder) },
+      { label: '', separator: true },
+      { label: 'Move folder to trash', danger: true, run: () => actions.onDeleteFolder?.(vault, folder) },
+    ]
+  }
+
+  let browser: BrowserApi = $derived({
+    selected: pickSet,
+    dropTarget,
+    onNoteClick: noteClick,
+    onNoteMenu: (id, e) => (menu = menuAt(e, noteItems(actOn(id)))),
+    onFolderMenu: (vault, folder, e) => (menu = menuAt(e, folderItems(vault, folder))),
+    onNoteDragStart: noteDragStart,
+    onFolderDragStart: folderDragStart,
+    onDragEnd: dragEnd,
+    onDragOver: dragOver,
+    onDragLeave: dragLeave,
+    onDrop: drop,
+  })
 </script>
 
-<div class="files" class:split={mode === 'split'} bind:this={host}>
+<!-- Clicking past the last row clears the selection, the way a file manager does. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div
+  class="files"
+  class:split={mode === 'split'}
+  bind:this={host}
+  onclick={(e) => {
+    if (e.target === e.currentTarget) picks = []
+  }}
+>
   <div class="toolbar">
     <div class="modes">
       <button class:on={mode === 'tree'} onclick={() => setMode('tree')} title="Single tree" aria-label="Single tree">
@@ -150,7 +337,7 @@
         <Icon name="split" />
       </button>
     </div>
-    <span class="gap"></span>
+    <span class="gap">{#if picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
     <button onclick={expandAll} title="Expand all" aria-label="Expand all"><Icon name="expand" /></button>
     <button onclick={collapseAll} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
     <button onclick={reveal} disabled={!activeId} title="Reveal the open note" aria-label="Reveal the open note">
@@ -159,10 +346,10 @@
   </div>
 
   {#if mode === 'tree'}
-    <Tree {vaults} {activeId} {activeVault} {collapsed} onToggle={toggle} {onOpen} {actions} />
+    <Tree {vaults} {activeId} {activeVault} {collapsed} onToggle={toggle} {browser} {actions} />
   {:else}
     <div class="folders-wrap" style:height="{foldersHeight}px">
-      <FolderTree {vaults} {selected} {collapsed} onToggle={toggle} onSelect={select} {actions} />
+      <FolderTree {vaults} {selected} {collapsed} onToggle={toggle} onSelect={select} {browser} {actions} />
     </div>
     <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
          static kind. -->
@@ -215,10 +402,14 @@
       {activeId}
       showFolders={recursive}
       empty={recursive ? 'No notes in this folder or below.' : 'No notes directly in this folder.'}
-      {onOpen}
+      {browser}
     />
   {/if}
 </div>
+
+{#if menu}
+  <ContextMenu {menu} onClose={() => (menu = null)} />
+{/if}
 
 <style>
   .files {
@@ -240,6 +431,14 @@
   }
   .gap {
     flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .picked {
+    color: var(--accent);
+    font-size: 0.72rem;
+    padding-left: 0.4rem;
+    white-space: nowrap;
   }
   .modes {
     display: flex;

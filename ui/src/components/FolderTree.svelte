@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { buildTree, countNotes, folderKey, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
+  import { buildTree, countNotes, folderKey, type BrowserApi, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
   import Icon from './Icon.svelte'
 
   /** Folders only, for the top half of the split view: one row per vault root and folder,
@@ -10,6 +10,7 @@
     collapsed,
     onToggle,
     onSelect,
+    browser,
     actions = {},
   }: {
     vaults: VaultNode[]
@@ -17,6 +18,7 @@
     collapsed: Record<string, boolean>
     onToggle: (key: string) => void
     onSelect: (vault: string, folder: string) => void
+    browser: BrowserApi
     actions?: TreeActions
   } = $props()
 
@@ -25,6 +27,8 @@
   function isSelected(vault: string, folder: string): boolean {
     return selected?.vault === vault && selected.folder === folder
   }
+  const isDrop = (vault: string, folder: string) => browser.dropTarget?.vault === vault && browser.dropTarget.folder === folder
+
   /** Clicking the row you are already on folds it, so one click still gets you both. */
   function pick(vault: string, folder: string, key: string) {
     if (isSelected(vault, folder)) onToggle(key)
@@ -35,11 +39,23 @@
 {#snippet folders(vault: string, f: FolderNode, depth: number)}
   {#each f.folders as sub (sub.path)}
     {@const key = folderKey(vault, sub.path)}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="row folder"
       class:selected={isSelected(vault, sub.path)}
+      class:drop={isDrop(vault, sub.path)}
       data-folder={key}
       style:padding-left="{depth * 0.9 + 0.4}rem"
+      draggable="true"
+      role="treeitem"
+      aria-selected={isSelected(vault, sub.path)}
+      tabindex="-1"
+      ondragstart={(e) => browser.onFolderDragStart(vault, sub.path, e)}
+      ondragend={browser.onDragEnd}
+      ondragover={(e) => browser.onDragOver(vault, sub.path, e)}
+      ondragleave={() => browser.onDragLeave(vault, sub.path)}
+      ondrop={(e) => browser.onDrop(vault, sub.path, e)}
+      oncontextmenu={(e) => browser.onFolderMenu(vault, sub.path, e)}
     >
       {#if sub.folders.length}
         <button
@@ -69,7 +85,20 @@
 
 <nav class="folders">
   {#each trees as t (t.vault.id)}
-    <div class="row vault" class:selected={isSelected(t.vault.id, '')} data-folder={t.vault.id}>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="row vault"
+      class:selected={isSelected(t.vault.id, '')}
+      class:drop={isDrop(t.vault.id, '')}
+      data-folder={t.vault.id}
+      role="treeitem"
+      aria-selected={isSelected(t.vault.id, '')}
+      tabindex="-1"
+      ondragover={(e) => browser.onDragOver(t.vault.id, '', e)}
+      ondragleave={() => browser.onDragLeave(t.vault.id, '')}
+      ondrop={(e) => browser.onDrop(t.vault.id, '', e)}
+      oncontextmenu={(e) => browser.onFolderMenu(t.vault.id, '', e)}
+    >
       <button
         class="chev"
         class:open={!collapsed[t.vault.id]}
@@ -118,6 +147,10 @@
   }
   .row.selected {
     background: var(--accent-bg);
+  }
+  .row.drop {
+    background: var(--accent-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .row.selected .name {
     color: var(--accent);

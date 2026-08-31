@@ -7,6 +7,7 @@
 import { api, type VaultInfo } from './api.ts'
 import { SyncClient, type SyncStatus } from './sync.ts'
 import { VaultSession, type Bookmark, type NoteEntry } from './vault.svelte.ts'
+import { uniquePath } from './moves.ts'
 
 export interface WorkspaceNote extends NoteEntry {
   vault: string
@@ -96,6 +97,80 @@ export class Workspace {
 
   label(vault: string): string {
     return this.get(vault)?.label ?? `vault ${vault.slice(-6)}`
+  }
+
+  /**
+   * Move notes onto `dest` in `toVault` — the file browser's drag-and-drop and its context
+   * menu both land here.
+   *
+   * Inside one vault this is a rename per note, so `[[links]]` follow (SPEC §4.4). Across
+   * vaults it cannot be: a note id is an entry in one vault doc. The note is re-created in the
+   * target vault with a fresh id, the attachments it references are copied over, and the
+   * original is moved to trash — which is why the caller confirms first, and why links from
+   * notes left behind in the source vault are reported as broken rather than rewritten.
+   */
+  async moveNotes(
+    moves: { id: string; from: string; to: string }[],
+    fromVault: string,
+    toVault: string,
+  ): Promise<{ moved: { id: string; path: string }[]; failed: { path: string; error: string }[] }> {
+    const src = this.get(fromVault)
+    const dst = this.get(toVault)
+    const moved: { id: string; path: string }[] = []
+    const failed: { path: string; error: string }[] = []
+    if (!src || !dst) return { moved, failed }
+    if (fromVault === toVault) {
+      for (const m of moves) {
+        try {
+          await src.renameNote(m.id, m.to)
+          moved.push({ id: m.id, path: m.to })
+        } catch (e) {
+          failed.push({ path: m.from, error: String(e) })
+        }
+      }
+      return { moved, failed }
+    }
+    // Cross-vault: one pass so names claimed earlier in this batch are seen by later ones.
+    const taken = new Set(dst.notes.map((n) => n.path))
+    for (const m of moves) {
+      try {
+        const body = await src.noteText(m.id)
+        const path = uniquePath(m.to, taken)
+        taken.add(path)
+        const id = dst.adoptNote(path, body)
+        await this.copyAttachments(src, dst, body)
+        src.deleteNote(m.id)
+        moved.push({ id, path })
+      } catch (e) {
+        failed.push({ path: m.from, error: String(e) })
+      }
+    }
+    return { moved, failed }
+  }
+
+  /**
+   * Carry over every attachment the note references. Content-addressed on both sides, so a
+   * blob the target vault already holds costs one hash and no upload; one that fails to copy
+   * leaves the reference in place rather than failing the move.
+   */
+  private async copyAttachments(src: VaultSession, dst: VaultSession, body: string) {
+    const referenced = new Set<string>()
+    for (const m of body.matchAll(/!\[\[([^\]]+)\]\]/gu)) referenced.add(m[1]!.split('|')[0]!.trim())
+    for (const m of body.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/gu)) referenced.add(m[1]!.trim())
+    for (const ref of referenced) {
+      const name = ref.split('/').pop() ?? ref
+      const entry =
+        Object.entries(src.attachments).find(([p]) => p === ref) ??
+        Object.entries(src.attachments).find(([p]) => p.split('/').pop() === name)
+      if (!entry) continue
+      const [, hash] = entry
+      if (Object.values(dst.attachments).includes(hash)) continue
+      try {
+        await dst.uploadAttachment(name, await src.attachmentBytes(hash), '')
+      } catch {
+        /* the reference survives; the blob can be re-uploaded by hand */
+      }
+    }
   }
 
   destroy() {

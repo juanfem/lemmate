@@ -211,6 +211,24 @@ sight. Both views share one set of folds, so collapsing in one collapses in the 
 divider to go back to the default width. It is a `separator` you can also focus and nudge with
 the arrow keys. The width is remembered per device, like the pane layout.
 
+**Selecting notes.** A click selects a note and opens it. **Ctrl/Cmd-click** adds one to the
+selection without opening it, **Shift-click** takes everything between it and the last one you
+touched, in the order the rows are drawn. The toolbar counts what you have picked; clicking a
+single note starts over. Both browsers select the same way.
+
+**Moving notes and folders.** Drag a note — or a whole selection, or a folder with everything
+under it — onto any folder or vault row. The row you are over lights up, and rows that would
+not be a move (a folder into itself, into its own subtree, or back where it already is) simply
+do not. A right-click menu on any row offers the same moves by name, plus *New note here*,
+*Rename / move*, *Copy path*, *Copy wikilink*, *Bookmark*, *Share* and *Move to trash*; with
+several notes selected it acts on all of them.
+
+Inside one vault a move is a rename, so `[[links]]` to the note are rewritten (§2). **Between
+vaults it is not**, and Lemmate asks before doing it: a note id belongs to the vault doc that
+holds it, so the note is re-created in the target vault with a **new id**, the attachments it
+references are copied across, and the original goes to trash. Links to it from notes left
+behind in the old vault will not follow it.
+
 **Quick switcher** (`Ctrl+O`, `Ctrl+P`, `Ctrl+N`) fuzzy-matches paths **across every vault**,
 each hit labelled with the vault it comes from; substring matches rank above subsequence
 matches. If nothing matches exactly, the last entry offers to **create** the note at that path
@@ -218,6 +236,18 @@ matches. If nothing matches exactly, the last entry offers to **create** the not
 
 **Command palette** (`Ctrl+Shift+P`) lists every command with its shortcut. Shortcut remapping
 is not implemented.
+
+**Three ways to look at a note.** The switch in the note header — or `Ctrl+E`, which steps
+through them — picks one:
+
+- **Live** (the default) hides markup and renders it in place, showing it again on the line
+  your cursor is on. This is the normal editing view.
+- **Source** is the markdown itself in a monospace face, nothing hidden and nothing rendered.
+- **Reading** renders everything and takes the keyboard away, so you cannot edit by accident.
+  Other people's edits still arrive live.
+
+The mode belongs to the **pane**, not the note: split with `Ctrl+\` and you can read a note in
+one pane while editing its source in the other. It is saved with the layout, per device.
 
 **Sidebar panes**: Files, Search, Tags, Outline, Bookmarks (★), Version history (⏱).
 
@@ -361,6 +391,7 @@ your account.
 | `Ctrl+Shift+F` | Search pane |
 | `Ctrl+Shift+D` | Today's daily note |
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
+| `Ctrl+E` | Cycle this pane's view: live → source → reading |
 | `Ctrl+W` | Close tab (no-op on a pinned tab) |
 | `Ctrl+Shift+T` | Reopen closed tab |
 | `Ctrl+\` | Split right |
@@ -369,8 +400,8 @@ your account.
 Inside the quick switcher and palette: `↑`/`↓` to move, `Enter` to choose, `Escape` to close.
 
 Commands without a shortcut, reachable from the palette: show Files / Tags / Outline /
-Bookmarks / Version history, Share note…, Rename / move note, Move note to trash, Pin /
-unpin tab, Close pane, Switch vault, Sign out.
+Bookmarks / Version history, set the view to live / source / reading, Share note…, Rename /
+move note, Move note to trash, Pin / unpin tab, Close pane, Switch vault, Sign out.
 
 Inside the editor, CodeMirror's own bindings apply — `Ctrl+F` find, `Ctrl+Z` / `Ctrl+Y` undo
 and redo, `Tab` indent, `Ctrl+Space` autocomplete. There is no vim keymap (SPEC §17).

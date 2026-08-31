@@ -9,6 +9,8 @@
   import { ulid } from './lib/ulid.ts'
   import FilesPane from './components/FilesPane.svelte'
   import type { VaultNode } from './lib/tree.ts'
+  import { plan, type DragPayload } from './lib/moves.ts'
+  import type { ViewMode } from './lib/editor/setup.ts'
   import { clamp, dragResize } from './lib/resize.ts'
   import Pane, { type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
@@ -128,7 +130,7 @@
       solo?.destroy()
       solo = only && vault ? new VaultSession(vault, { noteOnly: true }) : null
       if (solo && only) {
-        panes = [{ id: ++paneSeq, tabs: [only], active: only }]
+        panes = [{ id: ++paneSeq, tabs: [only], active: only, mode: 'live' }]
         focusedPane = 0
         pinned = []
         closed = []
@@ -220,7 +222,15 @@
   }
 
   function blankPane(): PaneState {
-    return { id: ++paneSeq, tabs: [], active: null }
+    return { id: ++paneSeq, tabs: [], active: null, mode: 'live' }
+  }
+  /** Ctrl+E steps live → source → reading → live in the focused pane. */
+  function cycleMode() {
+    const p = focused
+    p.mode = MODES[(MODES.indexOf(p.mode) + 1) % MODES.length]!
+  }
+  function setMode(mode: ViewMode) {
+    focused.mode = mode
   }
   let focused = $derived(panes[Math.min(focusedPane, panes.length - 1)] ?? panes[0]!)
   /** The focused pane's note: everything outside the panes (commands, sidebar) acts on it. */
@@ -258,9 +268,11 @@
 
   // ---- layout persistence, per device, across every vault
   interface StoredLayout {
-    panes?: { tabs?: string[]; active?: string | null }[]
+    panes?: { tabs?: string[]; active?: string | null; mode?: string }[]
     focused?: number
   }
+  const MODES: ViewMode[] = ['live', 'source', 'reading']
+  const asMode = (m: unknown): ViewMode => (MODES.includes(m as ViewMode) ? (m as ViewMode) : 'live')
   function loadLayout(): { panes: PaneState[]; focused: number } {
     try {
       const raw = localStorage.getItem('lemmate.layout')
@@ -270,7 +282,7 @@
         .slice(0, MAX_PANES)
         .map((p) => {
           const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string')
-          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null) }
+          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null), mode: asMode(p.mode) }
         })
       if (list.length) return { panes: list, focused: Math.min(Math.max(data?.focused ?? 0, 0), list.length - 1) }
     } catch {
@@ -289,7 +301,7 @@
   }
   $effect(() => {
     if (solo || !workspace) return
-    const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active })), focused: focusedPane })
+    const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active, mode: p.mode })), focused: focusedPane })
     try {
       localStorage.setItem('lemmate.layout', data)
     } catch {
@@ -327,6 +339,7 @@
   interface AskOptions {
     kind: 'prompt' | 'confirm'
     title: string
+    body?: string
     initial?: string
     placeholder?: string
     confirmLabel?: string
@@ -378,7 +391,7 @@
     const id = focused.active
     if (!id) return
     const i = panes.indexOf(focused)
-    panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id }, ...panes.slice(i + 1)]
+    panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id, mode: focused.mode }, ...panes.slice(i + 1)]
     focusedPane = i + 1
   }
   function closePane(i = focusedPane) {
@@ -403,10 +416,23 @@
     }
   }
   function bookmarkActive() {
-    const s = sessionOf(active)
-    if (!s || !active) return
-    const path = s.pathOf(active)
-    if (path) s.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
+    if (active) bookmarkNote(sessionOf(active)?.id ?? '', active)
+  }
+  function bookmarkNote(vault: string, id: string) {
+    const s = workspace?.get(vault) ?? sessionOf(id)
+    const path = s?.pathOf(id)
+    if (s && path) s.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
+  }
+  /** Open a note beside the current one, splitting if there is room and reusing a pane if not. */
+  function openInNewPane(id: string) {
+    if (!solo && panes.length < MAX_PANES) {
+      const i = panes.indexOf(focused)
+      panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id, mode: focused.mode }, ...panes.slice(i + 1)]
+      focusedPane = i + 1
+    } else {
+      focusedPane = (focusedPane + 1) % panes.length
+      open(id)
+    }
   }
   let commands: Command[] = $derived([
     { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (switcher = true) },
@@ -418,6 +444,10 @@
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
     { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
+    { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
+    { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
+    { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
+    { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
     { id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) },
     { id: 'export-html', label: 'Export note as HTML', run: () => exportActive('html') },
     { id: 'export-docx', label: 'Export note as DOCX', run: () => exportActive('docx') },
@@ -488,25 +518,75 @@
     const existing = s.idOf(path)
     open(existing ?? s.createNote(path, await template(s, 'Daily', name, `# ${name}\n\n`)))
   }
-  async function renameActive() {
-    const s = sessionOf(active)
-    if (!s || !active) return
-    const id = active
+  function renameActive() {
+    if (active) void renameNote(sessionOf(active)?.id ?? '', active)
+  }
+  async function renameNote(vault: string, id: string) {
+    const s = workspace?.get(vault) ?? sessionOf(id)
+    if (!s) return
     const current = s.pathOf(id) ?? ''
     const next = (await ask({ kind: 'prompt', title: 'Rename / move note', initial: current, placeholder: 'folder/note.md' }))?.trim()
     if (next && next !== current) s.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
   }
-  async function deleteActive() {
-    const s = sessionOf(active)
-    if (!s || !active) return
-    const id = active
-    const path = s.pathOf(id) ?? id
-    const ok = await ask({ kind: 'confirm', title: `Move “${path}” to trash?`, confirmLabel: 'Move to trash', danger: true })
+  function deleteActive() {
+    if (active) void trashNotes(sessionOf(active)?.id ?? '', [active])
+  }
+  /** Move notes to trash — one from the note header, or a whole selection from the tree. */
+  async function trashNotes(vault: string, ids: string[]) {
+    const s = workspace?.get(vault) ?? sessionOf(ids[0])
+    if (!s || ids.length === 0) return
+    const title =
+      ids.length === 1
+        ? `Move “${s.pathOf(ids[0]!) ?? ids[0]}” to trash?`
+        : `Move ${ids.length} notes to trash?`
+    const ok = await ask({ kind: 'confirm', title, confirmLabel: 'Move to trash', danger: true })
     if (ok === null) return
-    s.deleteNote(id)
-    // The note is gone: close it in every pane, pinned or not.
-    for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
-    closed = closed.filter((c) => c !== id)
+    for (const id of ids) {
+      s.deleteNote(id)
+      // The note is gone: close it in every pane, pinned or not.
+      for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
+      closed = closed.filter((c) => c !== id)
+    }
+  }
+
+  /**
+   * A drop in the file browser. Inside one vault it is a rename per note and links follow it
+   * (SPEC §4.4); into another vault it is a copy plus a delete, which changes note ids and
+   * leaves `[[links]]` from the source vault dangling — so that one is confirmed first.
+   */
+  async function moveDropped(drag: DragPayload, toVault: string, folder: string) {
+    const ws = workspace
+    if (!ws) return
+    const moves = plan(drag, folder, (id) => ws.pathOf(id))
+    if (moves.length === 0) return
+    const what = drag.folder !== undefined ? `“${drag.folder}” and its ${moves.length} notes` : `${moves.length} note${moves.length === 1 ? '' : 's'}`
+    const where = folder ? `“${folder}”` : `the root of ${ws.label(toVault)}`
+    if (drag.vault !== toVault) {
+      const ok = await ask({
+        kind: 'confirm',
+        title: `Move ${what} to ${where} in another vault?`,
+        body: 'Notes moved between vaults are copied and then deleted, so they get new ids and any [[links]] to them from the vault they leave will break. Attachments they reference are copied too.',
+        confirmLabel: 'Move',
+      })
+      if (ok === null) return
+    }
+    const openBefore = moves.filter((m) => panes.some((p) => p.tabs.includes(m.id))).map((m) => m.id)
+    const { moved, failed } = await ws.moveNotes(moves, drag.vault, toVault)
+    if (drag.vault !== toVault) {
+      // The originals are gone and their ids with them; reopen the copies in their place.
+      for (const id of openBefore) close(id, true)
+      const reopen = moved.filter((_, i) => openBefore.includes(moves[i]?.id ?? ''))
+      for (const m of reopen) open(m.id)
+    }
+    if (failed.length) {
+      await ask({
+        kind: 'confirm',
+        title: `${failed.length} of ${moves.length} could not be moved`,
+        body: failed.map((f) => `${f.path}: ${f.error}`).join('\n'),
+        confirmLabel: 'OK',
+      })
+    }
+    tagsVersion++
   }
 
   // ---- folder actions (folders are just path prefixes; SPEC §9)
@@ -588,6 +668,9 @@
       e.preventDefault()
     } else if (e.key === 'n' && !e.shiftKey) {
       switcher = true
+      e.preventDefault()
+    } else if (e.key === 'e' && !e.shiftKey) {
+      cycleMode()
       e.preventDefault()
     } else if (e.key === 'w') {
       if (active) close(active)
@@ -672,6 +755,12 @@
             onRenameVault: renameVault,
             onImportInto: (v) => (importInto = v),
             onNewVault: newVault,
+            onRenameNote: renameNote,
+            onTrashNotes: trashNotes,
+            onOpenInPane: openInNewPane,
+            onShareNote: (id) => (open(id), (shareOpen = true)),
+            onBookmarkNote: bookmarkNote,
+            onMove: moveDropped,
           }}
         />
         {#if sharedWithMe.length}
@@ -755,6 +844,7 @@
           onOpen={(id) => { focusedPane = i; open(id) }}
           onHeadings={(h) => (headingsByPane[p.id] = h)}
           onPresence={(names) => (presenceByPane[p.id] = names)}
+          onMode={(m) => { focusedPane = i; p.mode = m }}
           bind:jumpTo={jumpers[p.id]}
         />
       {/each}
@@ -793,6 +883,7 @@
 {#if modal}
   <Modal
     title={modal.title}
+    body={modal.body}
     kind={modal.kind}
     initial={modal.initial}
     placeholder={modal.placeholder}

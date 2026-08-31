@@ -2,7 +2,6 @@
   import { api } from '../lib/api.ts'
   import { onMount } from 'svelte'
   import { createEditor } from '../lib/editor/setup.ts'
-  import { EditorView } from '@codemirror/view'
   import * as Y from 'yjs'
   import { Awareness } from 'y-protocols/awareness'
 
@@ -22,8 +21,7 @@
       createEditor(host, doc.getText('content'), new Awareness(doc), {
         openLink: () => {},
         embedUrl: () => undefined,
-        alwaysFolded: true,
-        extra: [EditorView.editable.of(false)],
+        mode: 'reading',
       })
     } catch {
       error = 'This link is not valid (it may have been revoked).'

@@ -13,6 +13,7 @@ import { SyncClient, type SyncStatus } from './sync.ts'
 import { rewriteWikilinks } from './links.ts'
 export { rewriteWikilinks }
 import { ulid } from './ulid.ts'
+import { restampId } from './moves.ts'
 
 export interface NoteEntry {
   id: string
@@ -175,6 +176,19 @@ export class VaultSession {
     return id
   }
 
+  /**
+   * Create a note from another note's full markdown, re-stamping the front-matter id — a
+   * copy into a second vault is a different note, and two of them may not share an id.
+   */
+  adoptNote(path: string, text: string): string {
+    const id = ulid()
+    const { doc, release } = this.acquire(id)
+    doc.getText('content').insert(0, restampId(text, id))
+    this.notesMap.set(id, path)
+    release()
+    return id
+  }
+
   /** Rename/move, then rewrite `[[links]]` in referring notes (SPEC §4.4). */
   async renameNote(id: string, path: string) {
     const old = this.notesMap.get(id)
@@ -191,12 +205,7 @@ export class VaultSession {
       if (r.id === id) continue
       const { doc, release } = this.acquire(r.id)
       try {
-        await new Promise<void>((resolve) => {
-          if (this.client.isSynced(r.id)) return resolve()
-          const t = setTimeout(resolve, 3000)
-          const once = () => (clearTimeout(t), doc.getText('content').unobserve(once), resolve())
-          doc.getText('content').observe(once)
-        })
+        await this.whenLoaded(r.id, doc)
         const text = doc.getText('content')
         const fixed = rewriteWikilinks(text.toString(), old, path)
         if (fixed !== null) doc.transact(() => (text.delete(0, text.length), text.insert(0, fixed)))
@@ -204,6 +213,37 @@ export class VaultSession {
         release()
       }
     }
+  }
+
+  /**
+   * Resolve once a note doc has content to read: either the socket says it is synced, or the
+   * first update lands. The timeout is the offline case — an empty doc is still an answer.
+   */
+  private whenLoaded(id: string, doc: Y.Doc): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (this.client.isSynced(id)) return resolve()
+      const t = setTimeout(resolve, 3000)
+      const once = () => (clearTimeout(t), doc.getText('content').unobserve(once), resolve())
+      doc.getText('content').observe(once)
+    })
+  }
+
+  /** A note's markdown, once it has loaded. For moving one to another vault (SPEC §4.3). */
+  async noteText(id: string): Promise<string> {
+    const { doc, release } = this.acquire(id)
+    try {
+      await this.whenLoaded(id, doc)
+      return doc.getText('content').toString()
+    } finally {
+      release()
+    }
+  }
+
+  /** Fetch an attachment's bytes, to hand to another vault's `uploadAttachment`. */
+  async attachmentBytes(hash: string): Promise<Uint8Array> {
+    const r = await fetch(`/api/v1/vaults/${this.id}/attachments/${hash}`)
+    if (!r.ok) throw new Error(`attachment ${hash.slice(0, 8)}: ${r.status}`)
+    return new Uint8Array(await r.arrayBuffer())
   }
 
   deleteNote(id: string) {
@@ -264,11 +304,9 @@ export class VaultSession {
 // BLAKE3 is what the engine and server key attachments by. Browsers have no native BLAKE3;
 // the tiny pure-JS implementation in ./blake3.ts is used for uploads only.
 import { blake3Hex } from './blake3.ts'
+import { basename } from './tree.ts'
+export { basename }
 
-export function basename(path: string): string {
-  const i = path.lastIndexOf('/')
-  return i === -1 ? path : path.slice(i + 1)
-}
 
 export function displayName(path: string): string {
   return basename(path).replace(/\.(md|qmd)$/u, '')

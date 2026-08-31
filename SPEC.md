@@ -110,7 +110,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 | Database | SQLite (WAL) | Per server, not per vault. Attachments outside the DB. |
 | Search | SQLite FTS5, trigram + unicode61 | Same engine on server and native clients. |
 | Native shells | Tauri 2 **[decided: native mobile]** | Linux/macOS/Windows/Android/iOS from one codebase. |
-| Markdown parser (JS) | micromark + mdast with custom extensions | Used by editor decorations, reading mode, link/tag extraction on the client. |
+| Markdown parser (JS) | micromark + mdast with custom extensions | Used by editor decorations, link/tag extraction on the client. |
 | Markdown parser (Rust) | `markdown-rs` (micromark port) + custom extensions | Used by `core` for indexing. Must agree with the JS parser on the §5 subset — enforced by a shared conformance test corpus. |
 | Maths | KaTeX | Client-side render of `$…$` / `$$…$$`. |
 | Export | pandoc ≥ 3.1, quarto (optional) | Server-side or local if installed. |
@@ -335,7 +335,14 @@ projection. Attachments are fetched on demand.
 ## 8. Editor
 
 CodeMirror 6, bound to `Y.Text` via `y-codemirror.next`. Modes: **live preview** (default),
-**source** (no decorations), **reading** (rendered mdast, read-only).
+**source** (no decorations), **reading** (everything rendered, read-only). The mode belongs to
+the **pane**, so a source pane can sit beside a reading one, and it is saved with the layout.
+
+All three are the same CodeMirror view reconfigured through a compartment, not three renderers:
+reading mode is live preview with the reveal-on-cursor rule switched off and the view made
+read-only. An mdast-to-HTML reading mode was the earlier plan; it was dropped because a second
+renderer would have to be kept in step with the decorations for every construct in §5, and
+public links (§11.2) already prove the CodeMirror one reads well without a cursor.
 
 Live-preview decorations (hidden markup, rendered widget, revealed when the cursor enters
 the range): headings, emphasis, inline code, links/wikilinks, images, maths, tables,
@@ -359,8 +366,14 @@ Editing features:
 ## 9. Organisation and workflow features
 
 - **Tree** — every vault you can read is a root of one tree, with its folders below it;
-  folders are real folders. Drag-and-drop move, create, rename, delete. Sort by name/modified.
-  Optional folder note (`<folder>/<folder>.md`).
+  folders are real folders. Create, rename, delete. Sort by name/modified. Optional folder note
+  (`<folder>/<folder>.md`).
+- **Selecting and moving** — click selects and opens, Ctrl/Cmd-click adds, Shift-click takes
+  the range as drawn on screen. Notes and folders drag onto any folder or vault root; a
+  right-click menu offers the same moves by name. Inside one vault a move is a rename and
+  `[[links]]` follow it (§4.4). Between vaults it cannot be — a note id is an entry in one
+  vault doc — so the note is re-created there with a new id, the attachments it references are
+  copied, the original is trashed, and the user confirms that trade first.
 - **Two file browsers over the same folders** — the interleaved tree above, and a folder-first
   split (folders on top, the selected folder's notes below, optionally reaching into its
   subfolders) for the *File Tree Alternative* workflow in §11. Both share one set of folds;

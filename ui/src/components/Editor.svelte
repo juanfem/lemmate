@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { EditorView } from '@codemirror/view'
-  import { createEditor } from '../lib/editor/setup.ts'
+  import { createEditor, setViewMode, type ViewMode } from '../lib/editor/setup.ts'
   import type { VaultSession } from '../lib/vault.svelte.ts'
   import { api } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
@@ -15,7 +15,7 @@
     onOpen,
     onHeadings,
     onPresence,
-    readOnly = false,
+    mode = 'live',
     jumpTo = $bindable(),
   }: {
     session: VaultSession
@@ -23,7 +23,8 @@
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
-    readOnly?: boolean
+    /** SPEC §8: live preview, plain source, or rendered and read-only. */
+    mode?: ViewMode
     jumpTo?: (pos: number) => void
   } = $props()
 
@@ -127,7 +128,8 @@
     view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
       openLink,
       embedUrl,
-      extra: [fileHandlers, headingWatcher, ...(readOnly ? [EditorView.editable.of(false)] : [])],
+      mode,
+      extra: [fileHandlers, headingWatcher],
       complete: {
         notes: () => session.notes.map((n) => n.path),
         tags: async () => (await api.tags(session.id).catch(() => [])).map((t) => t.tag),
@@ -157,6 +159,13 @@
       view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 20 }) })
       view.focus()
     }
+  })
+
+  // Switching mode reconfigures the running view rather than rebuilding it, so the scroll
+  // position, the undo history and the collaborative binding all survive the switch.
+  $effect(() => {
+    const m = mode
+    if (view) setViewMode(view, m, { openLink, embedUrl })
   })
 
   onDestroy(() => {

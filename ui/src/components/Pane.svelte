@@ -2,6 +2,7 @@
   import { api, type NoteSummary } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
   import Editor from './Editor.svelte'
+  import { VIEW_MODES, type ViewMode } from '../lib/editor/setup.ts'
   import type { OutlineItem } from './OutlinePane.svelte'
 
   /** One editing pane: its own tab strip, note header, editor and backlinks (SPEC §9). */
@@ -9,6 +10,8 @@
     id: number
     tabs: string[]
     active: string | null
+    /** SPEC §8 view mode, per pane — a source pane can sit beside a reading one. */
+    mode: ViewMode
   }
 
   let {
@@ -27,6 +30,7 @@
     onOpen,
     onHeadings,
     onPresence,
+    onMode,
     jumpTo = $bindable(),
   }: {
     /** Which vault a tab belongs to; tabs in one pane may come from different vaults. */
@@ -46,6 +50,7 @@
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
+    onMode?: (mode: ViewMode) => void
     jumpTo?: (pos: number) => void
   } = $props()
 
@@ -113,6 +118,11 @@
           <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
         {/if}
         <span class="spacer"></span>
+        <span class="modes" role="group" aria-label="View mode">
+          {#each VIEW_MODES as m (m.id)}
+            <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
+          {/each}
+        </span>
         <button onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
         {#if !session.noteOnly}<button onclick={onShare} title="Share">Share</button>{/if}
         <button onclick={onRename} title="Rename / move">Rename</button>
@@ -125,6 +135,7 @@
           {onOpen}
           onHeadings={(h) => onHeadings?.(h)}
           onPresence={(p) => { presence = p; onPresence?.(p) }}
+          mode={pane.mode}
           bind:jumpTo
         />
       </div>
@@ -216,6 +227,26 @@
   }
   .spacer {
     flex: 1;
+  }
+  /* One segmented control, so the three modes read as a choice rather than three buttons. */
+  .modes {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    overflow: hidden;
+    margin-right: 0.3rem;
+  }
+  .modes button {
+    border-radius: 0;
+    padding: 0.1rem 0.45rem;
+    font-size: 0.75rem;
+  }
+  .modes button + button {
+    border-left: 1px solid var(--border);
+  }
+  .modes button.on {
+    background: var(--accent-bg);
+    color: var(--accent);
   }
   .presence {
     color: var(--accent);

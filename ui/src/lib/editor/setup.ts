@@ -2,7 +2,7 @@
 // preview, collaborative cursors, and the usual keymaps.
 
 import { EditorView, keymap, drawSelection, highlightActiveLine, rectangularSelection } from '@codemirror/view'
-import { EditorState, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
@@ -62,11 +62,52 @@ const theme = EditorView.theme({
   '.cm-codeblock': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', paddingLeft: '0.75em', paddingRight: '0.75em' },
   '.cm-codeblock-fence': { color: 'var(--muted)', fontSize: '0.8em' },
   '.cm-table-row': { fontFamily: 'var(--mono)', fontSize: '0.9em' },
+  // Source mode drops the prose face along with the decorations: it is code, so it looks it.
+  '&.cm-mode-source .cm-scroller': { fontFamily: 'var(--mono)', fontSize: '0.92em' },
+  // Nothing in reading mode is editable, so the caret, the active line and the fold gutter
+  // are all noise.
+  '&.cm-mode-reading .cm-content': { caretColor: 'transparent' },
+  '&.cm-mode-reading .cm-activeLine': { background: 'transparent' },
+  '&.cm-mode-reading .cm-gutters': { display: 'none' },
 })
+
+/**
+ * SPEC §8: `live` hides markup and renders it in place, revealing it again on the cursor's
+ * line; `source` is the markdown itself, in the mono face, with nothing hidden; `reading`
+ * renders everything and takes the keyboard away. All three are the same document and the
+ * same decorations — there is no second renderer to drift out of step.
+ */
+export type ViewMode = 'live' | 'source' | 'reading'
+
+export const VIEW_MODES: { id: ViewMode; label: string; hint: string }[] = [
+  { id: 'live', label: 'Live', hint: 'Live preview — markup renders in place, and shows again on the line you are editing' },
+  { id: 'source', label: 'Source', hint: 'Source — the markdown itself, nothing hidden' },
+  { id: 'reading', label: 'Reading', hint: 'Reading — fully rendered and read-only' },
+]
+
+// The per-mode looks are classes on the editor rather than themes of their own: two themes
+// styling `.cm-scroller` have equal specificity, and which one wins then comes down to the
+// order the stylesheets happened to mount in. The rules live in `theme` below, behind `&.…`.
+const sourceLook = EditorView.editorAttributes.of({ class: 'cm-mode-source' })
+const readingLook = EditorView.editorAttributes.of({ class: 'cm-mode-reading' })
+
+function modeExtensions(mode: ViewMode, opts: LivePreviewOptions): Extension {
+  if (mode === 'source') return [sourceLook]
+  if (mode === 'reading') return [livePreview({ ...opts, alwaysFolded: true }), EditorView.editable.of(false), readingLook]
+  return [livePreview(opts)]
+}
 
 export interface EditorOptions extends LivePreviewOptions {
   extra?: Extension[]
   complete?: CompletionSources
+  mode?: ViewMode
+}
+
+const modeCompartment = new Compartment()
+
+/** Swap the view mode in place — the doc, the scroll position and the collab binding all stay. */
+export function setViewMode(view: EditorView, mode: ViewMode, opts: LivePreviewOptions) {
+  view.dispatch({ effects: modeCompartment.reconfigure(modeExtensions(mode, opts)) })
 }
 
 export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Awareness, opts: EditorOptions): EditorView {
@@ -95,7 +136,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       markdown({ base: markdownLanguage, extensions: noteSyntax, addKeymap: true }),
       syntaxHighlighting(highlight),
       theme,
-      livePreview(opts),
+      modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),

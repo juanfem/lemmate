@@ -67,6 +67,15 @@ interleaved **tree**, and a **folders/notes split** after Obsidian's *File Tree 
 subfolders). The toolbar also expands and collapses everything and reveals the open note. The
 sidebar itself, and the split inside it, are draggable.
 
+Both browsers **multi-select** (Ctrl/Cmd-click, Shift-click for a range), **drag** notes and
+folders onto any folder or vault row, and carry a **right-click menu**. A move inside a vault
+is a rename and `[[links]]` follow it; a move to another vault is a copy plus a delete — new
+id, attachments carried over — and is confirmed first.
+
+Each **pane** shows its note in one of three views (SPEC §8), switched in the note header or
+with `Ctrl+E`: **live** preview, plain **source**, or **reading** (rendered, read-only). All
+three are the same CodeMirror view reconfigured, so there is no second renderer to drift.
+
 **Importing an Obsidian vault** is a command in the palette, or the ⇥ button on a vault row:
 pick the folder and the browser uploads it in batches to `POST /api/v1/vaults/{vault}/import`,
 which runs the same conversion as `lemmate import obsidian` (callouts → fenced divs, image
