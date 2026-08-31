@@ -265,6 +265,7 @@
     const path = paths[0] ?? ''
     return [
       { label: 'Open', run: () => onOpen(id) },
+      { label: 'Open in a new tab', run: () => actions.onOpenInTab?.(id), disabled: !actions.onOpenInTab },
       { label: 'Open in a new pane', run: () => actions.onOpenInPane?.(id), disabled: !actions.onOpenInPane },
       { label: '', separator: true },
       { label: 'Rename / move…', run: () => actions.onRenameNote?.(vault, id) },

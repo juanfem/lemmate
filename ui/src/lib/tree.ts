@@ -126,6 +126,7 @@ export interface TreeActions {
   onNewVault?: () => void
   onRenameNote?: (vault: string, id: string) => void
   onTrashNotes?: (vault: string, ids: string[]) => void
+  onOpenInTab?: (id: string) => void
   onOpenInPane?: (id: string) => void
   onShareNote?: (id: string) => void
   onBookmarkNote?: (vault: string, id: string) => void

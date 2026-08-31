@@ -1,9 +1,5 @@
-<script lang="ts">
-  import { api, type NoteSummary } from '../lib/api.ts'
-  import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
-  import Editor from './Editor.svelte'
-  import { VIEW_MODES, type ViewMode } from '../lib/editor/setup.ts'
-  import type { OutlineItem } from './OutlinePane.svelte'
+<script lang="ts" module>
+  import type { ViewMode } from '../lib/editor/setup.ts'
 
   /** One editing pane: its own tab strip, note header, editor and backlinks (SPEC §9). */
   export interface PaneState {
@@ -13,6 +9,24 @@
     /** SPEC §8 view mode, per pane — a source pane can sit beside a reading one. */
     mode: ViewMode
   }
+
+  /**
+   * An empty tab, opened by the ＋ on the strip and waiting for a note. Held as a tab id so
+   * the rest of the pane machinery — ordering, closing, activating, persisting — needs no
+   * special case; only the label and the "is there a note here" check look at it.
+   */
+  export function isBlank(tabId: string): boolean {
+    return tabId.startsWith('blank:')
+  }
+</script>
+
+<script lang="ts">
+  import { api, type NoteSummary } from '../lib/api.ts'
+  import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
+  import Editor from './Editor.svelte'
+  import { VIEW_MODES } from '../lib/editor/setup.ts'
+  import Icon from './Icon.svelte'
+  import type { OutlineItem } from './OutlinePane.svelte'
 
   let {
     lookup,
@@ -31,6 +45,7 @@
     onHeadings,
     onPresence,
     onMode,
+    onNewTab,
     jumpTo = $bindable(),
   }: {
     /** Which vault a tab belongs to; tabs in one pane may come from different vaults. */
@@ -51,6 +66,7 @@
     onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
     onMode?: (mode: ViewMode) => void
+    onNewTab?: () => void
     jumpTo?: (pos: number) => void
   } = $props()
 
@@ -100,16 +116,19 @@
 <section class="pane" class:focused bind:this={host} onfocusin={onFocus}>
   <div class="tabs">
     {#each tabs as id (id)}
-      <button class="tab" class:active={id === pane.active} onclick={() => onActivate(id)} title={pathOf(id)}>
+      <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} title={pathOf(id)}>
         {#if pinned.includes(id)}<span class="pin" title="Pinned">•</span>{/if}
-        {displayName(pathOf(id) ?? id)}
+        {isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}
         {#if !pinned.includes(id)}
           <span class="x" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
         {/if}
       </button>
     {/each}
+    {#if onNewTab}
+      <button class="newtab" onclick={onNewTab} title="New tab (Ctrl+T)" aria-label="New tab"><Icon name="plus" size={13} /></button>
+    {/if}
   </div>
-  {#if pane.active && session}
+  {#if pane.active && session && !isBlank(pane.active)}
     {#key pane.active}
       <div class="note-head">
         {#if vaultLabel?.(pane.active)}<span class="vault">{vaultLabel(pane.active)}</span>{/if}
@@ -187,6 +206,24 @@
   .tab.active {
     color: var(--fg);
     background: var(--bg);
+  }
+  .tab.blank {
+    font-style: italic;
+  }
+  /* Sits after the last tab rather than pinned to the right, the way a browser strip does. */
+  .newtab {
+    display: grid;
+    place-items: center;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    padding: 0.4rem 0.7rem;
+    cursor: pointer;
+    flex: none;
+  }
+  .newtab:hover {
+    color: var(--fg);
+    background: var(--hover);
   }
   .tab .x {
     margin-left: 0.5rem;

@@ -12,7 +12,7 @@
   import { plan, type DragPayload } from './lib/moves.ts'
   import type { ViewMode } from './lib/editor/setup.ts'
   import { clamp, dragResize } from './lib/resize.ts'
-  import Pane, { type PaneState } from './components/Pane.svelte'
+  import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -183,6 +183,7 @@
   // ---- tabs and panes (SPEC §9)
   const MAX_PANES = 3
   let paneSeq = 0
+  let blankSeq = 0
   let panes: PaneState[] = $state([blankPane()])
   let focusedPane = $state(0)
   /** Recently closed note ids, most recent last (Ctrl+Shift+T reopens). */
@@ -301,7 +302,10 @@
   }
   $effect(() => {
     if (solo || !workspace) return
-    const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active, mode: p.mode })), focused: focusedPane })
+    const data = JSON.stringify({
+      panes: panes.map((p) => ({ tabs: p.tabs.filter((t) => !isBlank(t)), active: p.active, mode: p.mode })),
+      focused: focusedPane,
+    })
     try {
       localStorage.setItem('lemmate.layout', data)
     } catch {
@@ -316,7 +320,7 @@
     const known = new Set(ws.notes.map((n) => n.id))
     untrack(() => {
       layoutRestored = true
-      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
+      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(t) || isBlank(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
       const live = kept.filter((p) => p.tabs.length > 0)
       panes = live.length ? live : [blankPane()]
       focusedPane = Math.min(focusedPane, panes.length - 1)
@@ -358,10 +362,42 @@
     m?.settle(value)
   }
 
-  /** Open a note in the focused pane. */
+  /**
+   * Open a note in the focused pane, **reusing its active tab**: browsing the tree is how you
+   * look for something, and it should not leave a trail of tabs to close afterwards. The tab
+   * you displace joins the reopen stack, so Ctrl+Shift+T undoes a misclick.
+   *
+   * Two tabs are never displaced: a pinned one (that is what pinning is for) and one already
+   * showing the note. `openInNewTab` is the deliberate opposite, from the ＋ button and the
+   * right-click menu.
+   */
   function open(id: string) {
     const p = focused
+    if (!p.tabs.includes(id)) {
+      const at = p.active ? p.tabs.indexOf(p.active) : -1
+      if (at === -1 || pinned.includes(p.active!)) p.tabs = [...p.tabs, id]
+      else {
+        const displaced = p.tabs[at]!
+        p.tabs = p.tabs.map((t, i) => (i === at ? id : t))
+        if (!isBlank(displaced)) closed = [...closed.filter((c) => c !== displaced), displaced].slice(-20)
+      }
+    }
+    landOn(id)
+  }
+  /** Open a note in a tab of its own, leaving whatever is already open where it is. */
+  function openInNewTab(id: string) {
+    const p = focused
     if (!p.tabs.includes(id)) p.tabs = [...p.tabs, id]
+    landOn(id)
+  }
+  /** A fresh empty tab, waiting for the next note you click (the ＋ on the tab strip). */
+  function newTab() {
+    const p = focused
+    p.tabs = [...p.tabs, `blank:${++blankSeq}`]
+    p.active = p.tabs[p.tabs.length - 1]!
+  }
+  function landOn(id: string) {
+    const p = focused
     p.active = id
     switcher = false
     palette = false
@@ -383,7 +419,7 @@
     const i = p.tabs.indexOf(id)
     p.tabs = p.tabs.filter((t) => t !== id)
     if (p.active === id) p.active = p.tabs[Math.min(i, p.tabs.length - 1)] ?? null
-    closed = [...closed.filter((c) => c !== id), id].slice(-20)
+    if (!isBlank(id)) closed = [...closed.filter((c) => c !== id), id].slice(-20)
     if (p.tabs.length === 0 && panes.length > 1) closePane(panes.indexOf(p))
   }
   function splitRight() {
@@ -405,7 +441,7 @@
   function reopenClosed() {
     const id = closed[closed.length - 1]
     closed = closed.slice(0, -1)
-    if (id && sessionOf(id)?.pathOf(id)) open(id)
+    if (id && sessionOf(id)?.pathOf(id)) openInNewTab(id)
   }
   function togglePin(id: string) {
     pinned = pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
@@ -444,6 +480,7 @@
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
     { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
+    { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
@@ -576,7 +613,7 @@
       // The originals are gone and their ids with them; reopen the copies in their place.
       for (const id of openBefore) close(id, true)
       const reopen = moved.filter((_, i) => openBefore.includes(moves[i]?.id ?? ''))
-      for (const m of reopen) open(m.id)
+      for (const m of reopen) openInNewTab(m.id)
     }
     if (failed.length) {
       await ask({
@@ -678,6 +715,9 @@
     } else if ((e.key === 't' || e.key === 'T') && e.shiftKey) {
       reopenClosed()
       e.preventDefault()
+    } else if (e.key === 't') {
+      newTab()
+      e.preventDefault()
     } else if (e.key === 'd' && e.shiftKey) {
       daily()
       e.preventDefault()
@@ -757,6 +797,7 @@
             onNewVault: newVault,
             onRenameNote: renameNote,
             onTrashNotes: trashNotes,
+            onOpenInTab: openInNewTab,
             onOpenInPane: openInNewPane,
             onShareNote: (id) => (open(id), (shareOpen = true)),
             onBookmarkNote: bookmarkNote,
@@ -845,6 +886,7 @@
           onHeadings={(h) => (headingsByPane[p.id] = h)}
           onPresence={(names) => (presenceByPane[p.id] = names)}
           onMode={(m) => { focusedPane = i; p.mode = m }}
+          onNewTab={() => { focusedPane = i; newTab() }}
           bind:jumpTo={jumpers[p.id]}
         />
       {/each}

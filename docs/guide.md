@@ -292,6 +292,15 @@ Without a template, a new note starts as `# <title>`. There is no scripting.
 unreferenced files in the folder are ignored. Deleting an attachment that is still referenced
 restores it — drop the reference to drop the file.
 
+**One tab, unless you ask for another.** Clicking a note — in the tree, in search, in the
+quick switcher, a `[[link]]`, a backlink — opens it **in the tab you are already on**, so
+browsing does not pile up tabs to close afterwards. The tab it displaces goes on the reopen
+stack, and `Ctrl+Shift+T` brings it back.
+
+Two tabs are never displaced: a **pinned** one, and one already showing that note (you just
+switch to it). To open something alongside what you have, use the **＋** on the tab strip for
+an empty tab, or right-click a note for *Open in a new tab* / *Open in a new pane*.
+
 **Tabs and panes.** Each pane has its own tab strip, editor and backlinks. `Ctrl+\` splits
 right (up to three panes); `Ctrl+Alt+←/→` moves focus. Pinned tabs sort first and ignore
 `Ctrl+W` (unpin from the palette to close them). `Ctrl+Shift+T` reopens the last closed tab —
@@ -392,12 +401,17 @@ your account.
 | `Ctrl+Shift+D` | Today's daily note |
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
 | `Ctrl+E` | Cycle this pane's view: live → source → reading |
+| `Ctrl+T` | New (empty) tab |
 | `Ctrl+W` | Close tab (no-op on a pinned tab) |
 | `Ctrl+Shift+T` | Reopen closed tab |
 | `Ctrl+\` | Split right |
 | `Ctrl+Alt+→` / `Ctrl+Alt+←` | Focus next / previous pane |
 
 Inside the quick switcher and palette: `↑`/`↓` to move, `Enter` to choose, `Escape` to close.
+
+Some of these — `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Shift+T` — are shortcuts the browser
+keeps for itself and a web page cannot intercept. They work in the desktop app; in a browser
+tab, use the ＋ button, a tab's ×, and the palette instead.
 
 Commands without a shortcut, reachable from the palette: show Files / Tags / Outline /
 Bookmarks / Version history, set the view to live / source / reading, Share note…, Rename /

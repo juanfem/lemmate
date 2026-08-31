@@ -76,6 +76,10 @@ Each **pane** shows its note in one of three views (SPEC §8), switched in the n
 with `Ctrl+E`: **live** preview, plain **source**, or **reading** (rendered, read-only). All
 three are the same CodeMirror view reconfigured, so there is no second renderer to drift.
 
+Opening a note **reuses the current tab**, so browsing does not accumulate tabs; the displaced
+one goes on the `Ctrl+Shift+T` stack. Pinned tabs are never displaced. The ＋ on the tab strip
+opens an empty tab, and the right-click menu can open into a new tab or a new pane.
+
 **Importing an Obsidian vault** is a command in the palette, or the ⇥ button on a vault row:
 pick the folder and the browser uploads it in batches to `POST /api/v1/vaults/{vault}/import`,
 which runs the same conversion as `lemmate import obsidian` (callouts → fenced divs, image

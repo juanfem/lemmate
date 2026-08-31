@@ -384,7 +384,10 @@ Editing features:
   focused note's vault. One WebSocket carries every vault: the frame protocol is addressed by
   doc id (§7), so a connection is not bound to one.
 - **Tabs and panes** — multiple open notes, split horizontally/vertically, pinned tabs,
-  reopen closed tab. Tab state persisted per device.
+  reopen closed tab. Tab state persisted per device. Opening a note **reuses the focused
+  pane's active tab** (browsing is not tab-creation); a pinned tab and one already showing the
+  note are never displaced, and a displaced tab joins the reopen stack. New tabs are explicit:
+  the ＋ on the strip, or *Open in a new tab* in the browser's right-click menu.
 - **Quick switcher** — fuzzy search over paths, titles, aliases; creates note on Enter if
   no match.
 - **Command palette** — every command, with shortcut hints; per-user shortcut remapping.

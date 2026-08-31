@@ -1,7 +1,7 @@
 <script lang="ts" module>
   /** The sidebar's toolbar glyphs. Stroke-only paths on a 16×16 grid, so they take
    *  `currentColor` and stay legible next to 0.85rem text in either theme. */
-  export type IconName = 'expand' | 'collapse' | 'locate' | 'tree' | 'split' | 'subfolders' | 'vault'
+  export type IconName = 'expand' | 'collapse' | 'locate' | 'tree' | 'split' | 'subfolders' | 'vault' | 'plus'
 
   const PATHS: Record<IconName, string[]> = {
     expand: ['M3.5 3.5 8 8l4.5-4.5', 'M3.5 9 8 13.5 12.5 9'],
@@ -11,6 +11,7 @@
     split: ['M2.5 3h11a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5Z', 'M2 8h12'],
     subfolders: ['M4 3v5.5a2 2 0 0 0 2 2h6', 'M9.5 8 12 10.5 9.5 13'],
     vault: ['M2 5.5 8 2.5l6 3-6 3-6-3Z', 'M2 10.5 8 13.5l6-3'],
+    plus: ['M8 3.5v9', 'M3.5 8h9'],
   }
 </script>
 
