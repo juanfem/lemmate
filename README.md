@@ -24,8 +24,9 @@ plus live e2e when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built binarie
 `ui/scripts/cdp.mjs` for headless-Chrome smoke runs against a running server. CI additionally
 compiles the whole workspace, Tauri shell included, on macOS and Windows.
 
-User guide (writing, organising, sharing, shortcuts, CLI, export, Obsidian migration):
-[`docs/guide.md`](docs/guide.md).
+Install (build the server, CLI and desktop app on Linux, macOS or Windows):
+[`docs/install.md`](docs/install.md). User guide (writing, organising, sharing, shortcuts, CLI,
+export, Obsidian migration): [`docs/guide.md`](docs/guide.md).
 
 ## Accounts and access
 
@@ -112,7 +113,9 @@ cargo run -p lemmate-desktop -- --vault-dir /path/to/vault --server-url http://1
 (cd ui && npm install && npm test)                    # TypeScript side of the corpus test
 ```
 
-Requires Rust 1.95+. SQLite is bundled. `pandoc`/`quarto` are optional and only used for export.
+Requires Rust 1.95+ and, for the web assets, Node 24+. SQLite is bundled. `pandoc`/`quarto` are
+optional and only used for export. Per-platform prerequisites, `cargo install`, and the desktop
+bundles (`.deb`/AppImage, `.dmg`, `.msi`) are in [`docs/install.md`](docs/install.md).
 
 ## Sync protocol in one paragraph
 

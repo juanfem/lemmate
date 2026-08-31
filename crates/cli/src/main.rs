@@ -646,9 +646,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             println!("schema version: {}", lemmate_core::store::SCHEMA_VERSION);
             println!("sqlite: {}", rusqlite_version());
             for tool in ["pandoc", "quarto"] {
-                let found = std::env::var_os("PATH")
-                    .map(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
-                    .unwrap_or(false);
+                let found = on_path(tool);
                 println!("{tool}: {}", if found { "found" } else { "not found (export disabled)" });
             }
             Ok(ExitCode::SUCCESS)
@@ -719,4 +717,39 @@ fn hostname() -> String {
 
 fn rusqlite_version() -> String {
     lemmate_core::store::sqlite_version()
+}
+
+/// Is `tool` an executable somewhere on `PATH`? Used by `doctor` to report optional tools.
+fn on_path(tool: &str) -> bool {
+    let pathext =
+        cfg!(windows).then(|| std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()));
+    let names = exe_names(tool, pathext.as_deref());
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| names.iter().any(|n| dir.join(n).is_file()))
+    })
+}
+
+/// File names a bare command can have: the name itself, plus every `PATHEXT` suffix on Windows,
+/// where `pandoc` on `PATH` is really `pandoc.exe`. `pathext` is `None` off Windows.
+fn exe_names(tool: &str, pathext: Option<&str>) -> Vec<String> {
+    let mut names = vec![tool.to_owned()];
+    if let Some(exts) = pathext {
+        let exts = exts.split(';').map(str::trim).filter(|e| !e.is_empty());
+        names.extend(exts.map(|e| format!("{tool}{e}")));
+    }
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exe_names;
+
+    #[test]
+    fn windows_commands_carry_their_pathext_suffixes() {
+        assert_eq!(exe_names("pandoc", None), ["pandoc"]);
+        assert_eq!(
+            exe_names("pandoc", Some(".COM;.EXE;;.CMD")),
+            ["pandoc", "pandoc.COM", "pandoc.EXE", "pandoc.CMD"]
+        );
+    }
 }

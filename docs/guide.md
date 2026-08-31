@@ -24,6 +24,10 @@ Three clients, one engine:
 
 ## 1. Getting started
 
+Nothing is packaged yet, so the binaries come from a build: [`install.md`](install.md) has the
+prerequisites and steps for Linux, macOS and Windows, and where each installed piece puts its
+files.
+
 ### (a) Run a server
 
 See [`deploy.md`](deploy.md) for Docker, a Caddy reverse proxy, fly.io, and backups. The short
