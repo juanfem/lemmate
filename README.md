@@ -61,6 +61,12 @@ connection was never per vault. A vault can be given a name (stored in the vault
 with every replica); without one the tree shows a short form of its id. The local relay serves
 exactly one vault, so on the desktop the tree simply has a single root.
 
+The Files sidebar offers two browsers over the same folders, switched from its toolbar: the
+interleaved **tree**, and a **folders/notes split** after Obsidian's *File Tree Alternative*
+(folders on top, the selected folder's notes below, with a toggle for reaching into
+subfolders). The toolbar also expands and collapses everything and reveals the open note. The
+sidebar itself, and the split inside it, are draggable.
+
 **Importing an Obsidian vault** is a command in the palette, or the ⇥ button on a vault row:
 pick the folder and the browser uploads it in batches to `POST /api/v1/vaults/{vault}/import`,
 which runs the same conversion as `lemmate import obsidian` (callouts → fenced divs, image

@@ -361,6 +361,10 @@ Editing features:
 - **Tree** — every vault you can read is a root of one tree, with its folders below it;
   folders are real folders. Drag-and-drop move, create, rename, delete. Sort by name/modified.
   Optional folder note (`<folder>/<folder>.md`).
+- **Two file browsers over the same folders** — the interleaved tree above, and a folder-first
+  split (folders on top, the selected folder's notes below, optionally reaching into its
+  subfolders) for the *File Tree Alternative* workflow in §11. Both share one set of folds;
+  the choice, the folds, the selected folder and the two split sizes are per device.
 - **One workspace** — vaults are not opened one at a time: tabs may hold notes from different
   vaults, the quick switcher lists every vault's notes, and search runs across all of them
   (§10). Panes that can only be per-vault — tags, version history, trash, sharing — follow the

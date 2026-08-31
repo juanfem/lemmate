@@ -7,7 +7,9 @@
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { Workspace } from './lib/workspace.svelte.ts'
   import { ulid } from './lib/ulid.ts'
-  import Tree, { type VaultNode } from './components/Tree.svelte'
+  import FilesPane from './components/FilesPane.svelte'
+  import type { VaultNode } from './lib/tree.ts'
+  import { clamp, dragResize } from './lib/resize.ts'
   import Pane, { type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
@@ -193,6 +195,29 @@
   let switcher = $state(false)
   let palette = $state(false)
   let tagsVersion = $state(0)
+
+  // ---- sidebar width: drag the divider, double-click it to go back to the default
+  const SIDE_MIN = 180
+  const SIDE_MAX = 640
+  const SIDE_DEFAULT = 272
+  let sideWidth = $state(loadSideWidth())
+  function loadSideWidth(): number {
+    try {
+      const n = Number(localStorage.getItem('lemmate.sidebar.width'))
+      if (Number.isFinite(n) && n > 0) return clamp(n, SIDE_MIN, SIDE_MAX)
+    } catch {
+      /* private mode */
+    }
+    return SIDE_DEFAULT
+  }
+  function saveSideWidth(w: number) {
+    sideWidth = w
+    try {
+      localStorage.setItem('lemmate.sidebar.width', String(w))
+    } catch {
+      /* private mode */
+    }
+  }
 
   function blankPane(): PaneState {
     return { id: ++paneSeq, tabs: [], active: null }
@@ -618,7 +643,7 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout">
+  <div class="layout" style:--side="{sideWidth}px">
     <aside>
       <div class="side-tabs">
         <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')} title="Files">Files</button>
@@ -634,18 +659,20 @@
       {#if solo}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
       {:else if sidebar === 'files'}
-        <Tree
+        <FilesPane
           {vaults}
           activeId={active}
           activeVault={session?.id ?? null}
           onOpen={open}
-          onCreateIn={createInFolder}
-          onRenameFolder={renameFolder}
-          onDeleteFolder={deleteFolder}
-          onCreateInVault={createInVault}
-          onRenameVault={renameVault}
-          onImportInto={(v) => (importInto = v)}
-          onNewVault={newVault}
+          actions={{
+            onCreateIn: createInFolder,
+            onRenameFolder: renameFolder,
+            onDeleteFolder: deleteFolder,
+            onCreateInVault: createInVault,
+            onRenameVault: renameVault,
+            onImportInto: (v) => (importInto = v),
+            onNewVault: newVault,
+          }}
         />
         {#if sharedWithMe.length}
           <nav class="shared">
@@ -687,6 +714,29 @@
         {statusLine}
       </footer>
     </aside>
+    <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
+         static kind. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="vsplit"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the sidebar"
+      aria-valuenow={sideWidth}
+      aria-valuemin={SIDE_MIN}
+      aria-valuemax={SIDE_MAX}
+      tabindex="0"
+      onpointerdown={(e) =>
+        dragResize(e, { axis: 'x', from: sideWidth, min: SIDE_MIN, max: SIDE_MAX, onMove: (v) => (sideWidth = v), onEnd: saveSideWidth })}
+      onkeydown={(e) => {
+        const step = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
+        if (!step) return
+        e.preventDefault()
+        saveSideWidth(clamp(sideWidth + step, SIDE_MIN, SIDE_MAX))
+      }}
+      ondblclick={() => saveSideWidth(SIDE_DEFAULT)}
+    ></div>
     <section class="main">
       {#each panes as p, i (p.id)}
         <Pane
@@ -764,15 +814,34 @@
   }
   .layout {
     display: grid;
-    grid-template-columns: 17rem 1fr;
+    /* The divider draws the border between the two, so it can light up while you drag it. */
+    grid-template-columns: var(--side, 17rem) auto 1fr;
     height: 100%;
   }
   aside {
     background: var(--panel);
-    border-right: 1px solid var(--border);
     display: grid;
-    grid-template-rows: auto 1fr auto auto;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
     min-height: 0;
+    min-width: 0;
+  }
+  /* Grab area wider than the hairline it draws, so the drag is not a pixel hunt. */
+  .vsplit {
+    width: 7px;
+    margin: 0 -3px;
+    cursor: col-resize;
+    position: relative;
+    z-index: 1;
+  }
+  .vsplit::after {
+    content: '';
+    position: absolute;
+    inset: 0 3px;
+    background: var(--border);
+  }
+  .vsplit:hover::after,
+  .vsplit:focus-visible::after {
+    background: var(--accent);
   }
   .side-tabs {
     display: flex;

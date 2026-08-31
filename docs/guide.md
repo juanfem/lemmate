@@ -193,6 +193,24 @@ folder, and remembers which folders you collapsed. Moving, creating and deleting
 by drag-and-drop is not built yet — use *Rename / move* (which takes a full path) or move the
 file on disk.
 
+**Two file browsers.** The toolbar above the tree switches between them, and remembers which
+one you left it on:
+
+- **Single tree** — every vault as a root, folders and notes interleaved beneath it.
+- **Folders and notes** — folders on top, the selected folder's notes in a list below, like
+  Obsidian's *File Tree Alternative*. Clicking a folder selects it; clicking the one you are
+  already on folds it. The ↳ button in the list header decides whether the list stops at that
+  folder or reaches into its subfolders — with subfolders included, each row says which one it
+  came from. Drag the divider between the two halves to re-balance them (double-click resets).
+
+The other three toolbar buttons **expand all**, **collapse all**, and **reveal the open note**
+— unfolding the path down to it, selecting its folder in the split view, and scrolling it into
+sight. Both views share one set of folds, so collapsing in one collapses in the other.
+
+**The sidebar is resizable.** Drag the divider between it and the editor; double-click the
+divider to go back to the default width. It is a `separator` you can also focus and nudge with
+the arrow keys. The width is remembered per device, like the pane layout.
+
 **Quick switcher** (`Ctrl+O`, `Ctrl+P`, `Ctrl+N`) fuzzy-matches paths **across every vault**,
 each hit labelled with the vault it comes from; substring matches rank above subsequence
 matches. If nothing matches exactly, the last entry offers to **create** the note at that path
@@ -201,7 +219,7 @@ matches. If nothing matches exactly, the last entry offers to **create** the not
 **Command palette** (`Ctrl+Shift+P`) lists every command with its shortcut. Shortcut remapping
 is not implemented.
 
-**Sidebar panes**: Files (tree), Search, Tags, Outline, Bookmarks (★), Version history (⏱).
+**Sidebar panes**: Files, Search, Tags, Outline, Bookmarks (★), Version history (⏱).
 
 - **Search** is SQLite FTS5 over title and body, with highlighted snippets, and covers every
   vault you can read — hits are labelled with theirs. FTS5 syntax works (`"exact phrase"`,

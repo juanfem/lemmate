@@ -1,40 +1,57 @@
 <script lang="ts">
-  import { displayName } from '../lib/vault.svelte.ts'
   import { buildTree, countNotes, folderKey, type FolderNode, type TreeActions, type VaultNode } from '../lib/tree.ts'
   import Icon from './Icon.svelte'
 
-  /**
-   * The unified view: every vault as a root, folders and notes interleaved beneath it.
-   * Collapse state lives in `FilesPane` because expand-all / collapse-all / reveal drive it
-   * from outside, and the split view folds the same folders.
-   */
+  /** Folders only, for the top half of the split view: one row per vault root and folder,
+   *  clicking a name selects it and `NoteList` below shows what is in it. */
   let {
     vaults,
-    activeId,
-    activeVault,
+    selected,
     collapsed,
     onToggle,
-    onOpen,
+    onSelect,
     actions = {},
   }: {
     vaults: VaultNode[]
-    activeId: string | null
-    activeVault?: string | null
+    selected: { vault: string; folder: string } | null
     collapsed: Record<string, boolean>
     onToggle: (key: string) => void
-    onOpen: (id: string) => void
+    onSelect: (vault: string, folder: string) => void
     actions?: TreeActions
   } = $props()
 
   let trees = $derived(vaults.map((v) => ({ vault: v, root: buildTree(v.notes) })))
+
+  function isSelected(vault: string, folder: string): boolean {
+    return selected?.vault === vault && selected.folder === folder
+  }
+  /** Clicking the row you are already on folds it, so one click still gets you both. */
+  function pick(vault: string, folder: string, key: string) {
+    if (isSelected(vault, folder)) onToggle(key)
+    else onSelect(vault, folder)
+  }
 </script>
 
-{#snippet folder(vault: string, f: FolderNode, depth: number)}
+{#snippet folders(vault: string, f: FolderNode, depth: number)}
   {#each f.folders as sub (sub.path)}
     {@const key = folderKey(vault, sub.path)}
-    <div class="row folder" style:padding-left="{depth * 0.9 + 0.4}rem">
-      <button class="folder-main" onclick={() => onToggle(key)}>
-        <span class="chev" class:open={!collapsed[key]}>▸</span>
+    <div
+      class="row folder"
+      class:selected={isSelected(vault, sub.path)}
+      data-folder={key}
+      style:padding-left="{depth * 0.9 + 0.4}rem"
+    >
+      {#if sub.folders.length}
+        <button
+          class="chev"
+          class:open={!collapsed[key]}
+          aria-label={collapsed[key] ? `Expand ${sub.name}` : `Collapse ${sub.name}`}
+          onclick={() => onToggle(key)}>▸</button
+        >
+      {:else}
+        <span class="chev spacer"></span>
+      {/if}
+      <button class="main" onclick={() => pick(vault, sub.path, key)} title={sub.path}>
         <span class="name">{sub.name}</span>
         <span class="count">{countNotes(sub)}</span>
       </button>
@@ -45,28 +62,21 @@
       </span>
     </div>
     {#if !collapsed[key]}
-      {@render folder(vault, sub, depth + 1)}
+      {@render folders(vault, sub, depth + 1)}
     {/if}
-  {/each}
-  {#each f.notes as n (n.id)}
-    <button
-      class="row note"
-      class:active={n.id === activeId}
-      data-note={n.id}
-      style:padding-left="{depth * 0.9 + 1.3}rem"
-      onclick={() => onOpen(n.id)}
-      title={n.path}
-    >
-      <span class="name">{displayName(n.path)}</span>
-    </button>
   {/each}
 {/snippet}
 
-<nav class="tree">
+<nav class="folders">
   {#each trees as t (t.vault.id)}
-    <div class="row vault" class:current={t.vault.id === activeVault}>
-      <button class="folder-main" onclick={() => onToggle(t.vault.id)} title={t.vault.id}>
-        <span class="chev" class:open={!collapsed[t.vault.id]}>▸</span>
+    <div class="row vault" class:selected={isSelected(t.vault.id, '')} data-folder={t.vault.id}>
+      <button
+        class="chev"
+        class:open={!collapsed[t.vault.id]}
+        aria-label={collapsed[t.vault.id] ? `Expand ${t.vault.label}` : `Collapse ${t.vault.label}`}
+        onclick={() => onToggle(t.vault.id)}>▸</button
+      >
+      <button class="main" onclick={() => pick(t.vault.id, '', t.vault.id)} title={t.vault.id}>
         <Icon name="vault" size={12} />
         <span class="name">{t.vault.label}</span>
         <span class="count">{t.vault.notes.length}</span>
@@ -78,10 +88,7 @@
       </span>
     </div>
     {#if !collapsed[t.vault.id]}
-      {@render folder(t.vault.id, t.root, 1)}
-      {#if t.vault.notes.length === 0}
-        <p class="empty small">Empty vault.</p>
-      {/if}
+      {@render folders(t.vault.id, t.root, 1)}
     {/if}
   {/each}
   {#if actions.onNewVault}
@@ -93,30 +100,41 @@
 </nav>
 
 <style>
-  .tree {
+  .folders {
     overflow: auto;
     font-size: 0.9rem;
+    min-height: 0;
   }
   .row {
     display: flex;
     align-items: center;
     gap: 0.3rem;
     width: 100%;
-    border: 0;
-    background: none;
-    color: inherit;
-    text-align: left;
     padding: 0.2rem 0.4rem;
-    cursor: pointer;
     border-radius: 4px;
-    font: inherit;
   }
   .row:hover {
     background: var(--hover);
   }
-  .row.active {
+  .row.selected {
     background: var(--accent-bg);
+  }
+  .row.selected .name {
     color: var(--accent);
+  }
+  .main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+    min-width: 0;
   }
   .name {
     flex: 1;
@@ -127,10 +145,8 @@
   .folder .name {
     font-weight: 600;
   }
-  /* A vault heads its own subtree, so it reads as a section header rather than a folder:
-     small caps, wide tracking, its own band — never mistakable for a `Daily/` below it. */
+  /* Same header treatment as the unified tree, so switching views does not move the eye. */
   .vault {
-    padding-right: 0.2rem;
     border-top: 1px solid var(--border);
     background: color-mix(in srgb, var(--border) 30%, transparent);
     border-radius: 0;
@@ -146,33 +162,36 @@
     letter-spacing: 0.07em;
     color: var(--muted);
   }
-  .vault.current .name,
-  .vault.current .folder-main :global(svg) {
+  .vault.selected .name,
+  .vault.selected .main :global(svg) {
     color: var(--accent);
   }
-  .folder {
-    padding-right: 0.2rem;
-  }
-  .folder-main {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
+  .chev {
+    flex: none;
+    width: 1em;
     border: 0;
     background: none;
-    color: inherit;
-    font: inherit;
-    text-align: left;
     padding: 0;
+    font: inherit;
+    color: var(--muted);
     cursor: pointer;
-    min-width: 0;
+    transition: transform 0.1s;
+  }
+  .chev.open {
+    transform: rotate(90deg);
+  }
+  .chev.spacer {
+    cursor: default;
+  }
+  .count {
+    color: var(--muted);
+    font-size: 0.75em;
   }
   .actions {
     display: none;
     gap: 0.1rem;
   }
-  .folder:hover .actions,
-  .vault:hover .actions {
+  .row:hover .actions {
     display: inline-flex;
   }
   .actions button {
@@ -187,30 +206,19 @@
   .actions button:hover {
     color: var(--fg);
   }
-  .chev {
-    display: inline-block;
-    width: 0.8em;
-    transition: transform 0.1s;
-    color: var(--muted);
-  }
-  .chev.open {
-    transform: rotate(90deg);
-  }
-  .count {
-    color: var(--muted);
-    font-size: 0.75em;
-  }
   .add {
+    border: 0;
+    background: none;
     color: var(--muted);
+    font: inherit;
     font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
     margin-top: 0.2rem;
   }
   .empty {
     color: var(--muted);
     padding: 1rem;
-  }
-  .empty.small {
-    padding: 0.2rem 0.4rem 0.4rem 1.7rem;
-    font-size: 0.8rem;
+    font-size: 0.85rem;
   }
 </style>
