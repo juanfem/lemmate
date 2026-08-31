@@ -112,6 +112,35 @@ pub struct LocalOptions {
     pub web_dir: Option<PathBuf>,
 }
 
+/// A loopback port for `vault_dir`, the same one every time.
+///
+/// A shell that points its webview at `http://127.0.0.1:{port}` makes that string the page's
+/// **origin**, and a browser partitions `localStorage` by origin — so binding port 0 quietly
+/// throws away everything the UI keeps there (open tabs and panes, pinned tabs, sidebar width,
+/// the file browser's mode and folds) on every launch. Deriving the port from the vault
+/// directory gives each vault a stable one with no extra state file to keep in step.
+///
+/// Callers must still fall back to an ephemeral port when the bind fails: the port may be
+/// taken, and a forgotten layout beats a shell that will not start.
+///
+/// The range is IANA's dynamic/private one. A derived port is guessable by other processes on
+/// the machine, but the relay already listens without authentication on loopback and anything
+/// local can find it by scanning, so predictability costs nothing that was not spent already.
+pub fn stable_port(vault_dir: &std::path::Path) -> u16 {
+    const FIRST: u32 = 49152;
+    const COUNT: u32 = 65536 - FIRST;
+    // FNV-1a written out rather than `DefaultHasher`, whose output is explicitly not stable
+    // across Rust releases — this port has to survive a toolchain upgrade.
+    let path = vault_dir.canonicalize().unwrap_or_else(|_| vault_dir.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let offset = u32::try_from(hash % u64::from(COUNT)).unwrap_or(0);
+    u16::try_from(FIRST + offset).unwrap_or(0)
+}
+
 pub(crate) struct LocalState {
     tx: mpsc::UnboundedSender<LocalEvent>,
     next_peer: AtomicU64,
@@ -716,6 +745,25 @@ pub(crate) async fn configured() -> axum::Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_port_is_the_same_every_time_and_differs_per_vault() {
+        let a = std::path::Path::new("/home/me/notes");
+        let b = std::path::Path::new("/home/me/work");
+        assert_eq!(stable_port(a), stable_port(a), "the whole point is that it does not move");
+        assert_ne!(stable_port(a), stable_port(b), "two vaults must not fight over one port");
+        for p in [a, b, std::path::Path::new("")] {
+            assert!(stable_port(p) >= 49152, "must land in the dynamic range, got {}", stable_port(p));
+        }
+    }
+
+    /// The value is a wire-ish constant: change the derivation and every existing install
+    /// silently forgets its layout once, so this is a decision to make deliberately.
+    #[test]
+    fn stable_port_derivation_is_pinned() {
+        // A path that cannot exist, so `canonicalize` fails and the raw bytes are hashed.
+        assert_eq!(stable_port(std::path::Path::new("/nonexistent-vault-for-tests")), 54678);
+    }
 
     #[tokio::test]
     async fn setup_mode_hands_the_form_back_once() {

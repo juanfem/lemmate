@@ -145,11 +145,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                         ca_cert: cfg.ca_cert.clone(),
                         token: cfg.token.clone().or_else(|| lemmate_core::credentials::load(&cfg.server_url)),
                     };
-                    let local = LocalOptions {
-                        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                        web_dir: Some(web_dir),
-                    };
-                    let relay = client::start(sync, local).await.context("starting the local sync relay")?;
+                    let relay = start_on_stable_port(sync, web_dir, &cfg.vault_dir).await?;
                     let url: tauri::Url = format!("http://{}/#/v/{}", relay.addr, relay.vault_id).parse()?;
                     if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
                         w.navigate(url).context("navigating to the relay")?;
@@ -197,12 +193,9 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
         // Saved by `lemmate login`; a server with accounts refuses the sync without it.
         token: cfg.token.clone().or_else(|| lemmate_core::credentials::load(&cfg.server_url)),
     };
-    let local = LocalOptions { bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), web_dir: Some(web_dir) };
-
-    // `client::start` binds the listener and returns once it is up, so the URL below is
-    // serveable by the time the webview asks for it.
-    let handle = tauri::async_runtime::block_on(client::start(sync, local))
-        .context("starting the local sync relay")?;
+    // `start_on_stable_port` binds the listener and returns once it is up, so the URL below
+    // is serveable by the time the webview asks for it.
+    let handle = tauri::async_runtime::block_on(start_on_stable_port(sync, web_dir, &cfg.vault_dir))?;
 
     let url = format!("http://{}/#/v/{}", handle.addr, handle.vault_id);
     tracing::info!(%url, "opening main window");
@@ -215,6 +208,32 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
         .context("creating the main window")?;
 
     Ok(Relay(Mutex::new(Some(handle))))
+}
+
+/// Bind the relay on the vault's stable port (see [`lemmate_core::local::stable_port`]), and
+/// fall back to an ephemeral one if something already holds it.
+///
+/// The port is what keeps the webview's origin — and with it every `localStorage` key the UI
+/// writes: open tabs and panes, pinned tabs, sidebar width, the file browser's folds — the same
+/// from one launch to the next. Losing it costs the layout, not the notes, so a taken port is a
+/// warning rather than a failure to start.
+async fn start_on_stable_port(
+    sync: SyncOptions,
+    web_dir: PathBuf,
+    vault_dir: &Path,
+) -> anyhow::Result<LocalHandle> {
+    let port = lemmate_core::local::stable_port(vault_dir);
+    let opts = |port| LocalOptions {
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        web_dir: Some(web_dir.clone()),
+    };
+    match client::start(sync.clone(), opts(port)).await {
+        Ok(handle) => Ok(handle),
+        Err(e) => {
+            tracing::warn!(port, error = %e, "stable port unavailable; the saved layout will not be restored");
+            client::start(sync, opts(0)).await.context("starting the local sync relay")
+        }
+    }
 }
 
 /// Where the relay reads the built web assets from, in order of precedence:
