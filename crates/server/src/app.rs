@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::auth::{self, AuthMode, AuthUser};
 use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -15,6 +15,7 @@ use axum::{Json, Router};
 use lemmate_core::attachments::{
     AttachmentStore, MAX_ATTACHMENT_BYTES, hash_bytes, is_valid_hash, mime_for_path,
 };
+use lemmate_core::import::{self, Upload, UploadReport};
 use lemmate_core::store::{AttachmentRow, Role, now_ms};
 use lemmate_core::sync::{Frame, Message, SyncMessage};
 use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
@@ -188,6 +189,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))
         .route("/api/v1/vaults/{vault}/notes", get(list_notes).post(create_note))
+        .route("/api/v1/vaults/{vault}/import", axum::routing::post(import_vault))
         .route(
             "/api/v1/vaults/{vault}/notes/{id}",
             get(get_note).put(put_note).patch(patch_note).delete(delete_note),
@@ -573,24 +575,118 @@ async fn create_note(
             return Err(StatusCode::CONFLICT);
         }
     }
+    let (id, text) = create_note_in(&state, vault, &vroom, &path, &body.content).await?;
+    let title = state.store.lock().await.note_by_id(id).map_err(internal)?.and_then(|r| r.title);
+    Ok((StatusCode::CREATED, Json(NoteBody { id: id.to_string(), path, title, content: text })))
+}
+
+/// Create one note in a vault whose role the caller has already checked, and return its id and
+/// the text as stored (front matter carries the id, SPEC §6.3). Shared by `create_note` and the
+/// Obsidian importer.
+async fn create_note_in(
+    state: &Arc<AppState>,
+    vault: VaultId,
+    vroom: &Arc<Room>,
+    path: &str,
+    content: &str,
+) -> Result<(NoteId, String), StatusCode> {
     let id = NoteId::new();
     let text =
-        lemmate_core::frontmatter::normalize(&body.content, &id.to_string()).unwrap_or(body.content.clone());
+        lemmate_core::frontmatter::normalize(content, &id.to_string()).unwrap_or_else(|| content.to_owned());
     // Content first, then the entry, so nobody sees an empty note (same order as the UI).
-    let nroom = note_room(&state, id).await?;
+    let nroom = note_room(state, id).await?;
     state.note_vault_claims.lock().await.insert(id, vault);
     let update = match &*nroom.doc.lock().await {
         RoomDoc::Note(d) => d.set_text(&text),
         RoomDoc::Vault(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    commit_change(&state, &nroom, update).await?;
+    commit_change(state, &nroom, update).await?;
     let vupdate = match &*vroom.doc.lock().await {
-        RoomDoc::Vault(v) => v.set_path(id, &path),
+        RoomDoc::Vault(v) => v.set_path(id, path),
         RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    commit_change(&state, &vroom, vupdate).await?;
-    let title = state.store.lock().await.note_by_id(id).map_err(internal)?.and_then(|r| r.title);
-    Ok((StatusCode::CREATED, Json(NoteBody { id: id.to_string(), path, title, content: text })))
+    commit_change(state, vroom, vupdate).await?;
+    Ok((id, text))
+}
+
+/// Import an Obsidian vault from the browser (SPEC §11.4): a multipart body whose parts are the
+/// files, each named by its vault-relative path. Conversion is `lemmate_core::import`, the same
+/// code `lemmate import obsidian` runs; the notes it produces are created through the room docs
+/// like any other API write. Idempotent: a path the vault already holds is skipped, so a
+/// re-uploaded batch does not duplicate notes.
+async fn import_vault(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    mut form: Multipart,
+) -> Result<Json<UploadReport>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Importing into a vault nobody owns claims it, exactly as a first sync does.
+    match auth::role_or_claim(&state, &user, vault, true).await {
+        None => return Err(StatusCode::NOT_FOUND),
+        Some(r) if r < Role::Editor => return Err(StatusCode::FORBIDDEN),
+        Some(_) => {}
+    }
+    let vroom = vault_room(&state, vault).await?;
+    let mut out = UploadReport::default();
+    while let Some(field) = form.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        let rel = field.file_name().or_else(|| field.name()).unwrap_or_default().to_owned();
+        let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let Some(upload) = import::import_upload(&rel, bytes.to_vec()) else {
+            continue;
+        };
+        match upload {
+            Upload::Note { path, text, callouts, embeds } => {
+                let taken = match &*vroom.doc.lock().await {
+                    RoomDoc::Vault(v) => v.entries().iter().any(|(_, p)| *p == path),
+                    RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+                };
+                if taken {
+                    out.skipped += 1;
+                    continue;
+                }
+                create_note_in(&state, vault, &vroom, &path, &text).await?;
+                out.notes += 1;
+                out.callouts += callouts;
+                out.embeds += embeds;
+            }
+            Upload::Attachment { path, bytes } => {
+                if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+                    out.skipped += 1;
+                    continue;
+                }
+                let (hash, _) = state.attachments.put(vault, &bytes).map_err(internal)?;
+                let row = AttachmentRow {
+                    hash: hash.clone(),
+                    size: bytes.len() as u64,
+                    mime: mime_for_path(&path),
+                    filename_hint: Some(path.clone()),
+                };
+                state.store.lock().await.upsert_attachment(vault, &row).map_err(internal)?;
+                let update = match &*vroom.doc.lock().await {
+                    RoomDoc::Vault(v) => v.set_attachment(&path, &hash),
+                    RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+                };
+                commit_change(&state, &vroom, update).await?;
+                out.attachments += 1;
+            }
+            Upload::Bookmarks(marks) => {
+                let (added, update) = match &*vroom.doc.lock().await {
+                    RoomDoc::Vault(v) => {
+                        let before = v.bookmarks().len();
+                        let update = v.add_bookmarks(&marks);
+                        (v.bookmarks().len() - before, update)
+                    }
+                    RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+                };
+                commit_change(&state, &vroom, update).await?;
+                out.bookmarks += added;
+            }
+            // Nothing here has a sidecar to keep these in; the relay stores them (§9).
+            Upload::Daily(_) => {}
+        }
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]

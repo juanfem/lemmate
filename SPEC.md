@@ -156,6 +156,10 @@ One `Y.Doc` per vault, holding structure that must survive concurrent offline ed
 - `notes: Y.Map<noteId, { path: string, createdAt }>` — rename/move = update `path`.
 - `folders: Y.Map<path, {}>` — explicit empty folders.
 - `bookmarks: Y.Array<{ kind: 'note'|'folder'|'search'|'heading', target, label }>`.
+- `attachments: Y.Map<path, hash>` — vault-relative path → blake3 of the blob (§7).
+- `meta: Y.Map<string, string>` — vault-level settings shared by every replica; today only
+  `name`, the label the UI shows for the vault (everywhere else a vault has an id and no name,
+  and clients fall back to a short form of the id).
 
 Two concurrent renames of the same note resolve by Yjs last-writer-wins on the map entry;
 two notes concurrently moved to the same path get a ` (2)` suffix applied by the client
@@ -354,8 +358,14 @@ Editing features:
 
 ## 9. Organisation and workflow features
 
-- **Tree** — folders are real folders. Drag-and-drop move, create, rename, delete.
-  Sort by name/modified. Optional folder note (`<folder>/<folder>.md`).
+- **Tree** — every vault you can read is a root of one tree, with its folders below it;
+  folders are real folders. Drag-and-drop move, create, rename, delete. Sort by name/modified.
+  Optional folder note (`<folder>/<folder>.md`).
+- **One workspace** — vaults are not opened one at a time: tabs may hold notes from different
+  vaults, the quick switcher lists every vault's notes, and search runs across all of them
+  (§10). Panes that can only be per-vault — tags, version history, trash, sharing — follow the
+  focused note's vault. One WebSocket carries every vault: the frame protocol is addressed by
+  doc id (§7), so a connection is not bound to one.
 - **Tabs and panes** — multiple open notes, split horizontally/vertically, pinned tabs,
   reopen closed tab. Tab state persisted per device.
 - **Quick switcher** — fuzzy search over paths, titles, aliases; creates note on Enter if
@@ -431,7 +441,15 @@ Enforcement is at the sync layer (§7) and API layer, not in the UI.
 
 ### 11.4 Obsidian import
 
-`lemmate import obsidian <dir>` (CLI and desktop wizard):
+`lemmate import obsidian <dir>` (CLI), and `POST /api/v1/vaults/{vault}/import` for the web and
+desktop clients — a multipart body whose parts are the picked files, each named by its
+vault-relative path, uploaded in batches so that a large vault is not one enormous request.
+Importing into a vault nobody owns claims it, as a first sync does; a path the vault already
+holds is skipped, so a repeated batch cannot duplicate notes. On a server the imported notes are
+created through the room docs; on the local relay they are written into the vault folder, which
+is also the only side with a sidecar to keep daily-note settings in.
+
+Either way the conversion is the same code:
 - Preserves folder structure and filenames; assigns ULIDs.
 - Converts `> [!kind] Title` callouts to `::: {.callout-kind title="Title"}`.
 - Keeps wikilinks; rewrites `![[img.png]]` image embeds to `![](img.png)`; other embeds

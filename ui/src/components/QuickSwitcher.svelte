@@ -1,13 +1,24 @@
 <script lang="ts">
-  import type { NoteEntry } from '../lib/vault.svelte.ts'
   import { displayName } from '../lib/vault.svelte.ts'
+  import type { WorkspaceNote } from '../lib/workspace.svelte.ts'
 
+  /** Fuzzy open across every vault (SPEC §9); a new note goes into `createVault`. */
   let {
     notes,
+    label,
+    createVault,
     onOpen,
     onCreate,
     onClose,
-  }: { notes: NoteEntry[]; onOpen: (id: string) => void; onCreate: (path: string) => void; onClose: () => void } = $props()
+  }: {
+    notes: WorkspaceNote[]
+    /** Vault label to show beside a hit; empty when a single vault makes it noise. */
+    label?: (vault: string) => string
+    createVault?: string | null
+    onOpen: (id: string) => void
+    onCreate: (path: string) => void
+    onClose: () => void
+  } = $props()
 
   let query = $state('')
   let selected = $state(0)
@@ -33,7 +44,9 @@
       .map((x) => x.n)
   })
 
-  let canCreate = $derived(query.trim().length > 0 && !notes.some((n) => n.path === normalize(query)))
+  let canCreate = $derived(
+    query.trim().length > 0 && !!createVault && !notes.some((n) => n.path === normalize(query)),
+  )
 
   function normalize(q: string): string {
     const t = q.trim().replace(/^\/+/u, '')
@@ -78,7 +91,7 @@
         <li class:selected={i === selected}>
           <button onclick={() => choose(i)}>
             <span class="title">{displayName(n.path)}</span>
-            <span class="path">{n.path}</span>
+            <span class="path">{#if label?.(n.vault)}<span class="vault">{label(n.vault)}</span>{/if}{n.path}</span>
           </button>
         </li>
       {/each}
@@ -86,6 +99,7 @@
         <li class:selected={selected === results.length}>
           <button onclick={() => choose(results.length)}>
             <span class="title">Create “{normalize(query)}”</span>
+            {#if createVault && label?.(createVault)}<span class="path"><span class="vault">{label(createVault)}</span></span>{/if}
           </button>
         </li>
       {/if}
@@ -147,6 +161,13 @@
   li.selected button,
   li button:hover {
     background: var(--accent-bg);
+  }
+  .vault {
+    text-transform: uppercase;
+    font-size: 0.9em;
+    letter-spacing: 0.03em;
+    margin-right: 0.4em;
+    opacity: 0.8;
   }
   .path {
     color: var(--muted);

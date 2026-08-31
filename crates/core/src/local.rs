@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -21,6 +21,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::error::{Error, Result};
 use crate::ids::{NoteId, VaultId};
+use crate::import::UploadReport;
 use crate::store::{NoteRow, SearchHit};
 
 /// Events the relay feeds into the engine loop.
@@ -72,6 +73,10 @@ pub enum LocalQuery {
         name: String,
         bytes: Vec<u8>,
     },
+    /// One batch of an uploaded Obsidian vault: (vault-relative path, bytes) per picked file.
+    Import {
+        files: Vec<(String, Vec<u8>)>,
+    },
 }
 
 pub enum LocalReply {
@@ -96,6 +101,7 @@ pub enum LocalReply {
         path: String,
         hash: String,
     },
+    Imported(UploadReport),
     Error(String),
 }
 
@@ -126,6 +132,7 @@ pub(crate) async fn serve(
         .route("/api/v1/local/setup", get(configured))
         .route("/api/v1/vaults", get(vaults))
         .route("/api/v1/vaults/{vault}/notes", get(notes).post(create_note))
+        .route("/api/v1/vaults/{vault}/import", axum::routing::post(import_vault))
         .route(
             "/api/v1/vaults/{vault}/notes/{id}",
             get(note).put(replace_note).patch(rename_note).delete(delete_note),
@@ -573,6 +580,26 @@ impl From<LocalQuery> for LocalEvent {
     fn from(query: LocalQuery) -> Self {
         let (reply, _) = oneshot::channel();
         LocalEvent::Query { query, reply }
+    }
+}
+
+/// Obsidian import (SPEC §11.4), the same endpoint the server offers: a multipart body whose
+/// parts are the picked files, each named by its vault-relative path. Here the engine writes
+/// them into the vault folder, so they travel to the server as ordinary local edits.
+async fn import_vault(
+    State(s): State<Arc<LocalState>>,
+    Path(_vault): Path<String>,
+    mut form: Multipart,
+) -> Resp<UploadReport> {
+    let mut files = Vec::new();
+    while let Some(field) = form.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        let rel = field.file_name().or_else(|| field.name()).unwrap_or_default().to_owned();
+        let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        files.push((rel, bytes.to_vec()));
+    }
+    match ask(&s, LocalQuery::Import { files }).await? {
+        LocalReply::Imported(report) => Ok(axum::Json(report)),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

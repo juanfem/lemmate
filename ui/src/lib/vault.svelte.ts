@@ -1,5 +1,10 @@
-// Live view of one vault: the vault doc (paths, attachments, bookmarks) and a cache of open
-// note docs, all synced through one SyncClient. Reactive via Svelte 5 runes.
+// Live view of one vault: the vault doc (paths, attachments, bookmarks, name) and a cache of
+// open note docs. Reactive via Svelte 5 runes.
+//
+// The socket is not per vault: `Workspace` (workspace.svelte.ts) hands every session the same
+// SyncClient, because the frame protocol is addressed by doc id and one connection carries as
+// many vaults as it likes. A session created without one (a directly shared note, a public
+// link) owns its client and tears it down with itself.
 
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
@@ -24,15 +29,20 @@ export interface Bookmark {
 export class VaultSession {
   readonly id: string
   readonly client: SyncClient
+  /** Whether `destroy()` should take the socket down with it. */
+  private readonly ownsClient: boolean
   readonly vaultDoc = new Y.Doc()
   private notesMap: Y.Map<string>
   private attachmentsMap: Y.Map<string>
   private bookmarksArr: Y.Array<Bookmark>
+  private metaMap: Y.Map<string>
   private open = new Map<string, { doc: Y.Doc; awareness: Awareness; refs: number }>()
 
   notes: NoteEntry[] = $state([])
   attachments: Record<string, string> = $state({})
   bookmarks: Bookmark[] = $state([])
+  /** Optional display name, shared by every replica; falls back to a short id in the UI. */
+  name = $state('')
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
   /** Last permission denial from the server, for the shell to show. */
@@ -41,29 +51,31 @@ export class VaultSession {
   /** Without the vault doc: for notes shared directly (SPEC §11.2), which grant only the note. */
   readonly noteOnly: boolean
 
-  constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string } = {}) {
+  constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string; client?: SyncClient } = {}) {
     this.id = id
     this.noteOnly = opts.noteOnly ?? false
-    const wsUrl = opts.wsUrl ?? SyncClient.wsUrl()
-    this.client = new SyncClient(wsUrl)
-    this.client.onStatus = (s) => (this.status = s)
-    this.client.onSynced = (docId) => {
-      if (docId === this.vaultDocId) this.vaultSynced = true
-    }
-    this.client.onDenied = (docId, reason) => {
-      this.denied = { docId, reason }
+    this.ownsClient = !opts.client
+    this.client = opts.client ?? new SyncClient(opts.wsUrl ?? SyncClient.wsUrl())
+    if (this.ownsClient) {
+      // A shared client is driven by the workspace, which fans these out to every session.
+      this.client.onStatus = (s) => (this.status = s)
+      this.client.onSynced = (docId) => this.onSynced(docId)
+      this.client.onDenied = (docId, reason) => this.onDenied(docId, reason)
     }
     this.notesMap = this.vaultDoc.getMap<string>('notes')
     this.attachmentsMap = this.vaultDoc.getMap<string>('attachments')
     this.bookmarksArr = this.vaultDoc.getArray<Bookmark>('bookmarks')
+    this.metaMap = this.vaultDoc.getMap<string>('meta')
     const refresh = () => {
       this.notes = [...this.notesMap.entries()].map(([id, path]) => ({ id, path })).sort((a, b) => a.path.localeCompare(b.path))
       this.attachments = Object.fromEntries(this.attachmentsMap.entries())
       this.bookmarks = this.bookmarksArr.toArray()
+      this.name = this.metaMap.get('name') ?? ''
     }
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
     this.bookmarksArr.observe(refresh)
+    this.metaMap.observe(refresh)
     if (!this.noteOnly) {
       this.cache(this.vaultDocId, this.vaultDoc)
       this.client.open(this.vaultDocId, this.vaultDoc)
@@ -81,6 +93,31 @@ export class VaultSession {
 
   get vaultDocId() {
     return `vault:${this.id}`
+  }
+
+  /** Does this session own `docId`? The workspace routes shared-socket events by this. */
+  handlesDoc(docId: string): boolean {
+    return docId === this.vaultDocId || this.open.has(docId)
+  }
+
+  onSynced(docId: string) {
+    if (docId === this.vaultDocId) this.vaultSynced = true
+  }
+
+  onDenied(docId: string, reason: string) {
+    this.denied = { docId, reason }
+  }
+
+  /** Rename the vault for everyone (SPEC §4.3): the label lives in the vault doc. */
+  setName(name: string) {
+    const trimmed = name.trim()
+    if (trimmed) this.metaMap.set('name', trimmed)
+    else this.metaMap.delete('name')
+  }
+
+  /** What to call this vault in the UI when it has no name of its own. */
+  get label(): string {
+    return this.name || `vault ${this.id.slice(-6)}`
   }
 
   pathOf(id: string): string | undefined {
@@ -211,7 +248,15 @@ export class VaultSession {
   }
 
   destroy() {
-    this.client.destroy()
+    if (this.ownsClient) {
+      this.client.destroy()
+    } else {
+      // The socket outlives us: close only the docs this session opened on it.
+      for (const id of [...this.open.keys()]) this.client.close(id)
+      if (!this.noteOnly) this.client.close(this.vaultDocId)
+    }
+    for (const e of this.open.values()) e.doc.destroy()
+    this.open.clear()
     this.vaultDoc.destroy()
   }
 }

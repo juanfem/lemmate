@@ -1,7 +1,12 @@
 <script lang="ts">
   import { api, type SearchHit } from '../lib/api.ts'
 
-  let { vault, onOpen }: { vault: string; onOpen: (id: string) => void } = $props()
+  /**
+   * Cross-vault search (SPEC §10): `/api/v1/search` ranks every vault the account can read
+   * together, and the relay answers it for its one vault. Hits name a note id, which the shell
+   * resolves back to a vault through the workspace.
+   */
+  let { label, onOpen }: { label?: (noteId: string) => string; onOpen: (id: string) => void } = $props()
   let query = $state('')
   let hits: SearchHit[] = $state([])
   let error = $state('')
@@ -16,7 +21,7 @@
         return
       }
       try {
-        hits = await api.search(vault, q)
+        hits = await api.searchAll(q)
         error = ''
       } catch (e) {
         error = String(e)
@@ -32,7 +37,7 @@
     {#each hits as h (h.note_id)}
       <li>
         <button onclick={() => onOpen(h.note_id)}>
-          <span class="title">{h.title ?? h.note_id}</span>
+          <span class="title">{#if label?.(h.note_id)}<span class="vault">{label(h.note_id)}</span>{/if}{h.title ?? h.note_id}</span>
           <span class="snippet">{h.snippet}</span>
         </button>
       </li>
@@ -80,6 +85,14 @@
     display: block;
     font-weight: 600;
     font-size: 0.9rem;
+  }
+  .vault {
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 0.8em;
+    letter-spacing: 0.03em;
+    margin-right: 0.4em;
+    font-weight: 400;
   }
   .snippet {
     display: block;

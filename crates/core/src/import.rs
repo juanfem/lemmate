@@ -91,16 +91,10 @@ pub const BOOKMARKS_FILE: &str = "bookmarks.import.json";
 /// Sidecar file holding the imported daily-note settings.
 pub const DAILY_FILE: &str = "daily.import.json";
 
-/// One imported bookmark, in the shape the vault doc's bookmark list uses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Bookmark {
-    /// Always `note` for now; Obsidian's search/graph/heading bookmarks are dropped.
-    pub kind: String,
-    /// Vault-relative path of the bookmarked note.
-    pub target: String,
-    /// Display label: the bookmark's own title, else the file stem.
-    pub label: String,
-}
+/// Imported bookmarks are the vault doc's own bookmarks (SPEC §4.3): the sidecar file and the
+/// CRDT list hold the same shape. Obsidian's search/graph/heading bookmarks are dropped, so
+/// everything the importer produces has `kind: "note"`.
+pub use crate::vault_doc::Bookmark;
 
 /// Imported daily-note settings (`.obsidian/daily-notes.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,11 +459,8 @@ fn import_daily_notes(
         return Ok(());
     }
     let raw = fs::read_to_string(&path)?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| Error::Import(e.to_string()))?;
-    let settings = DailySettings {
-        folder: value.get("folder").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-        format: value.get("format").and_then(|v| v.as_str()).unwrap_or("YYYY-MM-DD").to_owned(),
-    };
+    let settings = parse_daily_notes(&raw)
+        .ok_or_else(|| Error::Import(format!("{} is not valid JSON", path.display())))?;
     let target = dest.join(SIDECAR_DIR).join(DAILY_FILE);
     if !claim(&target, opts, report)? {
         return Ok(());
@@ -480,9 +471,155 @@ fn import_daily_notes(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// Uploaded vaults (the web UI)
+// ---------------------------------------------------------------------------------------------
+
+/// What one uploaded file of an Obsidian vault turns into. The caller decides where it lands:
+/// the server writes notes into the CRDT, the local relay into the vault folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upload {
+    /// A converted note, ready to be created at `path`.
+    Note { path: String, text: String, callouts: usize, embeds: usize },
+    /// Any other file the vault referenced.
+    Attachment { path: String, bytes: Vec<u8> },
+    /// `.obsidian/bookmarks.json`, flattened.
+    Bookmarks(Vec<Bookmark>),
+    /// `.obsidian/daily-notes.json`.
+    Daily(DailySettings),
+}
+
+/// What one upload request did (SPEC §11.4). A whole import is several requests — the browser
+/// sends the picked folder in batches — so these counts are per request and the UI adds them up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadReport {
+    pub notes: usize,
+    pub attachments: usize,
+    pub callouts: usize,
+    pub embeds: usize,
+    /// Files left alone: a path the vault already had, or an attachment over the size limit.
+    pub skipped: usize,
+    pub bookmarks: usize,
+    /// Whether daily-note settings were stored. Only a vault folder has somewhere to put them
+    /// (the sidecar), so this is false for an import into a server.
+    pub daily_notes: bool,
+}
+
+/// Normalise a browser-supplied relative path: backslashes become `/`, leading slashes and `.`
+/// segments go, and anything that could escape the vault (`..`, an absolute Windows path, an
+/// empty result) is rejected.
+pub fn upload_path(rel: &str) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    if rel.contains(':') {
+        return None;
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for seg in rel.split('/') {
+        match seg.trim() {
+            "" | "." => continue,
+            ".." => return None,
+            s => out.push(s),
+        }
+    }
+    if out.is_empty() { None } else { Some(out.join("/")) }
+}
+
+/// Classify and convert one uploaded file (SPEC §11.4). `None` means "not imported": Obsidian's
+/// own workspace state, its trash, our sidecar, and hidden files generally — except the two
+/// settings files that have a home here.
+pub fn import_upload(rel: &str, bytes: Vec<u8>) -> Option<Upload> {
+    let path = upload_path(rel)?;
+    let hidden = path.split('/').any(|seg| seg.starts_with('.'));
+    if hidden {
+        return match path.as_str() {
+            ".obsidian/bookmarks.json" => {
+                let raw = String::from_utf8(bytes).ok()?;
+                let marks = parse_bookmarks(&raw).ok()?;
+                (!marks.is_empty()).then_some(Upload::Bookmarks(marks))
+            }
+            ".obsidian/daily-notes.json" => {
+                let raw = String::from_utf8(bytes).ok()?;
+                Some(Upload::Daily(parse_daily_notes(&raw)?))
+            }
+            _ => None,
+        };
+    }
+    if is_note(Path::new(&path)) {
+        let converted = convert_note(&String::from_utf8_lossy(&bytes));
+        return Some(Upload::Note {
+            path,
+            text: converted.text,
+            callouts: converted.callouts,
+            embeds: converted.embeds,
+        });
+    }
+    Some(Upload::Attachment { path, bytes })
+}
+
+/// Obsidian's `daily-notes.json`, with its defaults filled in.
+pub fn parse_daily_notes(raw: &str) -> Option<DailySettings> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(DailySettings {
+        folder: value.get("folder").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+        format: value.get("format").and_then(|v| v.as_str()).unwrap_or("YYYY-MM-DD").to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_paths_are_normalised_and_escapes_rejected() {
+        assert_eq!(upload_path("Daily\\2026-01-01.md").as_deref(), Some("Daily/2026-01-01.md"));
+        assert_eq!(upload_path("/Projects/./plan.md").as_deref(), Some("Projects/plan.md"));
+        assert_eq!(upload_path("../escape.md"), None);
+        assert_eq!(upload_path("C:/vault/note.md"), None);
+        assert_eq!(upload_path("   "), None);
+    }
+
+    #[test]
+    fn uploaded_notes_are_converted_and_other_files_pass_through() {
+        let note = import_upload("Notes/a.md", b"> [!tip] T\n> body\n".to_vec()).unwrap();
+        assert_eq!(
+            note,
+            Upload::Note {
+                path: "Notes/a.md".to_owned(),
+                text: "::: {.callout-tip title=\"T\"}\nbody\n:::\n".to_owned(),
+                callouts: 1,
+                embeds: 0,
+            }
+        );
+        let img = import_upload("attachments/logo.png", vec![1, 2, 3]).unwrap();
+        assert_eq!(img, Upload::Attachment { path: "attachments/logo.png".to_owned(), bytes: vec![1, 2, 3] });
+    }
+
+    #[test]
+    fn uploaded_obsidian_state_is_ignored_apart_from_the_two_settings_files() {
+        assert_eq!(import_upload(".obsidian/workspace.json", b"{}".to_vec()), None);
+        assert_eq!(import_upload(".trash/old.md", b"x".to_vec()), None);
+        assert_eq!(import_upload(".lemmate/local.db", b"x".to_vec()), None);
+        let marks = import_upload(
+            ".obsidian/bookmarks.json",
+            br#"{"items":[{"type":"file","path":"Projects/plan.md","title":"Plan"}]}"#.to_vec(),
+        );
+        assert_eq!(
+            marks,
+            Some(Upload::Bookmarks(vec![Bookmark {
+                kind: "note".to_owned(),
+                target: "Projects/plan.md".to_owned(),
+                label: "Plan".to_owned(),
+            }]))
+        );
+        let daily = import_upload(".obsidian/daily-notes.json", br#"{"folder":"Daily"}"#.to_vec());
+        assert_eq!(
+            daily,
+            Some(Upload::Daily(DailySettings {
+                folder: "Daily".to_owned(),
+                format: "YYYY-MM-DD".to_owned()
+            }))
+        );
+    }
 
     fn convert(src: &str) -> String {
         convert_note(src).text

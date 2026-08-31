@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte'
-  import { api, authState, type VaultInfo, type User } from './lib/api.ts'
+  import { api, authState, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
   import AccountDialog from './components/AccountDialog.svelte'
   import Setup from './components/Setup.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
+  import { Workspace } from './lib/workspace.svelte.ts'
   import { ulid } from './lib/ulid.ts'
-  import Tree from './components/Tree.svelte'
+  import Tree, { type VaultNode } from './components/Tree.svelte'
   import Pane, { type PaneState } from './components/Pane.svelte'
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
@@ -17,6 +18,7 @@
   import TrashPane from './components/TrashPane.svelte'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
+  import ImportDialog from './components/ImportDialog.svelte'
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
 
@@ -54,8 +56,7 @@
       location.hash = ''
     }
     me = await api.me().catch(() => null)
-    vaultId = readHash()
-    if (!vaultId) api.vaults().then((v) => (vaults = v)).catch(() => (vaults = []))
+    workspace?.refresh()
   }
   async function signOut() {
     await api.logout().catch(() => {})
@@ -64,19 +65,31 @@
     authRequired = true
   }
 
-  // ---- vault selection: #/v/<ULID>
-  let vaultId = $state<string | null>(readHash())
-  let vaults: VaultInfo[] = $state([])
-  let session = $state<VaultSession | null>(null)
+  // ---- the workspace: every vault at once (SPEC §9), on one socket
+  //
+  // Routes: `#/v/<vault>` focuses a vault, `#/v/<vault>/<note>` a note inside it, and both are
+  // written back as you move around. `#/n/<vault>/<note>` (a note shared directly with you) and
+  // `#/s/<token>` (a public link) are single-note views with no workspace behind them.
+  const ULID = '[0-9A-HJKMNP-TV-Z]{26}'
+  let workspace = $state<Workspace | null>(null)
+  /** The single-note session behind `#/n/…`; never a workspace member. */
+  let solo = $state<VaultSession | null>(null)
+  /** Which vault the sidebar and "new note" act on when no note is focused. */
+  let focusVault = $state<string | null>(null)
+  let routeNote = $state<string | null>(readRouteNote())
 
-  function readHash(): string | null {
-    const m = /^#\/v\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+  function readRouteVault(): string | null {
+    const m = new RegExp(`^#/v/(${ULID})`, 'u').exec(location.hash)
     if (m) return m[1]!
-    const n = /^#\/n\/([0-9A-HJKMNP-TV-Z]{26})\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+    const n = new RegExp(`^#/n/(${ULID})/(${ULID})`, 'u').exec(location.hash)
     return n ? n[1]! : null
   }
+  function readRouteNote(): string | null {
+    const m = new RegExp(`^#/v/${ULID}/(${ULID})`, 'u').exec(location.hash)
+    return m ? m[1]! : null
+  }
   function readNoteOnly(): string | null {
-    const n = /^#\/n\/([0-9A-HJKMNP-TV-Z]{26})\/([0-9A-HJKMNP-TV-Z]{26})/u.exec(location.hash)
+    const n = new RegExp(`^#/n/(${ULID})/(${ULID})`, 'u').exec(location.hash)
     return n ? n[2]! : null
   }
   function readPublicToken(): string | null {
@@ -95,53 +108,72 @@
     publicToken = readPublicToken()
     noteOnly = readNoteOnly()
     invite = readInvite()
-    vaultId = readHash()
+    const v = readRouteVault()
+    if (v && !noteOnly) focusVault = v
+    const n = readRouteNote()
+    if (n && n !== active) routeNote = n
   })
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
   let accountOpen = $state(false)
+  let importInto = $state<string | null | undefined>(undefined)
 
+  // The single-note view stands alone: one session, one pane, its own socket.
   $effect(() => {
-    const id = vaultId
-    // Only `vaultId` is a dependency: everything else here is written, not tracked.
     const only = noteOnly
+    const vault = readRouteVault()
     untrack(() => {
-      session?.destroy()
-      session = id ? new VaultSession(id, { noteOnly: !!only }) : null
-      layoutRestored = false
-      pinned = []
-      closed = []
-      if (session && only) {
-        // A directly shared note (SPEC §11.2): one pane, one tab, no splits.
+      solo?.destroy()
+      solo = only && vault ? new VaultSession(vault, { noteOnly: true }) : null
+      if (solo && only) {
         panes = [{ id: ++paneSeq, tabs: [only], active: only }]
         focusedPane = 0
-        return
+        pinned = []
+        closed = []
       }
+    })
+  })
+
+  // Everything else runs in the workspace, created once and kept for the session.
+  $effect(() => {
+    if (publicToken || noteOnly || workspace) return
+    untrack(() => {
+      const ws = new Workspace()
+      workspace = ws
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
-      ;(window as unknown as { lemmate?: unknown }).lemmate = { session }
-      const restored = id ? loadLayout(id) : { panes: [blankPane()], focused: 0 }
+      ;(window as unknown as { lemmate?: unknown }).lemmate = { workspace: ws }
+      const restored = loadLayout()
       panes = restored.panes
       focusedPane = restored.focused
-      pinned = id ? loadPinned(id) : []
+      pinned = loadPinned()
+      focusVault = readRouteVault()
+      ws.refresh().then((vaults) => {
+        if (!focusVault && vaults.length) focusVault = vaults[0]!.id
+      })
+      api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
     })
-    if (!id) api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
-    if (!vaultId)
-      api
-        .vaults()
-        .then((v) => {
-          vaults = v
-          // A local relay serves exactly one vault: go straight in.
-          if (v.length === 1) openVault(v[0]!.id)
-        })
-        .catch(() => (vaults = []))
   })
-  onDestroy(() => session?.destroy())
+  onDestroy(() => {
+    workspace?.destroy()
+    solo?.destroy()
+  })
 
-  function openVault(id: string) {
-    location.hash = `#/v/${id}`
+  /** Open a vault that is not on the server yet, or one someone gave you the id of. */
+  async function newVault() {
+    const ws = workspace
+    if (!ws) return
+    const name = (await ask({ kind: 'prompt', title: 'New vault', placeholder: 'Name (optional)' }))?.trim()
+    if (name === undefined) return
+    const session = ws.add(ulid())
+    if (name) session.setName(name)
+    focusVault = session.id
+    switcher = true
   }
-  function newVault() {
-    openVault(ulid())
+  async function renameVault(vault: string) {
+    const session = workspace?.get(vault)
+    if (!session) return
+    const next = await ask({ kind: 'prompt', title: 'Rename vault', initial: session.name })
+    if (next !== null) session.setName(next)
   }
 
   // ---- tabs and panes (SPEC §9)
@@ -171,14 +203,42 @@
   let headings = $derived(headingsByPane[focused.id] ?? [])
   let presence = $derived(presenceByPane[focused.id] ?? [])
 
-  // ---- layout persistence, per vault and per device
+  /** The session behind a note id, whichever vault holds it. */
+  function sessionOf(noteId: string | null | undefined): VaultSession | undefined {
+    if (solo) return solo
+    return workspace?.sessionForNote(noteId) ?? undefined
+  }
+  /** What the sidebar acts on: the focused note's vault, else the one you last touched. */
+  let session = $derived(solo ?? sessionOf(active) ?? workspace?.get(focusVault) ?? workspace?.sessions[0])
+  let vaults: VaultNode[] = $derived(
+    (workspace?.sessions ?? []).map((s) => ({ id: s.id, label: s.label, notes: s.notes })),
+  )
+  /** Vault labels are noise until there is more than one vault to tell apart. */
+  let manyVaults = $derived((workspace?.sessions.length ?? 0) > 1)
+  function vaultLabel(vault: string | null | undefined): string {
+    return manyVaults && vault ? (workspace?.label(vault) ?? '') : ''
+  }
+  function labelOfNote(noteId: string): string {
+    return vaultLabel(workspace?.vaultOfNote(noteId))
+  }
+
+  // The route follows the focused note, so a reload or a copied URL comes back to it.
+  $effect(() => {
+    if (publicToken || noteOnly || invite) return
+    const vault = session?.id
+    const note = active
+    const want = note && vault ? `#/v/${vault}/${note}` : vault ? `#/v/${vault}` : ''
+    if (want && location.hash !== want) location.hash = want
+  })
+
+  // ---- layout persistence, per device, across every vault
   interface StoredLayout {
     panes?: { tabs?: string[]; active?: string | null }[]
     focused?: number
   }
-  function loadLayout(vault: string): { panes: PaneState[]; focused: number } {
+  function loadLayout(): { panes: PaneState[]; focused: number } {
     try {
-      const raw = localStorage.getItem(`lemmate.layout.${vault}`)
+      const raw = localStorage.getItem('lemmate.layout')
       const data = raw ? (JSON.parse(raw) as StoredLayout) : null
       const list = (data?.panes ?? [])
         .filter((p) => Array.isArray(p.tabs) && p.tabs.length > 0)
@@ -193,9 +253,9 @@
     }
     return { panes: [blankPane()], focused: 0 }
   }
-  function loadPinned(vault: string): string[] {
+  function loadPinned(): string[] {
     try {
-      const raw = localStorage.getItem(`lemmate.pins.${vault}`)
+      const raw = localStorage.getItem('lemmate.pins')
       const list = raw ? (JSON.parse(raw) as unknown) : null
       return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : []
     } catch {
@@ -203,20 +263,20 @@
     }
   }
   $effect(() => {
-    const s = session
-    if (!s || s.noteOnly) return
+    if (solo || !workspace) return
     const data = JSON.stringify({ panes: panes.map((p) => ({ tabs: [...p.tabs], active: p.active })), focused: focusedPane })
     try {
-      localStorage.setItem(`lemmate.layout.${s.id}`, data)
+      localStorage.setItem('lemmate.layout', data)
     } catch {
       /* storage may be unavailable */
     }
   })
-  // Once the vault doc has synced, drop restored tabs whose notes no longer exist.
+  // Once every vault doc has synced, drop restored tabs whose notes no longer exist, and open
+  // the note the URL asked for now that we can tell which vault it lives in.
   $effect(() => {
-    const s = session
-    if (!s || s.noteOnly || !s.vaultSynced || layoutRestored) return
-    const known = new Set(s.notes.map((n) => n.id))
+    const ws = workspace
+    if (solo || !ws || !ws.synced || layoutRestored) return
+    const known = new Set(ws.notes.map((n) => n.id))
     untrack(() => {
       layoutRestored = true
       const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
@@ -224,6 +284,17 @@
       panes = live.length ? live : [blankPane()]
       focusedPane = Math.min(focusedPane, panes.length - 1)
       pinned = pinned.filter((id) => known.has(id))
+    })
+  })
+  // A note named by the URL (a link someone sent, a reload) opens as soon as it is known.
+  $effect(() => {
+    const ws = workspace
+    const want = routeNote
+    if (!ws || !want) return
+    if (!ws.notes.some((n) => n.id === want)) return
+    untrack(() => {
+      routeNote = null
+      open(want)
     })
   })
 
@@ -258,10 +329,12 @@
     palette = false
     headingsByPane[p.id] = []
     closed = closed.filter((c) => c !== id)
+    const vault = workspace?.vaultOfNote(id)
+    if (vault) focusVault = vault
     tagsVersion++
   }
-  function openPath(path: string) {
-    const id = session?.idOf(path)
+  function openPath(vault: string, path: string) {
+    const id = workspace?.get(vault)?.idOf(path)
     if (id) open(id)
   }
   /** Close a tab wherever it is open; the pane goes away with its last tab. */
@@ -276,7 +349,7 @@
     if (p.tabs.length === 0 && panes.length > 1) closePane(panes.indexOf(p))
   }
   function splitRight() {
-    if (!session || session.noteOnly || panes.length >= MAX_PANES) return
+    if (solo || panes.length >= MAX_PANES) return
     const id = focused.active
     if (!id) return
     const i = panes.indexOf(focused)
@@ -294,26 +367,26 @@
   function reopenClosed() {
     const id = closed[closed.length - 1]
     closed = closed.slice(0, -1)
-    if (id && session?.pathOf(id)) open(id)
+    if (id && sessionOf(id)?.pathOf(id)) open(id)
   }
   function togglePin(id: string) {
     pinned = pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
-    if (session)
-      try {
-        localStorage.setItem(`lemmate.pins.${session.id}`, JSON.stringify(pinned))
-      } catch {
-        /* storage may be unavailable */
-      }
+    try {
+      localStorage.setItem('lemmate.pins', JSON.stringify(pinned))
+    } catch {
+      /* storage may be unavailable */
+    }
   }
   function bookmarkActive() {
-    if (!session || !active) return
-    const path = session.pathOf(active)
-    if (path) session.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
+    const s = sessionOf(active)
+    if (!s || !active) return
+    const path = s.pathOf(active)
+    if (path) s.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
   }
   let commands: Command[] = $derived([
     { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (switcher = true) },
     { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
-    { id: 'search', label: 'Search notes', shortcut: 'Ctrl+Shift+F', run: () => (sidebar = 'search') },
+    { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (sidebar = 'search') },
     { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
     { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
@@ -334,19 +407,20 @@
     { id: 'split', label: 'Split right', shortcut: 'Ctrl+\\', run: splitRight },
     { id: 'closepane', label: 'Close pane', run: () => closePane() },
     { id: 'nextpane', label: 'Focus next pane', shortcut: 'Ctrl+Alt+→', run: () => focusPane(1) },
-    { id: 'vault', label: 'Switch vault', run: () => (location.hash = '') },
+    { id: 'newvault', label: 'New vault…', run: newVault },
+    ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
+    { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
     ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password and invites…', run: () => (accountOpen = true) }] : []),
     ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   /** Templates (SPEC §9): `Templates/<name>.md` with {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. */
-  async function template(name: string, title: string, fallback: string): Promise<string> {
-    if (!session) return fallback
-    const id = session.idOf(`Templates/${name}.md`)
+  async function template(vault: VaultSession, name: string, title: string, fallback: string): Promise<string> {
+    const id = vault.idOf(`Templates/${name}.md`)
     if (!id) return fallback
-    const { doc, release } = session.acquire(id)
+    const { doc, release } = vault.acquire(id)
     try {
       await new Promise<void>((resolve) => {
-        if (doc.getText('content').length > 0 || session!.client.isSynced(id)) return resolve()
+        if (doc.getText('content').length > 0 || vault.client.isSynced(id)) return resolve()
         const t = setTimeout(resolve, 3000)
         doc.getText('content').observe(() => (clearTimeout(t), resolve()))
       })
@@ -374,67 +448,79 @@
       .replace(/\{\{title\}\}/gu, title)
       .replace(/\{\{cursor\}\}/gu, '')
   }
-  async function create(path: string) {
-    if (!session) return
+  async function create(path: string, vault: string | undefined = session?.id) {
+    const s = workspace?.get(vault) ?? (solo ? undefined : undefined)
+    if (!s) return
     const title = displayName(path)
-    open(session.createNote(path, await template('Note', title, `# ${title}\n\n`)))
+    open(s.createNote(path, await template(s, 'Note', title, `# ${title}\n\n`)))
   }
   async function daily() {
-    if (!session) return
+    const s = session
+    if (!s) return
     const d = new Date()
     const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     const path = `Daily/${name}.md`
-    const existing = session.idOf(path)
-    open(existing ?? session.createNote(path, await template('Daily', name, `# ${name}\n\n`)))
+    const existing = s.idOf(path)
+    open(existing ?? s.createNote(path, await template(s, 'Daily', name, `# ${name}\n\n`)))
   }
   async function renameActive() {
-    if (!session || !active) return
+    const s = sessionOf(active)
+    if (!s || !active) return
     const id = active
-    const current = session.pathOf(id) ?? ''
+    const current = s.pathOf(id) ?? ''
     const next = (await ask({ kind: 'prompt', title: 'Rename / move note', initial: current, placeholder: 'folder/note.md' }))?.trim()
-    if (next && next !== current) session?.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
+    if (next && next !== current) s.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
   }
   async function deleteActive() {
-    if (!session || !active) return
+    const s = sessionOf(active)
+    if (!s || !active) return
     const id = active
-    const path = session.pathOf(id) ?? id
+    const path = s.pathOf(id) ?? id
     const ok = await ask({ kind: 'confirm', title: `Move “${path}” to trash?`, confirmLabel: 'Move to trash', danger: true })
     if (ok === null) return
-    session?.deleteNote(id)
+    s.deleteNote(id)
     // The note is gone: close it in every pane, pinned or not.
     for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
     closed = closed.filter((c) => c !== id)
   }
 
   // ---- folder actions (folders are just path prefixes; SPEC §9)
-  async function createInFolder(folder: string) {
-    const name = await ask({ kind: 'prompt', title: `New note in ${folder}/`, placeholder: 'Title' })
-    if (name?.trim()) create(`${folder}/${name.trim()}`)
+  async function createInVault(vault: string) {
+    focusVault = vault
+    const name = await ask({ kind: 'prompt', title: `New note in ${workspace?.label(vault) ?? 'vault'}`, placeholder: 'Title' })
+    if (name?.trim()) create(name.trim(), vault)
   }
-  async function renameFolder(folder: string) {
-    if (!session) return
+  async function createInFolder(vault: string, folder: string) {
+    const name = await ask({ kind: 'prompt', title: `New note in ${folder}/`, placeholder: 'Title' })
+    if (name?.trim()) create(`${folder}/${name.trim()}`, vault)
+  }
+  async function renameFolder(vault: string, folder: string) {
+    const s = workspace?.get(vault)
+    if (!s) return
     const next = (await ask({ kind: 'prompt', title: 'Rename / move folder', initial: folder }))?.trim().replace(/^\/+|\/+$/gu, '')
     if (!next || next === folder) return
-    for (const n of session.notes.filter((n) => n.path.startsWith(`${folder}/`))) {
-      await session.renameNote(n.id, `${next}/${n.path.slice(folder.length + 1)}`)
+    for (const n of s.notes.filter((n) => n.path.startsWith(`${folder}/`))) {
+      await s.renameNote(n.id, `${next}/${n.path.slice(folder.length + 1)}`)
     }
   }
-  async function deleteFolder(folder: string) {
-    if (!session) return
-    const inside = session.notes.filter((n) => n.path.startsWith(`${folder}/`))
+  async function deleteFolder(vault: string, folder: string) {
+    const s = workspace?.get(vault)
+    if (!s) return
+    const inside = s.notes.filter((n) => n.path.startsWith(`${folder}/`))
     const ok = await ask({ kind: 'confirm', title: `Move “${folder}” and its ${inside.length} notes to trash?`, confirmLabel: 'Move to trash', danger: true })
     if (ok === null) return
     for (const n of inside) {
       close(n.id, true)
-      session.deleteNote(n.id)
+      s.deleteNote(n.id)
     }
   }
 
   /** Server-side pandoc export (SPEC §12); the browser saves the result as a download. */
   async function exportActive(format: string) {
-    if (!session || !active) return
+    const s = sessionOf(active)
+    if (!s || !active) return
     const id = active
-    const r = await fetch(`/api/v1/vaults/${session.id}/notes/${id}/export`, {
+    const r = await fetch(`/api/v1/vaults/${s.id}/notes/${id}/export`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ format }),
@@ -442,13 +528,23 @@
     if (r.status === 501) return void ask({ kind: 'confirm', title: 'Export needs pandoc on the server (see the deployment guide).', confirmLabel: 'OK' })
     if (!r.ok) return void ask({ kind: 'confirm', title: `Export failed (${r.status}).`, confirmLabel: 'OK' })
     const blob = await r.blob()
-    const name = (r.headers.get('content-disposition')?.match(/filename="([^"]+)"/u)?.[1] ?? `${displayName(session.pathOf(id) ?? 'note')}.${format}`).replace(/[/\\]/gu, '-')
+    const name = (r.headers.get('content-disposition')?.match(/filename="([^"]+)"/u)?.[1] ?? `${displayName(s.pathOf(id) ?? 'note')}.${format}`).replace(/[/\\]/gu, '-')
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = name
     a.click()
     setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
+  /** After an import, pick up the vault it went into — it may be brand new. */
+  async function imported(vault: string) {
+    const ws = workspace
+    if (!ws) return
+    ws.add(vault)
+    focusVault = vault
+    await ws.refresh()
+    tagsVersion++
   }
 
   function onKey(e: KeyboardEvent) {
@@ -490,7 +586,23 @@
     }
   }
 
-  let activePath = $derived(session && active ? (session.pathOf(active) ?? (session.noteOnly ? 'shared note' : '(deleted)')) : '')
+  let activePath = $derived(session && active ? (session.pathOf(active) ?? (solo ? 'shared note' : '(deleted)')) : '')
+  let denied = $derived(solo ? solo.denied : (workspace?.denied ?? null))
+  let status = $derived(solo ? solo.status : (workspace?.status ?? 'connecting'))
+  let noteCount = $derived(solo ? solo.notes.length : (workspace?.noteCount ?? 0))
+  let syncing = $derived(solo ? !solo.vaultSynced : !(workspace?.synced ?? false))
+  // Built here rather than in the markup: an `{#if}` in the middle of a sentence eats the
+  // whitespace in front of it, and this line is all conditional pieces.
+  let statusLine = $derived(
+    [
+      status + (status === 'online' && syncing ? ' · syncing…' : ''),
+      `${noteCount} ${noteCount === 1 ? 'note' : 'notes'}` +
+        (!solo && manyVaults ? ` in ${vaults.length} vaults` : ''),
+      presence.length ? `${presence.length} editing` : '',
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  )
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -503,28 +615,8 @@
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
 {:else if authRequired || (invite && !me)}
   <Login {invite} onDone={signedIn} />
-{:else if !session}
-  <main class="welcome">
-    <h1>Lemmate</h1>
-    <p>Open a vault on this server, or create a new one.</p>
-    <ul>
-      {#each vaults as v (v.id)}
-        <li><button onclick={() => openVault(v.id)}>{v.id} <span class="muted">({v.notes} notes)</span></button></li>
-      {/each}
-    </ul>
-    <button class="primary" onclick={newVault}>New vault</button>
-    {#if me && me.id !== 'local'}
-      <p class="muted"><button class="link" onclick={() => (accountOpen = true)}>Account, password and invites…</button></p>
-    {/if}
-    {#if sharedWithMe.length}
-      <h2>Shared with me</h2>
-      <ul>
-        {#each sharedWithMe as n (n.id)}
-          <li><button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)}>{n.title ?? displayName(n.path)} <span class="muted">({n.role})</span></button></li>
-        {/each}
-      </ul>
-    {/if}
-  </main>
+{:else if !workspace && !solo}
+  <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
   <div class="layout">
     <aside>
@@ -539,52 +631,67 @@
         <button title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
         <button title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
       </div>
-      {#if session.noteOnly}
+      {#if solo}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
       {:else if sidebar === 'files'}
         <Tree
-          notes={session.notes}
+          {vaults}
           activeId={active}
+          activeVault={session?.id ?? null}
           onOpen={open}
           onCreateIn={createInFolder}
           onRenameFolder={renameFolder}
           onDeleteFolder={deleteFolder}
+          onCreateInVault={createInVault}
+          onRenameVault={renameVault}
+          onImportInto={(v) => (importInto = v)}
+          onNewVault={newVault}
         />
+        {#if sharedWithMe.length}
+          <nav class="shared">
+            <p class="muted">Shared with me</p>
+            {#each sharedWithMe as n (n.id)}
+              <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
+            {/each}
+          </nav>
+        {/if}
       {:else if sidebar === 'search'}
-        <SearchPane vault={session.id} onOpen={open} />
+        <SearchPane label={labelOfNote} onOpen={open} />
       {:else if sidebar === 'tags'}
-        <TagsPane vault={session.id} version={tagsVersion} onOpen={open} />
+        {#if session}<TagsPane vault={session.id} version={tagsVersion} onOpen={open} />{/if}
       {:else if sidebar === 'outline'}
         <OutlinePane items={headings} onJump={(pos) => jumpers[focused.id]?.(pos)} />
       {:else if sidebar === 'trash'}
-        <TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />
+        {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
       {:else if sidebar === 'history'}
-        <HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />
+        {#if session}<HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />{/if}
       {:else}
         <nav class="bookmarks-pane">
-          {#each session.bookmarks as b, i (b.kind + b.target + i)}
-            <button onclick={() => openPath(b.target)} title={b.target}>★ {b.label}</button>
+          {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
+            <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
+              ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
+            </button>
           {/each}
-          {#if session.bookmarks.length === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
+          {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
         </nav>
       {/if}
-      {#if session.denied}
+      {#if denied}
         <div class="denied">
-          Permission denied by the server ({session.denied.reason}) — your last change was not saved.
+          Permission denied by the server ({denied.reason}) — your last change was not saved.
           <button class="link" onclick={() => location.reload()}>Reload</button>
-          <button class="link" onclick={() => (session!.denied = null)}>Dismiss</button>
+          <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
         </div>
       {/if}
-      <footer class="status" class:offline={session.status !== 'online'}>
+      <footer class="status" class:offline={status !== 'online'}>
         <span class="dot"></span>
-        {session.status}{#if session.status === 'online' && !session.vaultSynced} · syncing…{/if}
-        · {session.notes.length} notes{#if presence.length} · {presence.length} editing{/if}
+        {statusLine}
       </footer>
     </aside>
     <section class="main">
       {#each panes as p, i (p.id)}
         <Pane
-          {session}
+          lookup={sessionOf}
+          vaultLabel={labelOfNote}
           pane={p}
           focused={i === focusedPane}
           {pinned}
@@ -603,14 +710,29 @@
       {/each}
     </section>
   </div>
-  {#if switcher}
-    <QuickSwitcher notes={session.notes} onOpen={open} onCreate={create} onClose={() => (switcher = false)} />
+  {#if switcher && workspace}
+    <QuickSwitcher
+      notes={workspace.notes}
+      label={vaultLabel}
+      createVault={session?.id ?? null}
+      onOpen={open}
+      onCreate={(path) => create(path)}
+      onClose={() => (switcher = false)}
+    />
   {/if}
   {#if palette}
     <CommandPalette {commands} onClose={() => (palette = false)} />
   {/if}
-  {#if shareOpen && active}
+  {#if shareOpen && active && session}
     <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />
+  {/if}
+  {#if importInto !== undefined && workspace}
+    <ImportDialog
+      vaults={vaults.map((v) => ({ id: v.id, label: v.label }))}
+      target={importInto}
+      onClose={() => (importInto = undefined)}
+      onImported={imported}
+    />
   {/if}
 {/if}
 
@@ -636,32 +758,6 @@
     max-width: 30rem;
     margin: 10vh auto;
     padding: 1rem;
-  }
-  .welcome ul {
-    list-style: none;
-    padding: 0;
-  }
-  .welcome li button {
-    font: inherit;
-    font-family: var(--mono);
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.5rem 0.8rem;
-    margin: 0.2rem 0;
-    cursor: pointer;
-    color: inherit;
-    width: 100%;
-    text-align: left;
-  }
-  .primary {
-    font: inherit;
-    background: var(--accent);
-    color: white;
-    border: 0;
-    border-radius: 6px;
-    padding: 0.5rem 1rem;
-    cursor: pointer;
   }
   .muted {
     color: var(--muted);
@@ -745,13 +841,25 @@
     cursor: pointer;
     padding: 0;
   }
-  .bookmarks-pane {
+  .bookmarks-pane,
+  .shared {
     display: flex;
     flex-direction: column;
     padding: 0.3rem;
     overflow: auto;
   }
-  .bookmarks-pane button {
+  .shared {
+    border-top: 1px solid var(--border);
+    padding-top: 0.4rem;
+  }
+  .shared p {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin: 0 0 0.2rem 0.5rem;
+  }
+  .bookmarks-pane button,
+  .shared button {
     font: inherit;
     font-size: 0.9rem;
     text-align: left;
@@ -762,8 +870,16 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  .bookmarks-pane button:hover {
+  .bookmarks-pane button:hover,
+  .shared button:hover {
     background: var(--hover);
+  }
+  .vault-tag {
+    color: var(--muted);
+    font-size: 0.75em;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-left: 0.4em;
   }
   .pad {
     padding: 0.6rem;

@@ -23,6 +23,7 @@ use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
 use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
+use crate::import::{Upload, UploadReport};
 pub use crate::local::LocalOptions;
 use crate::local::{LocalEvent, LocalQuery, LocalReply, err_reply};
 use crate::markdown::{self, NoteIndex};
@@ -808,6 +809,52 @@ impl Engine {
         }
     }
 
+    /// Import one batch of an uploaded Obsidian vault (SPEC §11.4). Notes are created through
+    /// the same path as any other write, so the projection, the index and the sync engine all
+    /// see them; attachments keep the relative layout their notes reference them by, and are
+    /// uploaded once a note that references them is ingested.
+    fn api_import(&mut self, files: Vec<(String, Vec<u8>)>) -> Result<UploadReport> {
+        let mut report = UploadReport::default();
+        for (rel, bytes) in files {
+            let Some(upload) = crate::import::import_upload(&rel, bytes) else { continue };
+            match upload {
+                Upload::Note { path, text, callouts, embeds } => match self.api_create(&path, &text)? {
+                    LocalReply::Conflict(_) => report.skipped += 1,
+                    _ => {
+                        report.notes += 1;
+                        report.callouts += callouts;
+                        report.embeds += embeds;
+                    }
+                },
+                Upload::Attachment { path, bytes } => {
+                    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES || self.proj.resolve(&path)?.exists() {
+                        report.skipped += 1;
+                        continue;
+                    }
+                    self.proj.write_bytes(&path, &bytes)?;
+                    report.attachments += 1;
+                }
+                Upload::Bookmarks(marks) => {
+                    let before = self.vault.bookmarks().len();
+                    let update = self.vault.add_bookmarks(&marks);
+                    report.bookmarks += self.vault.bookmarks().len() - before;
+                    self.persist_and_send(DocId::Vault(self.vault_id), update)?;
+                }
+                // Only a vault folder has somewhere to keep these, so this is the one side that
+                // stores them: `lemmate import obsidian` writes the same sidecar file.
+                Upload::Daily(settings) => {
+                    let dir = self.proj.sidecar_dir();
+                    std::fs::create_dir_all(&dir)?;
+                    let json =
+                        serde_json::to_string_pretty(&settings).map_err(|e| Error::Import(e.to_string()))?;
+                    std::fs::write(dir.join(crate::import::DAILY_FILE), format!("{json}\n"))?;
+                    report.daily_notes = true;
+                }
+            }
+        }
+        Ok(report)
+    }
+
     fn api_replace(&mut self, id: NoteId, content: &str) -> Result<LocalReply> {
         let Some(path) = self.notes.get(&id).map(|s| s.path.clone()) else {
             return Ok(LocalReply::Written(None));
@@ -1288,6 +1335,7 @@ impl Engine {
                     })
                 }
                 LocalQuery::CreateNote { path, content } => self.api_create(&path, &content)?,
+                LocalQuery::Import { files } => LocalReply::Imported(self.api_import(files)?),
                 LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
                 LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
                 LocalQuery::DeleteNote(id) => self.api_delete(id)?,

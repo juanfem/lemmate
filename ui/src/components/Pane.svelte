@@ -12,7 +12,8 @@
   }
 
   let {
-    session,
+    lookup,
+    vaultLabel,
     pane,
     focused,
     pinned = [],
@@ -28,7 +29,10 @@
     onPresence,
     jumpTo = $bindable(),
   }: {
-    session: VaultSession
+    /** Which vault a tab belongs to; tabs in one pane may come from different vaults. */
+    lookup: (noteId: string) => VaultSession | undefined
+    /** Vault label for the note header, empty when there is only one vault to speak of. */
+    vaultLabel?: (noteId: string) => string
     pane: PaneState
     focused: boolean
     pinned?: string[]
@@ -51,21 +55,26 @@
 
   /** Reactive path lookup: `session.notes` updates on rename, `pathOf` alone would not. */
   function pathOf(id: string): string | undefined {
-    return session.notes.find((n) => n.id === id)?.path ?? session.pathOf(id)
+    const s = lookup(id)
+    return s?.notes.find((n) => n.id === id)?.path ?? s?.pathOf(id)
   }
-  let activePath = $derived(pane.active ? (pathOf(pane.active) ?? (session.noteOnly ? 'shared note' : '(deleted)')) : '')
+  let session = $derived(pane.active ? lookup(pane.active) : undefined)
+  let activePath = $derived(
+    pane.active ? (pathOf(pane.active) ?? (session?.noteOnly ? 'shared note' : '(deleted)')) : '',
+  )
   // Pinned tabs sort first; the rest keep the order they were opened in.
   let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
 
   $effect(() => {
     const id = pane.active
-    if (!id) {
+    const s = session
+    if (!id || !s) {
       backlinks = []
       return
     }
     let live = true
     api
-      .backlinks(session.id, id)
+      .backlinks(s.id, id)
       .then((b) => live && (backlinks = b))
       .catch(() => live && (backlinks = []))
     return () => {
@@ -95,9 +104,10 @@
       </button>
     {/each}
   </div>
-  {#if pane.active}
+  {#if pane.active && session}
     {#key pane.active}
       <div class="note-head">
+        {#if vaultLabel?.(pane.active)}<span class="vault">{vaultLabel(pane.active)}</span>{/if}
         <span class="path">{activePath}</span>
         {#if presence.length}
           <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
@@ -174,6 +184,15 @@
   .tab .pin {
     color: var(--accent);
     margin-right: 0.25rem;
+  }
+  .note-head .vault {
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 0.75em;
+    letter-spacing: 0.03em;
+  }
+  .note-head .vault::after {
+    content: ' /';
   }
   .note-head {
     display: flex;

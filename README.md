@@ -11,11 +11,12 @@ specification; this README covers the repository and the current milestone.
 | `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
 | `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
-| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, tree, tabs, quick switcher, command palette, search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
+| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, sharing (users, public links), presence, login. Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
-`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server and remote CLI; mobile and Quarto
+`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server,
+remote CLI, the all-vaults workspace and Obsidian import from the UI; mobile and Quarto
 rendering remain.
 
 Verification: `cargo test --workspace --exclude lemmate-desktop` (Rust — the Tauri crate needs
@@ -49,6 +50,22 @@ lemmate-server --data-dir ./data --web-dir ui/dist            # accounts on
 lemmate login --server https://notes.example.org --email you@example.org --register   # first account
 lemmate sync  --vault ~/vault --server https://notes.example.org   # uses the saved token
 ```
+
+## Vaults in the client
+
+The web and desktop clients show **every vault you can read at once**: the tree's roots are the
+vaults, tabs may hold notes from different ones, the quick switcher lists them all, and search
+runs across them (`GET /api/v1/search`). Tags, history, trash and sharing are per vault and
+follow the focused note. It is all one WebSocket — frames are addressed by doc id, so the
+connection was never per vault. A vault can be given a name (stored in the vault doc, shared
+with every replica); without one the tree shows a short form of its id. The local relay serves
+exactly one vault, so on the desktop the tree simply has a single root.
+
+**Importing an Obsidian vault** is a command in the palette, or the ⇥ button on a vault row:
+pick the folder and the browser uploads it in batches to `POST /api/v1/vaults/{vault}/import`,
+which runs the same conversion as `lemmate import obsidian` (callouts → fenced divs, image
+embeds → `![](…)`, bookmarks and daily-note settings kept). Re-uploading skips paths the vault
+already has, so an interrupted import is resumed by running it again.
 
 ## Export
 

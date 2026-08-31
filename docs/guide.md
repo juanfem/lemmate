@@ -86,9 +86,14 @@ For a private CA, `--ca-cert ca.pem` (or `LEMMATE_CA_CERT`); `--server https://�
 
 ### (d) Web client
 
-Open the server's URL, sign in, and pick a vault (or create one). The URL hash is the route:
-`#/v/<vault>` for a vault, `#/n/<vault>/<note>` for a note shared directly with you, and
-`#/s/<token>` for a public read-only link.
+Open the server's URL and sign in. There is no vault to pick first: **every vault you can read
+is already there**, as the roots of the tree, and you work across all of them at once (§3). The
+URL hash is the route: `#/v/<vault>/<note>` for the note you are on (and `#/v/<vault>` for a
+vault with nothing open), `#/n/<vault>/<note>` for a note shared directly with you, and
+`#/s/<token>` for a public read-only link. The first two follow you as you move, so the address
+bar is always a link back to what you are reading.
+
+The local relay serves exactly one vault, so in the desktop app the tree has a single root.
 
 ---
 
@@ -176,23 +181,35 @@ Callout `collapse="true"` is not implemented.
 
 ## 3. Organising
 
+**Vaults are the roots of the tree.** Every vault you can read is listed, with its folders
+below it, and each row carries a note count plus, on hover, buttons to add a note (＋), rename
+the vault (✎) and import an Obsidian vault into it (⇥). *New vault* at the bottom of the tree
+makes another one; a vault only reaches the server once you write something in it. A vault's
+name lives in its vault doc, so it is the same on every device — until you give it one, the
+tree shows a short form of its id.
+
 **Folders are real folders.** The tree mirrors the vault directory, shows a note count per
 folder, and remembers which folders you collapsed. Moving, creating and deleting from the tree
 by drag-and-drop is not built yet — use *Rename / move* (which takes a full path) or move the
 file on disk.
 
-**Quick switcher** (`Ctrl+O`, `Ctrl+P`, `Ctrl+N`) fuzzy-matches paths; substring matches rank
-above subsequence matches. If nothing matches exactly, the last entry offers to **create** the
-note at that path (`.md` appended unless you typed `.md`/`.qmd`).
+**Quick switcher** (`Ctrl+O`, `Ctrl+P`, `Ctrl+N`) fuzzy-matches paths **across every vault**,
+each hit labelled with the vault it comes from; substring matches rank above subsequence
+matches. If nothing matches exactly, the last entry offers to **create** the note at that path
+(`.md` appended unless you typed `.md`/`.qmd`) in the vault you are currently in.
 
 **Command palette** (`Ctrl+Shift+P`) lists every command with its shortcut. Shortcut remapping
 is not implemented.
 
 **Sidebar panes**: Files (tree), Search, Tags, Outline, Bookmarks (★), Version history (⏱).
 
-- **Search** is SQLite FTS5 over title and body, with highlighted snippets. FTS5 syntax works
-  (`"exact phrase"`, `OR`, `NOT`, `prefix*`); the `tag:`, `path:`, `has:math` filters in
-  SPEC §10 are not implemented yet.
+- **Search** is SQLite FTS5 over title and body, with highlighted snippets, and covers every
+  vault you can read — hits are labelled with theirs. FTS5 syntax works (`"exact phrase"`,
+  `OR`, `NOT`, `prefix*`); the `tag:`, `path:`, `has:math` filters in SPEC §10 are not
+  implemented yet.
+- **Tags, version history and trash** are per vault, so they show the vault of the note you
+  are on. Tabs and bookmarks are not: a pane can hold notes from two vaults side by side, and
+  the bookmarks list shows all of them.
 - **Tags** shows every tag with a count; clicking one lists its notes, including nested tags
   under it (`#projects` matches `#projects/alpha`).
 - **Outline** lists the current note's headings; click to jump.
@@ -405,6 +422,16 @@ and attachments as they are. And because the vault is already a folder of files,
 
 ## 8. Coming from Obsidian
 
+From the app: **Import an Obsidian vault…** in the command palette, or the ⇥ button on a vault
+row in the tree. Pick your Obsidian folder, choose whether it goes into an existing vault or a
+new one, and the browser uploads it — in batches, with a progress bar — to the server or, on
+the desktop, to the local relay, which writes it straight into your vault folder. The summary
+at the end counts the notes, attachments, callouts and embeds it handled. Nothing is
+overwritten: a path the vault already holds is skipped, so if an import is interrupted you can
+simply run it again, and importing the same folder twice does not duplicate anything.
+
+From the command line, the same conversion over a directory:
+
 ```sh
 lemmate import obsidian ~/ObsidianVault --into ~/vault
 lemmate sync --vault ~/vault --server https://notes.example.org
@@ -419,7 +446,8 @@ The importer preserves folders and filenames and reports what it did. What chang
 | `[[wikilinks]]`, `[[a\|b]]`, `#tags`, maths, front matter | Left exactly as they are |
 | Self-hosted LiveSync | The built-in sync — one WebSocket, CRDT merge, no conflict files |
 | File Tree Alternative | The built-in tree, with per-folder note counts |
-| `.obsidian/bookmarks.json`, `daily-notes.json` | Translated into `.lemmate/*.import.json`; nothing consumes them yet, so re-create bookmarks and check the daily-note path by hand |
+| `.obsidian/bookmarks.json` | Bookmarks are kept: importing through the app puts them straight into the vault's bookmark list; the CLI writes `.lemmate/bookmarks.import.json` |
+| `.obsidian/daily-notes.json` | Translated into `.lemmate/daily.import.json` wherever there is a vault folder (the CLI, and an import into the desktop relay); nothing consumes it yet, so check the daily-note path by hand |
 | `.obsidian/`, `.trash/` | Skipped |
 
 Note ids are not written during import — the sync engine assigns them on first sync.

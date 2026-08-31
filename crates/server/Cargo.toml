@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 lemmate-core.workspace = true

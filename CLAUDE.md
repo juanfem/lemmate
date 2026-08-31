@@ -20,7 +20,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
 | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it |
-| `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts`, `api.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
+| `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts` one vault, `workspace.svelte.ts` all of them on one socket, `api.ts`, `import.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
 
 ## Commands
@@ -50,6 +50,12 @@ before committing; the cross-platform legs mostly catch unix-only assumptions.
   source of truth. Writes through the REST API go through the room doc and are fanned out like
   client updates (`commit_change` in `app.rs`); on the relay they are file operations.
 - The UI creates note text before the vault-doc entry; the server/engine tolerate that order.
+- The client holds **every vault at once** over one WebSocket (frames are addressed by doc id):
+  `Workspace` owns the socket and fans `onSynced`/`onDenied` out to its `VaultSession`s. Note
+  ids are unique across vaults, so tabs, search hits and links still name a note by id alone.
+- Obsidian import is Rust in both directions: `import::import_upload` classifies and converts
+  one uploaded file, the server creates notes through the room docs, the relay writes them into
+  the vault folder. The UI only batches the upload (`ui/src/lib/import.ts`).
 - `apply_update` reports "changed" using state vector *and* delete set — deletions are changes.
 - Commit messages: short imperative title, body explaining why. **No `Co-Authored-By: Claude` or
   `Claude-Session:` trailers** — Juan does not sign commits as Claude, and the history was

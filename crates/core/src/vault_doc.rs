@@ -1,8 +1,12 @@
 //! The vault-level CRDT document (SPEC §4.3): note id → path. Renames and moves are map writes,
 //! so they merge across offline devices; a concurrent rename of one note resolves LWW per entry.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 use yrs::updates::decoder::Decode;
-use yrs::{Any, Doc, Map, MapRef, Out, ReadTxn, StateVector, Transact, Update};
+use yrs::{Any, Array, ArrayRef, Doc, Map, MapRef, Out, ReadTxn, StateVector, Transact, Update};
 
 use crate::error::{Error, Result};
 use crate::ids::NoteId;
@@ -10,11 +14,26 @@ use crate::ids::NoteId;
 pub const NOTES_FIELD: &str = "notes";
 /// Vault-relative attachment path → blake3 hash of its content (SPEC §6.3, §7).
 pub const ATTACHMENTS_FIELD: &str = "attachments";
+/// Ordered bookmark list, shared by every replica (SPEC §4.3, §9). The web client owns this
+/// list; Rust only ever appends to it, on import.
+pub const BOOKMARKS_FIELD: &str = "bookmarks";
+
+/// One entry of the bookmark list. `kind` is `note`, `folder`, `search` or `heading`; the
+/// importer only produces `note`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub kind: String,
+    /// Vault-relative path of the bookmarked note.
+    pub target: String,
+    /// Display label: the bookmark's own title, else the file stem.
+    pub label: String,
+}
 
 pub struct VaultDoc {
     doc: Doc,
     notes: MapRef,
     attachments: MapRef,
+    bookmarks: ArrayRef,
 }
 
 impl Default for VaultDoc {
@@ -28,7 +47,8 @@ impl VaultDoc {
         let doc = Doc::new();
         let notes = doc.get_or_insert_map(NOTES_FIELD);
         let attachments = doc.get_or_insert_map(ATTACHMENTS_FIELD);
-        Self { doc, notes, attachments }
+        let bookmarks = doc.get_or_insert_array(BOOKMARKS_FIELD);
+        Self { doc, notes, attachments, bookmarks }
     }
 
     pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
@@ -155,11 +175,77 @@ impl VaultDoc {
         }
         self.diff_since(&before)
     }
+
+    /// The bookmark list, in order. Entries the web client wrote that are not plain
+    /// `{kind, target, label}` objects are skipped rather than guessed at.
+    pub fn bookmarks(&self) -> Vec<Bookmark> {
+        let txn = self.doc.transact();
+        self.bookmarks
+            .iter(&txn)
+            .filter_map(|out| match out {
+                Out::Any(Any::Map(m)) => {
+                    let field = |k: &str| match m.get(k) {
+                        Some(Any::String(s)) => Some(s.to_string()),
+                        _ => None,
+                    };
+                    Some(Bookmark { kind: field("kind")?, target: field("target")?, label: field("label")? })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Append bookmarks that are not in the list yet (same kind and target), in the given order.
+    pub fn add_bookmarks(&self, marks: &[Bookmark]) -> Vec<u8> {
+        let mut have: Vec<(&str, &str)> = Vec::new();
+        let existing = self.bookmarks();
+        have.extend(existing.iter().map(|b| (b.kind.as_str(), b.target.as_str())));
+        let mut missing: Vec<&Bookmark> = Vec::new();
+        for b in marks {
+            if have.iter().any(|(k, t)| *k == b.kind && *t == b.target) {
+                continue;
+            }
+            have.push((&b.kind, &b.target));
+            missing.push(b);
+        }
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            for b in missing {
+                let map = HashMap::from([
+                    ("kind".to_owned(), Any::from(b.kind.as_str())),
+                    ("target".to_owned(), Any::from(b.target.as_str())),
+                    ("label".to_owned(), Any::from(b.label.as_str())),
+                ]);
+                self.bookmarks.push_back(&mut txn, Any::Map(Arc::new(map)));
+            }
+        }
+        self.diff_since(&before)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmarks_append_without_duplicates_and_survive_a_round_trip() {
+        let a = VaultDoc::new();
+        let one = Bookmark { kind: "note".into(), target: "a.md".into(), label: "A".into() };
+        let two = Bookmark { kind: "note".into(), target: "b.md".into(), label: "B".into() };
+        assert!(!a.add_bookmarks(&[one.clone(), two.clone()]).is_empty());
+        assert_eq!(a.bookmarks(), vec![one.clone(), two.clone()]);
+        // Same kind and target: nothing appended, even with a different label.
+        let again = Bookmark { kind: "note".into(), target: "a.md".into(), label: "renamed".into() };
+        assert!(a.add_bookmarks(&[again]).is_empty());
+        assert_eq!(a.bookmarks().len(), 2);
+
+        let b = VaultDoc::from_updates([a.encode_full().as_slice()]).unwrap();
+        assert_eq!(b.bookmarks(), vec![one, two]);
+    }
 
     #[test]
     fn paths_merge_across_replicas() {

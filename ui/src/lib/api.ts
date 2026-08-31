@@ -36,6 +36,18 @@ export interface SearchHit {
   snippet: string
 }
 
+/** What one import upload did (SPEC §11.4). A whole import is several requests, so the UI adds
+ * these up as the batches complete. */
+export interface ImportReport {
+  notes: number
+  attachments: number
+  callouts: number
+  embeds: number
+  skipped: number
+  bookmarks: number
+  daily_notes: boolean
+}
+
 export interface Invite {
   id: string
   created_ms: number
@@ -127,8 +139,23 @@ export const api = {
   notes: (vault: string) => get<NoteSummary[]>(`/vaults/${vault}/notes`),
   search: (vault: string, q: string, limit = 20) =>
     get<SearchHit[]>(`/vaults/${vault}/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  /** Every vault the account can read, ranked together (the relay answers for its one vault). */
+  searchAll: (q: string, limit = 30) => get<SearchHit[]>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   backlinks: (vault: string, id: string) => get<NoteSummary[]>(`/vaults/${vault}/notes/${id}/backlinks`),
   tags: (vault: string) => get<{ tag: string; count: number }[]>(`/vaults/${vault}/tags`),
   tagged: (vault: string, tag: string) => get<NoteSummary[]>(`/vaults/${vault}/tagged?tag=${encodeURIComponent(tag)}`),
   attachmentUrl: (vault: string, hash: string) => `/api/v1/vaults/${vault}/attachments/${hash}`,
+  /**
+   * One batch of an Obsidian import (SPEC §11.4): the files are sent as multipart parts named
+   * by their vault-relative path, and the server (or the relay) converts them. Splitting a big
+   * vault across requests is safe — a path that already exists is skipped, not duplicated.
+   */
+  importBatch: async (vault: string, files: { path: string; file: File }[]): Promise<ImportReport> => {
+    const form = new FormData()
+    for (const f of files) form.append('file', f.file, f.path)
+    const r = await fetch(`/api/v1/vaults/${vault}/import`, { method: 'POST', body: form })
+    if (r.status === 401) authState.onUnauthorized()
+    if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for import`)
+    return (await r.json()) as ImportReport
+  },
 }
