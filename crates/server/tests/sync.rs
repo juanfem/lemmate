@@ -264,10 +264,15 @@ async fn rest_writes_are_crdt_edits() {
     assert!(state.store.lock().await.note_by_id(id.parse().unwrap()).unwrap().is_none(), "trashed");
 }
 
-/// Export goes through pandoc when the server has one (LEMMATE_TEST_PANDOC), else answers 501.
+/// Export goes through pandoc when the server has one, else answers 501.
 #[tokio::test]
 async fn export_uses_pandoc_or_says_so() {
     let pandoc = std::env::var_os("LEMMATE_TEST_PANDOC").map(std::path::PathBuf::from);
+    // What decides the answer is whether the server can reach *a* pandoc, not whether the
+    // variable happens to be set: with `pandoc: None` it falls back to `pandoc` on PATH, so a
+    // machine that has one installed gets an export either way. Asking the same question the
+    // server asks keeps this test honest on both kinds of machine.
+    let available = lemmate_core::pandoc::pandoc_available(pandoc.as_deref());
     let options = ServerOptions { pandoc: pandoc.clone(), ..ServerOptions::default() };
     let state = build_state(Store::open_in_memory().unwrap(), options);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -309,12 +314,12 @@ async fn export_uses_pandoc_or_says_so() {
     })
     .await
     .unwrap();
-    if pandoc.is_some() {
+    if available {
         assert_eq!(status, 200);
         assert!(ctype.starts_with("text/html"), "{ctype}");
         assert!(body.contains("<h1") && body.contains("link"), "{body}");
         assert!(!body.contains("id: 01"), "front matter stripped");
     } else {
-        assert_eq!(status, 501);
+        assert_eq!(status, 501, "no pandoc reachable, so the server must say so rather than fail");
     }
 }
