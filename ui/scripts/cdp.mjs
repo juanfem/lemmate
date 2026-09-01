@@ -7,6 +7,9 @@
 //   key:<key>        keyDown+keyUp, e.g. Enter, Escape, ArrowDown, Ctrl+o
 //   wait:<ms>        sleep
 //   offline:<on|off>  cut the network (Network.emulateNetworkConditions)
+//   media:<name>=<v>  emulate a CSS media feature (prefers-color-scheme etc.;
+//                    note display-mode is NOT emulatable — stub matchMedia with init: instead)
+//   init:<js>        run js before any page script, on this and every later navigation
 //   viewport:<w>x<h>[:desktop]  resize; a phone by default (touch on, coarse pointer, no hover)
 //   waitfor:<js>     poll expression every 100ms until truthy (10s timeout)
 // Console messages / page exceptions are echoed to stderr. Exit 1 on failure.
@@ -103,6 +106,15 @@ async function runStep(cdp, step, outdir) {
       await cdp.send('Network.enable');
       await cdp.send('Network.emulateNetworkConditions',
         { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      return;
+    }
+    case 'init':
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: arg });
+      return;
+    case 'media': {
+      const [name, value] = arg.split('=');
+      if (!name || value === undefined) die(`bad media (expected name=value): ${arg}`);
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name, value }] });
       return;
     }
     case 'viewport': {

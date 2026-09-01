@@ -98,10 +98,17 @@ The local relay serves exactly one vault, so in the desktop app the tree has a s
 The web client installs. "Add to Home Screen" on iOS, or the install button in a
 Chromium browser, gives it its own icon and window — and on iOS that also stops Safari
 discarding its stored notes after a week of not being opened. Once installed it starts without
-a network: the notes you have opened are readable and editable offline and merge when you
-reconnect, and the status line at the foot of the sidebar says `offline` while you are. What
-needs the server is anything the server computes — search, backlinks, tags, trash, version
-history, sharing, and attachments you have not already looked at.
+a network, and the whole vault comes with it: note contents are fetched quietly in the
+background while you are online, so everything in the tree opens on a plane, not just what you
+happened to read first. That fetching only happens once installed — open the same site in an
+ordinary browser tab and it behaves as before, downloading notes as you read them, so signing in
+from someone else's computer does not leave a copy of everything on it. Write and edit freely — new notes and changes are held on the device and
+pushed the next time the app opens with a connection, whether or not you reopen the notes
+concerned. The status line at the foot of the sidebar says `offline` while you are.
+
+What needs the server is anything the server computes: search, backlinks, tags, trash, version
+history, sharing, and attachments you have not already looked at. A note someone edits on
+another device also refreshes here only when you open it.
 
 ### (e) On a phone or a narrow window
 

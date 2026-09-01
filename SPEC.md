@@ -102,8 +102,20 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
   logged into. A vault lives on exactly one server.
 - Native clients (desktop, mobile) are **offline-first**: full local copy, full local search,
   edits queue and merge on reconnect.
-- The web client is **online-first** with a cache: recently opened notes are editable
-  offline (Yjs + IndexedDB), the rest require connectivity.
+- The web client is **online-first** for anything the server computes — search, backlinks,
+  tags, trash, history, sharing. Its notes depend on how it is being run
+  **[decided: revised]**:
+  - **Installed** (home screen, app window): every note is pulled into IndexedDB in the
+    background, so the whole tree opens with no network, and edits queue and merge like a
+    native client's. This once said "recently opened notes are editable offline, the rest
+    require connectivity", which in practice meant a complete file tree of which almost nothing
+    would open — an installed web app on a phone made that the common case, not the corner one.
+  - **A browser tab**: only what has been opened, as before. Installing is a deliberate act on
+    a device you own; a tab is often someone else's machine, and hoarding a copy of the vault
+    there — on their bandwidth — is not a favour.
+
+  What separates even the installed case from a native client is the *engine*: no local FTS, no
+  projection to files, no watcher.
 
 ### 3.3 Technology choices
 
@@ -315,6 +327,21 @@ foreground instead.
 
 `y-indexeddb` caches docs the user has opened; the vault doc is always cached. No file
 projection. Attachments are fetched on demand.
+
+Note content is prefetched in the background once the vault doc has synced, and only when the
+client is installed (`display-mode: standalone` and friends, or iOS's `navigator.standalone`) —
+one note at a time, skipping what is already stored, abandoned the moment the socket drops and
+resumed on the next sync. The Tauri shells report a browser display mode and are excluded,
+correctly: their relay already holds the vault on local disk. It does not keep those copies fresh: a note changed on another device updates here
+when it is opened. Keeping every cached doc current would mean subscribing the whole vault
+permanently, which is a different design.
+
+Edits made offline outlive the view that made them. A note doc is only pushed while it is
+subscribed, so a note edited and then closed had nowhere to go — reconnecting re-handshook
+whatever was still open and left that one in IndexedDB until someone reopened it. Ids with
+unacknowledged local changes are kept in localStorage, stay subscribed until the server
+acknowledges, and are re-subscribed on the next start. The vault doc needs none of this: it is
+subscribed for the life of the session, so notes *created* offline arrive with it.
 
 A service worker precaches the built shell so the app starts with no network, and a web app
 manifest makes it installable — on iOS an installed web app is also exempt from Safari's

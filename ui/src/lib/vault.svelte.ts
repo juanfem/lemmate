@@ -9,6 +9,11 @@
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { IndexeddbPersistence } from 'y-indexeddb'
+import { loadIds, saveIds } from './idstore.ts'
+import { isInstalled } from './install.ts'
+
+/** Breathing room between background note fetches, so they stay behind the foreground. */
+const PREFETCH_GAP_MS = 50
 import { SyncClient, type SyncStatus } from './sync.ts'
 import { rewriteWikilinks } from './links.ts'
 export { rewriteWikilinks }
@@ -37,7 +42,30 @@ export class VaultSession {
   private attachmentsMap: Y.Map<string>
   private bookmarksArr: Y.Array<Bookmark>
   private metaMap: Y.Map<string>
-  private open = new Map<string, { doc: Y.Doc; awareness: Awareness; refs: number }>()
+  private open = new Map<
+    string,
+    { doc: Y.Doc; awareness: Awareness; refs: number; store: IndexeddbPersistence | null }
+  >()
+  /**
+   * Notes edited here that the server has not acknowledged (see lib/idstore.ts). A note doc is
+   * only pushed while it is subscribed on the socket, so an edit made offline in a note that is
+   * then closed had nowhere to go: reconnecting re-handshook the docs still open and left that
+   * one sitting in IndexedDB until someone happened to open it again. These stay subscribed
+   * until the server says it has them, and are re-subscribed on the next start if the tab went
+   * away first.
+   */
+  private pending: Set<string>
+  private readonly pendingKey: string
+  /**
+   * Notes whose content has been pulled for offline reading. A note doc only reaches IndexedDB
+   * once it has been subscribed, so without this only notes someone had opened were readable
+   * with the network down — the vault's file tree was complete and almost none of it would open.
+   */
+  private cached: Set<string>
+  private readonly cachedKey: string
+  private prefetching = false
+  /** Waiters for a doc's first successful sync, resolved from `onSynced`. */
+  private syncWaiters = new Map<string, (() => void)[]>()
 
   notes: NoteEntry[] = $state([])
   attachments: Record<string, string> = $state({})
@@ -55,6 +83,10 @@ export class VaultSession {
   constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string; client?: SyncClient } = {}) {
     this.id = id
     this.noteOnly = opts.noteOnly ?? false
+    this.pendingKey = `lemmate.pending.${id}`
+    this.pending = loadIds(this.pendingKey)
+    this.cachedKey = `lemmate.cached.${id}`
+    this.cached = loadIds(this.cachedKey)
     this.ownsClient = !opts.client
     this.client = opts.client ?? new SyncClient(opts.wsUrl ?? SyncClient.wsUrl())
     if (this.ownsClient) {
@@ -80,15 +112,26 @@ export class VaultSession {
     if (!this.noteOnly) {
       this.cache(this.vaultDocId, this.vaultDoc)
       this.client.open(this.vaultDocId, this.vaultDoc)
+      // Whatever was owed to the server when the tab last closed is still owed. Subscribing it
+      // again now means the next connection pushes it, rather than waiting for someone to
+      // happen to open that note.
+      for (const id of this.pending) this.acquire(id).release()
     } else this.vaultSynced = true
   }
 
-  /** Offline cache (SPEC §6.4): docs opened here stay readable/editable after a reload. */
-  private cache(docId: string, doc: Y.Doc) {
+  /**
+   * Offline cache (SPEC §6.4): docs opened here stay readable/editable after a reload.
+   *
+   * The instance is handed back because it is also an update *origin*: hydrating a doc from
+   * IndexedDB looks exactly like an edit unless you can tell the two apart, and mistaking one
+   * for the other would mark every note you open as needing a push.
+   */
+  private cache(docId: string, doc: Y.Doc): IndexeddbPersistence | null {
     try {
-      new IndexeddbPersistence(`lemmate:${this.id}:${docId}`, doc)
+      return new IndexeddbPersistence(`lemmate:${this.id}:${docId}`, doc)
     } catch {
       /* private mode or no IndexedDB: online-only */
+      return null
     }
   }
 
@@ -102,7 +145,86 @@ export class VaultSession {
   }
 
   onSynced(docId: string) {
-    if (docId === this.vaultDocId) this.vaultSynced = true
+    if (docId === this.vaultDocId) {
+      this.vaultSynced = true
+      // The note list is complete now, so the contents can be filled in behind it.
+      void this.prefetch()
+    }
+    for (const resolve of this.syncWaiters.get(docId) ?? []) resolve()
+    this.syncWaiters.delete(docId)
+    // The server has this note now, so it no longer has to be held open on our account.
+    if (this.pending.delete(docId)) {
+      saveIds(this.pendingKey, this.pending)
+      const entry = this.open.get(docId)
+      if (entry && entry.refs <= 0) this.drop(docId)
+    }
+  }
+
+  /** Resolve when the socket reports `docId` synced, or after `ms` — offline is an answer. */
+  private whenSynced(docId: string, ms = 5000): Promise<void> {
+    if (this.client.isSynced(docId)) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const waiters = this.syncWaiters.get(docId) ?? []
+      waiters.push(resolve)
+      this.syncWaiters.set(docId, waiters)
+      setTimeout(resolve, ms)
+    })
+  }
+
+  /** Note this doc as needing a push, and keep it subscribed until it gets one. */
+  private markPending(docId: string) {
+    if (this.pending.has(docId)) return
+    this.pending.add(docId)
+    saveIds(this.pendingKey, this.pending)
+  }
+
+  /**
+   * Pull the content of notes nobody has opened, so the whole vault is readable offline rather
+   * than only what has been visited (SPEC §3.2, §6.4).
+   *
+   * Only when the app is installed. In a browser tab this would be a copy of every note left
+   * behind on whatever machine someone happened to sign in from, paid for with their bandwidth,
+   * to enable an offline mode a tab does not really have. See lib/install.ts.
+   *
+   * One note at a time with a gap between: this runs behind whatever the user is doing, and a
+   * vault's worth of simultaneous handshakes would compete with it. It gives up the moment the
+   * socket drops and picks up where it left off when the vault doc next syncs, and it skips
+   * what it has already fetched, so a second start costs nothing.
+   *
+   * What it does not do is keep those copies fresh — a note changed on another device updates
+   * here when it is opened, or on the next pass if it was never fetched. Making every cached
+   * doc track every remote edit would mean subscribing the entire vault permanently, which is
+   * a different design from the one in SPEC §3.2.
+   */
+  private async prefetch() {
+    if (this.prefetching || this.noteOnly || !isInstalled()) return
+    this.prefetching = true
+    try {
+      for (const note of [...this.notes]) {
+        if (this.client.status !== 'online') break
+        if (this.cached.has(note.id) || this.open.has(note.id)) continue
+        const { release } = this.acquire(note.id)
+        try {
+          await this.whenSynced(note.id)
+        } finally {
+          release()
+        }
+        this.cached.add(note.id)
+        saveIds(this.cachedKey, this.cached)
+        await new Promise((resolve) => setTimeout(resolve, PREFETCH_GAP_MS))
+      }
+    } finally {
+      this.prefetching = false
+    }
+  }
+
+  /** Unsubscribe and forget a note doc. Only ever called when nothing is waiting on it. */
+  private drop(docId: string) {
+    const entry = this.open.get(docId)
+    if (!entry) return
+    this.client.close(docId)
+    entry.doc.destroy()
+    this.open.delete(docId)
   }
 
   onDenied(docId: string, reason: string) {
@@ -145,9 +267,15 @@ export class VaultSession {
     let e = this.open.get(id)
     if (!e) {
       const doc = new Y.Doc()
-      this.cache(id, doc)
+      const store = this.cache(id, doc)
       const awareness = this.client.open(id, doc)
-      e = { doc, awareness, refs: 0 }
+      e = { doc, awareness, refs: 0, store }
+      // An update from neither the socket nor the local cache was made here, and has to reach
+      // the server before this doc may be dropped.
+      doc.on('update', (_update: Uint8Array, origin: unknown) => {
+        if (origin === this.client || (store !== null && origin === store)) return
+        this.markPending(id)
+      })
       this.open.set(id, e)
     }
     e.refs++
@@ -157,11 +285,9 @@ export class VaultSession {
       awareness: entry.awareness,
       release: () => {
         entry.refs--
-        if (entry.refs <= 0) {
-          this.client.close(id)
-          entry.doc.destroy()
-          this.open.delete(id)
-        }
+        // Unsent edits outrank the view that made them: keep the subscription until the
+        // server acknowledges, and `onSynced` will drop it then.
+        if (entry.refs <= 0 && !this.pending.has(id)) this.drop(id)
       },
     }
   }
