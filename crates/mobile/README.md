@@ -115,6 +115,32 @@ Gradle's build directory lands in `gen/android/app/build` — 130 MB or so after
 gitignored, but this repository is Syncthing-synced, so it is worth an ignore pattern there for
 the same reason `target/` and `node_modules/` are kept out of the tree.
 
+## Icons
+
+One source at the repository root feeds everything: `icon.png` (1024², RGBA) for the desktop
+sets and the web favicon, and `icon-android-foreground.png` for Android's adaptive icon.
+Regenerate with
+
+```sh
+cargo tauri icon ../../icon.json          # from crates/mobile — writes gen/android's mipmaps
+cd ../desktop && cargo tauri icon ../../icon.png
+```
+
+`icon.json` exists because the source is a finished tile — a cream rounded square with the mark
+inside — and Android does not want one of those. An adaptive icon is a foreground drawn over a
+background, and the launcher masks the pair to whatever shape it likes, keeping only the inner
+72 of 108dp for certain. Handing it the tile whole meant the corners were cropped and what was
+left sat on a white background it did not match.
+
+So `bg_color` is the tile's own cream, `#FEF8EE`, which makes the cropping invisible: what gets
+cut is cream against cream. The foreground is then a separate file rather than the source,
+because `android_fg_scale` is only read when `android_fg` is given — it is the tile at 78%,
+built by the snippet in the commit that added it, which puts the hexagon at 56% of the canvas
+and so inside the 66dp circle Android asks you to keep key content within.
+
+If you replace the artwork, the number to re-check is that last one, and the cream has to match
+the new tile or the seam reappears.
+
 ## Not done yet
 
 - **Projection out of the sandbox** (SPEC §6.3). The vault is inside app-private storage, so
