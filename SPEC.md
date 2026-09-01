@@ -316,6 +316,18 @@ foreground instead.
 `y-indexeddb` caches docs the user has opened; the vault doc is always cached. No file
 projection. Attachments are fetched on demand.
 
+A service worker precaches the built shell so the app starts with no network, and a web app
+manifest makes it installable — on iOS an installed web app is also exempt from Safari's
+seven-day eviction of unused storage, which is what makes the cache above worth having. The
+worker never touches `/api/` or `/ws`: those must fail honestly so the client shows its offline
+state rather than replaying a stale answer, and the notes come from the CRDT docs regardless.
+The last known vault ids are kept alongside, because sessions are built from the vault list and
+without one there is nothing to open the cached docs *with*.
+
+Offline is therefore: read and edit what you have opened, reconciling on reconnect. Search,
+backlinks, tags, trash, history, sharing and un-fetched attachments are all server-side and go
+dark — the gap between this and a native client (SPEC §3.2) is by design, not by omission.
+
 ---
 
 ## 7. Sync protocol

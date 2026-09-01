@@ -95,6 +95,14 @@ bar is always a link back to what you are reading.
 
 The local relay serves exactly one vault, so in the desktop app the tree has a single root.
 
+The web client installs. "Add to Home Screen" on iOS, or the install button in a
+Chromium browser, gives it its own icon and window — and on iOS that also stops Safari
+discarding its stored notes after a week of not being opened. Once installed it starts without
+a network: the notes you have opened are readable and editable offline and merge when you
+reconnect, and the status line at the foot of the sidebar says `offline` while you are. What
+needs the server is anything the server computes — search, backlinks, tags, trash, version
+history, sharing, and attachments you have not already looked at.
+
 ### (e) On a phone or a narrow window
 
 Below about 720px the shell folds down to one column. A bar across the top carries the sidebar

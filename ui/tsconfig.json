@@ -10,7 +10,7 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "types": ["node", "svelte"],
+    "types": ["node", "svelte", "vite/client"],
     "skipLibCheck": true
   },
   "include": ["src", "test"]

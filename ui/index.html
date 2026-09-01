@@ -9,6 +9,14 @@
     <!-- Served from ui/public, so these are copied to the root of ui/dist verbatim. -->
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- The browser paints its own chrome with this before the app's CSS has loaded, so the two
+         values track --bg in app.css rather than the icon's cream. iOS below 17 reads the
+         apple- meta rather than the manifest's display mode; newer ones ignore it. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#17181b" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Lemmate" />
     <title>Lemmate</title>
   </head>
   <body>

@@ -6,6 +6,7 @@
 //   type:<text>      Input.insertText
 //   key:<key>        keyDown+keyUp, e.g. Enter, Escape, ArrowDown, Ctrl+o
 //   wait:<ms>        sleep
+//   offline:<on|off>  cut the network (Network.emulateNetworkConditions)
 //   viewport:<w>x<h>[:desktop]  resize; a phone by default (touch on, coarse pointer, no hover)
 //   waitfor:<js>     poll expression every 100ms until truthy (10s timeout)
 // Console messages / page exceptions are echoed to stderr. Exit 1 on failure.
@@ -97,6 +98,13 @@ async function runStep(cdp, step, outdir) {
     case 'wait':
       await sleep(Number(arg) || 0);
       return;
+    case 'offline': {
+      const offline = arg === 'on';
+      await cdp.send('Network.enable');
+      await cdp.send('Network.emulateNetworkConditions',
+        { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      return;
+    }
     case 'viewport': {
       const m = /^(\d+)x(\d+)(?::(\w+))?$/.exec(arg) ?? die(`bad viewport (expected WxH): ${arg}`);
       const mobile = m[3] !== 'desktop';

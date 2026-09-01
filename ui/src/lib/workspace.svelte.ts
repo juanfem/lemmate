@@ -5,6 +5,7 @@
 // this module keeps addressing notes by id alone.
 
 import { api, type VaultInfo } from './api.ts'
+import { recall, remember } from './vaultcache.ts'
 import { SyncClient, type SyncStatus } from './sync.ts'
 import { VaultSession, type Bookmark, type NoteEntry } from './vault.svelte.ts'
 import { uniquePath } from './moves.ts'
@@ -37,22 +38,45 @@ export class Workspace {
     }
   }
 
-  /** Fetch the vault list and open a session for every vault, dropping any that went away. */
+  /**
+   * Fetch the vault list and open a session for every vault, dropping any that went away.
+   *
+   * When the API is unreachable the last known list stands in, because the alternative is an
+   * empty tree in front of a browser that already holds the notes (see lib/vaultcache.ts).
+   * Sessions built this way read from IndexedDB and sit in the socket's `connecting` state
+   * until the server comes back, which is what the status line already reports.
+   */
   async refresh(): Promise<VaultInfo[]> {
     let vaults: VaultInfo[] = []
+    let live = true
     try {
       vaults = await api.vaults()
     } catch {
-      return []
+      live = false
+      vaults = recall().map((id) => ({ id, notes: 0 }))
+      if (vaults.length === 0) return []
     }
-    this.listed = true
+    // Only a real answer settles the question of which vaults exist; a cached one must not
+    // make the next failure look like "the server says you have none".
+    this.listed = live
     const wanted = new Set(vaults.map((v) => v.id))
     for (const s of this.sessions) if (!wanted.has(s.id)) s.destroy()
     const kept = this.sessions.filter((s) => wanted.has(s.id))
     const known = new Set(kept.map((s) => s.id))
     const added = vaults.filter((v) => !known.has(v.id)).map((v) => new VaultSession(v.id, { client: this.client }))
     this.sessions = [...kept, ...added]
+    this.persist()
     return vaults
+  }
+
+  /**
+   * Record what is open for the next offline start. Driven by the sessions rather than by the
+   * server's answer, because a vault created here — "New vault…", or one joined by id — exists
+   * before any listing mentions it, and would otherwise be missing from the cache until the
+   * next reload that happened to be online.
+   */
+  private persist() {
+    remember(this.sessions.map((s) => s.id))
   }
 
   /** Open a vault that is not in the list yet — a brand-new one, or one joined by id. */
@@ -61,6 +85,7 @@ export class Workspace {
     if (existing) return existing
     const session = new VaultSession(id, { client: this.client })
     this.sessions = [...this.sessions, session]
+    this.persist()
     return session
   }
 
