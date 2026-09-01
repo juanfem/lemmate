@@ -115,6 +115,64 @@ Gradle's build directory lands in `gen/android/app/build` — 130 MB or so after
 gitignored, but this repository is Syncthing-synced, so it is worth an ignore pattern there for
 the same reason `target/` and `node_modules/` are kept out of the tree.
 
+## iOS, on a Mac
+
+Nothing here can build for iOS: `cargo tauri ios init` shells out to `xcodebuild`, so it needs
+macOS and Xcode, and there is no cross-compilation path. The crate itself is already shaped for
+it — `staticlib` is in the crate-type list because that is what an iOS project links, and
+`run()` is behind `tauri::mobile_entry_point` the same way — but not one line of that has been
+compiled, let alone run.
+
+On the Mac, the same prerequisites as Android with the platform swapped:
+
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install tauri-cli --version '^2' --locked
+xcode-select --install                    # or a full Xcode from the App Store
+cd ui && npm install && npm run build     # include_dir! compiles ui/dist in; it must exist
+cd ../crates/mobile && cargo tauri ios init
+cargo tauri ios dev
+```
+
+`gen/apple` is source in the same way `gen/android` is: generated once, then committed and
+edited. Signing needs an Apple ID — a free one installs to your own device for seven days at a
+time, which is enough to find out whether any of this works.
+
+### The thing to suspect first
+
+The webview's whole content comes from `http://127.0.0.1:<port>`, and iOS App Transport
+Security is hostile to cleartext HTTP in a way that took a deliberate exception to solve on
+Android (see above). ATS's treatment of *loopback* specifically is less clear-cut than
+Android's blanket ban — reports differ on whether `127.0.0.1` needs an exception at all, and it
+has changed across iOS versions — so this is written down as a first suspect rather than a step.
+
+If the app launches to a blank webview with nothing useful in the console, add to
+`gen/apple/lemmate-mobile_iOS/Info.plist`:
+
+```xml
+<key>NSAppTransportSecurity</key>
+<dict>
+  <key>NSAllowsLocalNetworking</key>
+  <true/>
+</dict>
+```
+
+`NSAllowsLocalNetworking` permits local and loopback connections while leaving ATS in force for
+everything else — the same scoping as the Android network-security-config, and for the same
+reason: the sync server must keep being held to https. Do **not** reach for
+`NSAllowsArbitraryLoads`.
+
+### Two more that will come up
+
+The vault lands in the app's private container, so nothing else on the phone can see it. Making
+it visible in the Files app (SPEC §6.3) is `UIFileSharingEnabled` plus
+`LSSupportsOpeningDocumentsInPlace` in the same Info.plist, and it is projection work rather
+than shell work — the folder has to be somewhere the system will index.
+
+Xcode's build output lands under `gen/apple`, which is inside a Syncthing-synced tree on the
+machine this was written on. `gen/android/app/build` needed an ignore pattern for exactly that
+reason; expect to want one here too.
+
 ## Icons
 
 One source at the repository root feeds everything: `icon.png` (1024², RGBA) for the desktop
@@ -152,6 +210,6 @@ the new tile or the seam reappears.
   beyond a configurable cache size, rather than the desktop's keep-everything.
 - **The keyboard toolbar** (SPEC §8): a row above the on-screen keyboard for markup, indent,
   checkbox, link and image.
-- **iOS** in general: it needs a macOS machine, and none of the above has been run there.
+- **iOS** in general — see the section above for what it needs and what to suspect first.
 - Errors during startup only reach the log. On a desktop they go to stderr; a phone has no
   stderr to read, so a failure to start currently shows an empty webview.
