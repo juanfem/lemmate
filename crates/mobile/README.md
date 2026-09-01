@@ -34,31 +34,51 @@ alternative — serving the UI from Tauri's own asset protocol — would mean te
 
 ## Building it
 
-Nothing in this repository builds an APK yet, and the machine this was written on could not:
-`cargo check -p lemmate-mobile` and `cargo test -p lemmate-mobile` work (both run in CI), but
-the Android toolchain is a separate install. What is needed, once:
+`cargo check -p lemmate-mobile` and `cargo test -p lemmate-mobile` are what CI runs, and they
+need nothing beyond Tauri's usual Linux packages. An APK needs the Android toolchain as well.
+
+On the machine this was written on that toolchain is installed, and it gets as far as a real
+library: `cargo build -p lemmate-mobile --lib --release --target aarch64-linux-android` produces
+a 20 MB stripped `liblemmate_mobile.so` — ELF aarch64, built for Android 24 against NDK r27d,
+linked only against `libandroid`/`libdl`/`liblog`/`libm`/`libc`, and exporting the JNI entry
+points Tauri's Android glue calls (`Java_dev_lemmate_mobile_Rust_create` and friends, named
+after `identifier` in tauri.conf.json). Everything `lemmate-core` pulls in cross-compiles,
+rusqlite's bundled SQLite and ring included. What has *not* happened yet is
+`cargo tauri android init`, so there is no Gradle project and no APK.
+
+Build Android targets with `--release`. A debug `staticlib` bundles every rlib in the graph and
+is large enough to exhaust a quota-limited target directory outright — the failure reads
+`Disk quota exceeded (os error 122)` from `llvm-ar`, which looks like a toolchain fault and is
+not one.
+
+The steps, once:
 
 ```sh
-# 1. Rust std for the Android targets. This needs rustup — a distro Rust package will not do,
-#    because it ships only the host target and has no way to add others.
+# 1. Rust std for the Android targets. This needs rustup — a distro Rust package ships only the
+#    host target and has no way to add others, which is the one genuinely blocking prerequisite.
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 
 # 2. The Tauri CLI.
-cargo install tauri-cli --version '^2'
+cargo install tauri-cli --version '^2' --locked
 
-# 3. SDK packages, into wherever ANDROID_HOME points.
-sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'platform-tools'
+# 3. SDK packages, into wherever ANDROID_HOME points. The NDK is ~3 GB.
+sdkmanager 'platform-tools' 'platforms;android-35' 'platforms;android-36' \
+           'build-tools;35.0.1' 'build-tools;36.1.0' 'ndk;27.3.13750724'
 
-# 4. The environment the Tauri CLI reads.
-export ANDROID_HOME=/opt/android-sdk
-export NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
-export JAVA_HOME=...   # a JDK the Android Gradle Plugin supports: 17 or 21, not 25
+# 4. A JDK the Android Gradle Plugin supports — 17 or 21. Newer ones (25) are rejected by AGP
+#    even though sdkmanager itself is happy with them, so this often means a second JDK
+#    alongside the system one rather than replacing it.
 
 # 5. Generate the Gradle project, once, and commit it — gen/android is source, not build output.
 cargo tauri android init
 cargo tauri android dev      # onto a device or emulator
 cargo tauri android build    # an APK/AAB
 ```
+
+`scripts/android-env.sh` in this directory sets the three variables the CLI reads
+(`ANDROID_HOME`, `NDK_HOME`, `JAVA_HOME`) and puts rustup's cargo ahead of a distro one on
+`PATH`; `source` it before any `cargo tauri android …`. Its paths are this machine's — edit
+them, or override the variables, on any other.
 
 `ui/dist` must exist and be current before any of those: `include_dir!` compiles it into the
 binary, so `npm run build` in `ui/` is a prerequisite, not an afterthought. An empty directory

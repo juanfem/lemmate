@@ -74,9 +74,21 @@ before committing; the cross-platform legs mostly catch unix-only assumptions.
 - pandoc 3.10.1 (`/usr/bin/pandoc`) and quarto 1.10.18 (`~/.local/bin/quarto`) are installed, so
   export and render can be exercised here. The pandoc tests still gate on `LEMMATE_TEST_PANDOC`
   rather than on `PATH` — set it to `/usr/bin/pandoc` and all three run.
-- The Android SDK is at `/opt/android-sdk`, but it holds only `cmdline-tools/latest`: no
-  platforms, build-tools or NDK, and `ANDROID_HOME` is unset. Bootstrapped, not yet buildable —
-  a Tauri Android target needs those installed first.
+- **Two Rusts.** `/usr/bin/rustc` is Gentoo's `dev-lang/rust-bin` (1.95, host target only) and is
+  still what a fresh shell gets; `~/.cargo/bin` holds a rustup toolchain (1.98) with the four
+  Android std targets. rustup was installed with `--no-modify-path`, so nothing shadows the
+  system one until you put `~/.cargo/bin` first — which is exactly what any Android build needs,
+  and what `crates/mobile/scripts/android-env.sh` does.
+- Android toolchain: SDK at `/opt/android-sdk` (`platform-tools`, `platforms;android-35`+`36`,
+  `build-tools;35.0.1`+`36.1.0`, `ndk;27.3.13750724`, licences accepted), `cargo-tauri` 2.11.4 in
+  `~/.cargo/bin`, and a JDK 21 at `/usr/lib/jvm/openjdk-bin-21` — an added slot, not the default,
+  because AGP rejects the system's JDK 25 while `sdkmanager` is happy with it. `source
+  crates/mobile/scripts/android-env.sh` sets all of it. `crates/mobile/gen/android` does not
+  exist yet: `cargo tauri android init` has not been run.
+- The target-dir tmpfs is the binding constraint on Android builds, not the toolchain: a *debug*
+  `staticlib` for `lemmate-mobile` bundles every rlib and blows the quota outright (`Disk quota
+  exceeded (os error 122)`) with ~5 GB free. Build Android targets `--release`, and clear
+  `$CARGO_TARGET_DIR/<triple>` between attempts.
 - Registry sources live under `~/.cargo/registry/src/*/` — check crate APIs there; versions have
   moved past training data (yrs 0.27 with built-in `sync`, ulid 3 `Ulid::generate()`, ureq 3,
   axum 0.8, notify 8, similar 3, tauri 2).
