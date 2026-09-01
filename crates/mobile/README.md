@@ -43,8 +43,11 @@ a 20 MB stripped `liblemmate_mobile.so` — ELF aarch64, built for Android 24 ag
 linked only against `libandroid`/`libdl`/`liblog`/`libm`/`libc`, and exporting the JNI entry
 points Tauri's Android glue calls (`Java_dev_lemmate_mobile_Rust_create` and friends, named
 after `identifier` in tauri.conf.json). Everything `lemmate-core` pulls in cross-compiles,
-rusqlite's bundled SQLite and ring included. What has *not* happened yet is
-`cargo tauri android init`, so there is no Gradle project and no APK.
+rusqlite's bundled SQLite and ring included.
+
+`cargo tauri android build --apk --target aarch64` then produces a 23 MB unsigned release APK
+containing that library at `lib/arm64-v8a/`. It has not been installed or run on a device: an
+APK that assembles proves the toolchain and the manifest, not that the app works.
 
 Build Android targets with `--release`. A debug `staticlib` bundles every rlib in the graph and
 is large enough to exhaust a quota-limited target directory outright — the failure reads
@@ -84,30 +87,33 @@ them, or override the variables, on any other.
 binary, so `npm run build` in `ui/` is a prerequisite, not an afterthought. An empty directory
 compiles to an empty bundle and the app comes up blank — `web::unpack` logs an error saying so.
 
-### The one edit `android init` does not make for you
+### The edit `android init` does not make for you
 
-The webview loads `http://127.0.0.1:<port>`, and Android has blocked cleartext HTTP by default
-since Android 9. Add `gen/android/app/src/main/res/xml/network_security_config.xml`:
+`gen/android` is generated but committed, and it carries one deliberate change. Tauri's template
+drives `android:usesCleartextTraffic` from a Gradle manifest placeholder — `false` in release,
+`true` in debug — and **both settings are wrong here**. The webview loads
+`http://127.0.0.1:<port>`, and Android has refused cleartext by default since Android 9, so
+`false` would leave a release build unable to load anything at all; `true` would permit cleartext
+to every host, the sync server included, which is exactly what must stay refused.
 
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-  <!-- The relay is this app talking to itself over loopback. Nothing else is permitted. -->
-  <domain-config cleartextTrafficPermitted="true">
-    <domain includeSubdomains="false">127.0.0.1</domain>
-  </domain-config>
-</network-security-config>
-```
+So the placeholder is gone from the manifest and from `app/build.gradle.kts`, replaced by
+`res/xml/network_security_config.xml`, which permits cleartext to `127.0.0.1` and nothing else,
+in every build type. Verified in the assembled release APK rather than assumed —
+`aapt2 dump xmltree` on it decodes to exactly that one domain, and the manifest carries
+`networkSecurityConfig` with no `usesCleartextTraffic` anywhere.
 
-and reference it from the `<application>` element in
-`gen/android/app/src/main/AndroidManifest.xml`:
+**Re-running `cargo tauri android init` regenerates both files and will undo this.** If you ever
+have to, re-apply it from the committed version.
 
-```xml
-<application android:networkSecurityConfig="@xml/network_security_config" ...>
-```
+### Two things that will bite
 
-Do **not** set `android:usesCleartextTraffic="true"` instead: that permits cleartext to every
-host, including the sync server, which is exactly what should stay refused.
+`build-tools;35.0.0` is needed on top of anything newer you have installed: AGP's R8 step asks
+for that exact version, and if the SDK directory is not writable it fails with `Failed to install
+the following SDK components` rather than saying which build wanted what.
+
+Gradle's build directory lands in `gen/android/app/build` — 130 MB or so after one APK. It is
+gitignored, but this repository is Syncthing-synced, so it is worth an ignore pattern there for
+the same reason `target/` and `node_modules/` are kept out of the tree.
 
 ## Not done yet
 

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The shell's webview loads http://127.0.0.1:<port>, which is this app talking to its own
+  in-process relay over loopback (see crates/mobile/src/lib.rs). Android has refused cleartext
+  HTTP by default since Android 9, so it has to be permitted — but only there.
+
+  This replaces the android:usesCleartextTraffic flag Tauri's template drives from Gradle. That
+  flag is all-or-nothing per build type, and both of its settings are wrong for this app: false
+  in release, which would leave the webview unable to load anything at all, and true in debug,
+  which permits cleartext to every host including the sync server. The sync server must keep
+  being held to https, so the permission is scoped to the one address that needs it.
+-->
+<network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+  </domain-config>
+</network-security-config>
