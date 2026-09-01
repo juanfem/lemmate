@@ -164,10 +164,9 @@ reason: the sync server must keep being held to https. Do **not** reach for
 
 ### Two more that will come up
 
-The vault lands in the app's private container, so nothing else on the phone can see it. Making
-it visible in the Files app (SPEC §6.3) is `UIFileSharingEnabled` plus
-`LSSupportsOpeningDocumentsInPlace` in the same Info.plist, and it is projection work rather
-than shell work — the folder has to be somewhere the system will index.
+The vault lands in the app's private container and stays there: SPEC §6.3 no longer asks mobile
+to project files at all. `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` are what
+this *would* have needed, and are noted only so nobody adds them by reflex.
 
 Xcode's build output lands under `gen/apple`, which is inside a Syncthing-synced tree on the
 machine this was written on. `gen/android/app/build` needed an ignore pattern for exactly that
@@ -201,11 +200,8 @@ the new tile or the seam reappears.
 
 ## Not done yet
 
-- **Projection out of the sandbox** (SPEC §6.3). The vault is inside app-private storage, so
-  nothing else on the phone can see the `.md` files. Android is meant to expose the folder
-  through the Storage Access Framework and iOS through the Files app
-  (`UIFileSharingEnabled`), reconciling on foreground rather than watching — background
-  watching is not reliable on either.
+- ~~Projection out of the sandbox~~ — **dropped**, see SPEC §6.3. Files exist so other tools
+  can reach the notes, and that is a desktop workflow.
 - **Attachment pinning** (SPEC §7): keep attachments for notes opened in the last 30 days, LRU
   beyond a configurable cache size, rather than the desktop's keep-everything.
 - **The keyboard toolbar** (SPEC §8): a row above the on-screen keyboard for markup, indent,

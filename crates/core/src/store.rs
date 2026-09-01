@@ -275,6 +275,10 @@ pub struct NoteRow {
     pub vault_id: VaultId,
     pub path: String,
     pub title: Option<String>,
+    /// When the note last changed, as the server saw it. Only the listing selects it — it is
+    /// there so a client can tell which of its cached copies have gone stale without fetching
+    /// any of them, and the other queries have no use for it.
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -707,16 +711,28 @@ impl Store {
 
     pub fn list_notes(&self, vault_id: VaultId) -> Result<Vec<NoteRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, vault_id, path, title FROM notes WHERE vault_id = ?1 AND deleted_at IS NULL ORDER BY path",
+            "SELECT id, vault_id, path, title, updated_at FROM notes \
+             WHERE vault_id = ?1 AND deleted_at IS NULL ORDER BY path",
         )?;
         let rows = stmt.query_map(params![vault_id.to_string()], row_to_note)?;
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
-    /// Replace a note's derived tags/links/search entry from a fresh [`NoteIndex`].
+    /// Replace a note's derived tags/links/search entry from a fresh [`NoteIndex`], and stamp
+    /// the note as changed.
+    ///
+    /// The stamp matters beyond bookkeeping: `updated_at` is what a client compares against to
+    /// find which of its offline copies have gone stale (SPEC §6.4), and it used to move only
+    /// when the *row* was upserted — a path or a title. Rewriting a note's body without
+    /// touching its title left the column exactly where it was, so a change made on one device
+    /// was invisible to another that was not looking at that note.
     pub fn index_note(&mut self, id: NoteId, ix: &NoteIndex) -> Result<()> {
         let sid = id.to_string();
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            params![sid],
+        )?;
         tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![sid])?;
         tx.execute("DELETE FROM note_links WHERE note_id = ?1", params![sid])?;
         tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![sid])?;
@@ -1318,6 +1334,9 @@ fn row_to_note(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
         vault_id: vault.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
         path: r.get(2)?,
         title: r.get(3)?,
+        // By name, not position: two callers select an extra column of their own, and only the
+        // listing asks for this one at all.
+        updated_at: r.get("updated_at").ok(),
     })
 }
 
@@ -1533,6 +1552,24 @@ mod tests {
         assert_eq!(store.vaults_of("u2").unwrap(), vec![(v, Role::Editor, 0)]);
         store.remove_membership(v, "u2").unwrap();
         assert_eq!(store.member_count(v).unwrap(), 1);
+    }
+
+    /// The offline clients compare this to decide which cached copies to re-fetch (SPEC §6.4),
+    /// so a body-only edit has to move it. It once did not: `updated_at` only changed when the
+    /// row was upserted, which a change of body alone never does.
+    #[test]
+    fn reindexing_a_note_stamps_it_as_changed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let vault = VaultId::new();
+        let id = NoteId::new();
+        store.upsert_note(id, vault, "n.md", Some("n")).unwrap();
+        let first = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Same path, same title: only the body differs.
+        store.index_note(id, &markdown::index("# n\n\nrewritten\n").unwrap()).unwrap();
+        let second = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+        assert!(second > first, "a body-only change must move updated_at: {first} -> {second}");
     }
 
     #[test]

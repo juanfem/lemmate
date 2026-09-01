@@ -318,10 +318,18 @@ Read direction (disk → CRDT):
   files without the content-hash heuristic. Hand-made files without one still get the
   heuristic and gain an `id:` on first sync.
 
-Mobile projection: Android exposes the vault folder via the Storage Access Framework;
-iOS exposes it in the Files app under the app's Documents (`UIFileSharingEnabled`).
-Background watching is not reliable on mobile; the projection is reconciled on app
-foreground instead.
+**Mobile does not project [decided].** The vault lives in the app's own storage as CRDT and
+nothing else; there are no `.md` files for the rest of the phone to see. This once promised the
+Storage Access Framework on Android and the Files app on iOS, and dropping that costs less than
+it appears to: the projection exists so that *other tools* can work on the notes — an editor, a
+script, an LLM writing into the folder, a plain `mv` — and those are desktop habits. Nobody
+points a language model at a directory on their phone. What is left on mobile once the files
+are gone is the app itself, which reads and writes the CRDT directly.
+
+It also removes the least reliable part of the mobile design. Background watching does not work
+on either platform, so the plan had been to reconcile the folder on every foreground: a
+conflict-detection pass, on a device whose OS may have killed the app mid-write, guarding files
+that in practice only that same app was ever going to touch.
 
 ### 6.4 Web client
 
@@ -596,8 +604,8 @@ GUI). JSON output with `--json` for scripting.
 | Platform | Shell | Offline | Projection | Notes |
 |---|---|---|---|---|
 | Linux / macOS / Windows | Tauri 2 | full | yes, watched | Primary target. |
-| Android | Tauri 2 | full | yes, SAF folder, reconciled on foreground | |
-| iOS | Tauri 2 | full | yes, Files app | Background sync limited by OS. |
+| Android | Tauri 2 | full | no — §6.3 | |
+| iOS | Tauri 2 | full | no — §6.3 | Background sync limited by OS. |
 | Web | browser | cached docs only | no | Served by the server; no install. |
 
 Minimum: single-binary server on Linux amd64/arm64; Docker image; `fly.toml` with a

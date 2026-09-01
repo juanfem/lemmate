@@ -39,3 +39,36 @@ export function saveIds(key: string, ids: Iterable<string>): void {
     /* private mode or quota: the set is a cache, and losing it costs a re-sync, not data */
   }
 }
+
+/** Split out from `loadMap` so the shape-checking is testable without a browser. */
+export function parseMap(raw: string | null): Map<string, string> {
+  const out = new Map<string, string>()
+  if (!raw) return out
+  let data: unknown
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    return out
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return out
+  for (const [id, version] of Object.entries(data as Record<string, unknown>)) {
+    if (id && typeof version === 'string') out.set(id, version)
+  }
+  return out
+}
+
+export function loadMap(key: string): Map<string, string> {
+  try {
+    return parseMap(localStorage.getItem(key))
+  } catch {
+    return new Map()
+  }
+}
+
+export function saveMap(key: string, map: Map<string, string>): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(Object.fromEntries(map)))
+  } catch {
+    /* as above: losing it costs a re-sync */
+  }
+}

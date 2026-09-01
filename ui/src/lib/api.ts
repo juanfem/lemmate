@@ -8,6 +8,8 @@ export interface NoteSummary {
   id: string
   path: string
   title: string | null
+  /** When the server last saw this note change. Sent on the listing only (SPEC §6.4). */
+  updated_at?: string
 }
 export interface Share {
   kind: 'user' | 'link'

@@ -245,6 +245,8 @@ struct NoteSummary {
     id: String,
     path: String,
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
 }
 #[derive(Serialize)]
 struct NoteBody {
@@ -275,7 +277,9 @@ fn default_limit() -> u32 {
 }
 
 fn summaries(rows: Vec<NoteRow>) -> Vec<NoteSummary> {
-    rows.into_iter().map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title }).collect()
+    rows.into_iter()
+        .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title, updated_at: n.updated_at })
+        .collect()
 }
 
 type Resp<T> = std::result::Result<axum::Json<T>, StatusCode>;
@@ -434,9 +438,12 @@ async fn restore(
 ) -> Resp<NoteSummary> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     match ask(&s, LocalQuery::Restore(id)).await? {
-        LocalReply::Written(Some((row, _))) => {
-            Ok(axum::Json(NoteSummary { id: row.id.to_string(), path: row.path, title: row.title }))
-        }
+        LocalReply::Written(Some((row, _))) => Ok(axum::Json(NoteSummary {
+            id: row.id.to_string(),
+            path: row.path,
+            title: row.title,
+            updated_at: None,
+        })),
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }

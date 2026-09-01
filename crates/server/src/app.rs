@@ -857,7 +857,12 @@ async fn restore_note(
         RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
     commit_change(&state, &vroom, update).await?;
-    Ok(Json(NoteSummary { id: row.id.to_string(), path: row.path, title: row.title }))
+    Ok(Json(NoteSummary {
+        id: row.id.to_string(),
+        path: row.path,
+        title: row.title,
+        updated_at: row.updated_at,
+    }))
 }
 
 // ---- REST -------------------------------------------------------------------------------------
@@ -873,6 +878,11 @@ struct NoteSummary {
     id: String,
     path: String,
     title: Option<String>,
+    /// Only the note listing carries this — it is what lets a client tell which of its cached
+    /// copies have gone stale without fetching them (SPEC §6.4). Backlinks, tagged notes and
+    /// search hits come from queries that do not select it, and answer `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -932,7 +942,12 @@ async fn backlinks(
     let rows = store.backlinks_to(&note).map_err(internal)?;
     Ok(Json(
         rows.into_iter()
-            .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
+            .map(|n| NoteSummary {
+                id: n.id.to_string(),
+                path: n.path,
+                title: n.title,
+                updated_at: n.updated_at,
+            })
             .collect(),
     ))
 }
@@ -1087,7 +1102,12 @@ async fn tagged(
     let rows = state.store.lock().await.notes_with_tag(vault, &p.tag).map_err(internal)?;
     Ok(Json(
         rows.into_iter()
-            .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
+            .map(|n| NoteSummary {
+                id: n.id.to_string(),
+                path: n.path,
+                title: n.title,
+                updated_at: n.updated_at,
+            })
             .collect(),
     ))
 }
@@ -1123,7 +1143,12 @@ async fn list_notes(
     let rows = state.store.lock().await.list_notes(vault).map_err(internal)?;
     Ok(Json(
         rows.into_iter()
-            .map(|n| NoteSummary { id: n.id.to_string(), path: n.path, title: n.title })
+            .map(|n| NoteSummary {
+                id: n.id.to_string(),
+                path: n.path,
+                title: n.title,
+                updated_at: n.updated_at,
+            })
             .collect(),
     ))
 }

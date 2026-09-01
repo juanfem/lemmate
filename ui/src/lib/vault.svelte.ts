@@ -9,11 +9,14 @@
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { IndexeddbPersistence } from 'y-indexeddb'
-import { loadIds, saveIds } from './idstore.ts'
+import { api } from './api.ts'
+import { loadIds, loadMap, saveIds, saveMap } from './idstore.ts'
 import { isInstalled } from './install.ts'
 
 /** Breathing room between background note fetches, so they stay behind the foreground. */
 const PREFETCH_GAP_MS = 50
+/** How often an installed client re-checks the server for notes that changed elsewhere. */
+const REFRESH_EVERY_MS = 60_000
 import { SyncClient, type SyncStatus } from './sync.ts'
 import { rewriteWikilinks } from './links.ts'
 export { rewriteWikilinks }
@@ -57,13 +60,20 @@ export class VaultSession {
   private pending: Set<string>
   private readonly pendingKey: string
   /**
-   * Notes whose content has been pulled for offline reading. A note doc only reaches IndexedDB
-   * once it has been subscribed, so without this only notes someone had opened were readable
-   * with the network down — the vault's file tree was complete and almost none of it would open.
+   * The version of each note whose content has been pulled for offline reading: note id to the
+   * server's `updated_at` at the time it was fetched.
+   *
+   * A note doc only reaches IndexedDB once it has been subscribed, so without this only notes
+   * someone had opened were readable with the network down — the vault's file tree was complete
+   * and almost none of it would open. Holding the version rather than a bare "have it" also
+   * makes the copies *stay* right: a note edited on another device shows a newer `updated_at`
+   * in the listing, and gets fetched again.
    */
-  private cached: Set<string>
+  private cached: Map<string, string>
   private readonly cachedKey: string
-  private prefetching = false
+  private stocking = false
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private onVisible: (() => void) | null = null
   /** Waiters for a doc's first successful sync, resolved from `onSynced`. */
   private syncWaiters = new Map<string, (() => void)[]>()
 
@@ -86,7 +96,7 @@ export class VaultSession {
     this.pendingKey = `lemmate.pending.${id}`
     this.pending = loadIds(this.pendingKey)
     this.cachedKey = `lemmate.cached.${id}`
-    this.cached = loadIds(this.cachedKey)
+    this.cached = loadMap(this.cachedKey)
     this.ownsClient = !opts.client
     this.client = opts.client ?? new SyncClient(opts.wsUrl ?? SyncClient.wsUrl())
     if (this.ownsClient) {
@@ -147,8 +157,10 @@ export class VaultSession {
   onSynced(docId: string) {
     if (docId === this.vaultDocId) {
       this.vaultSynced = true
-      // The note list is complete now, so the contents can be filled in behind it.
-      void this.prefetch()
+      // The note list is complete now, so the contents can be filled in behind it. This also
+      // fires on every reconnect, which is exactly when a refresh is due.
+      this.startRefreshing()
+      void this.stock()
     }
     for (const resolve of this.syncWaiters.get(docId) ?? []) resolve()
     this.syncWaiters.delete(docId)
@@ -179,43 +191,67 @@ export class VaultSession {
   }
 
   /**
-   * Pull the content of notes nobody has opened, so the whole vault is readable offline rather
-   * than only what has been visited (SPEC §3.2, §6.4).
+   * Keep the offline copies complete and current: fetch the content of notes nobody has open,
+   * and re-fetch any whose `updated_at` has moved since we stored them (SPEC §3.2, §6.4).
    *
    * Only when the app is installed. In a browser tab this would be a copy of every note left
    * behind on whatever machine someone happened to sign in from, paid for with their bandwidth,
    * to enable an offline mode a tab does not really have. See lib/install.ts.
    *
-   * One note at a time with a gap between: this runs behind whatever the user is doing, and a
-   * vault's worth of simultaneous handshakes would compete with it. It gives up the moment the
-   * socket drops and picks up where it left off when the vault doc next syncs, and it skips
-   * what it has already fetched, so a second start costs nothing.
-   *
-   * What it does not do is keep those copies fresh — a note changed on another device updates
-   * here when it is opened, or on the next pass if it was never fetched. Making every cached
-   * doc track every remote edit would mean subscribing the entire vault permanently, which is
-   * a different design from the one in SPEC §3.2.
+   * The note you are reading is not this method's business: it is subscribed on the socket for
+   * as long as it is open and updates the instant anyone else touches it. This is for the other
+   * few hundred, and it runs one at a time with a gap, behind whatever the user is doing. It
+   * gives up the moment the socket drops and resumes on the next pass.
    */
-  private async prefetch() {
-    if (this.prefetching || this.noteOnly || !isInstalled()) return
-    this.prefetching = true
+  private async stock() {
+    if (this.stocking || this.noteOnly || !isInstalled()) return
+    this.stocking = true
     try {
-      for (const note of [...this.notes]) {
+      // One listing answers "what exists" and "what changed" together, in a request far
+      // cheaper than opening the docs to find out.
+      const listed = await api.notes(this.id).catch(() => null)
+      if (!listed) return
+      for (const note of listed) {
         if (this.client.status !== 'online') break
-        if (this.cached.has(note.id) || this.open.has(note.id)) continue
+        // No version from the server means nothing to compare, so treat having it as enough.
+        const want = note.updated_at ?? this.cached.get(note.id) ?? ''
+        if (this.cached.get(note.id) === want) continue
+        // An open note is already live; re-syncing it here would fight with its editor.
+        if (this.open.has(note.id)) {
+          this.cached.set(note.id, want)
+          continue
+        }
         const { release } = this.acquire(note.id)
         try {
           await this.whenSynced(note.id)
         } finally {
           release()
         }
-        this.cached.add(note.id)
-        saveIds(this.cachedKey, this.cached)
+        this.cached.set(note.id, want)
+        saveMap(this.cachedKey, this.cached)
         await new Promise((resolve) => setTimeout(resolve, PREFETCH_GAP_MS))
       }
+      // Notes deleted elsewhere should stop taking up room in the record.
+      const alive = new Set(listed.map((n) => n.id))
+      for (const id of [...this.cached.keys()]) if (!alive.has(id)) this.cached.delete(id)
+      saveMap(this.cachedKey, this.cached)
     } finally {
-      this.prefetching = false
+      this.stocking = false
     }
+  }
+
+  /**
+   * Run `stock` on the three occasions that matter, once the vault doc has synced: now, every
+   * minute, and whenever the app comes back to the foreground — which on a phone is the moment
+   * someone opens it expecting to find what they wrote on the other device.
+   */
+  private startRefreshing() {
+    if (this.refreshTimer !== null || this.noteOnly || !isInstalled()) return
+    this.refreshTimer = setInterval(() => void this.stock(), REFRESH_EVERY_MS)
+    this.onVisible = () => {
+      if (document.visibilityState === 'visible') void this.stock()
+    }
+    document.addEventListener('visibilitychange', this.onVisible)
   }
 
   /** Unsubscribe and forget a note doc. Only ever called when nothing is waiting on it. */
@@ -414,6 +450,10 @@ export class VaultSession {
   }
 
   destroy() {
+    if (this.refreshTimer !== null) clearInterval(this.refreshTimer)
+    this.refreshTimer = null
+    if (this.onVisible) document.removeEventListener('visibilitychange', this.onVisible)
+    this.onVisible = null
     if (this.ownsClient) {
       this.client.destroy()
     } else {

@@ -167,5 +167,5 @@ as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 
 Everything in the table above exists today. What M3 still owes: an actual Android build (the
 shell compiles, but the toolchain steps in [crates/mobile/README.md](crates/mobile/README.md)
-have not been run), projecting the vault out of app storage through the Storage Access
-Framework and the Files app, the on-screen keyboard toolbar, and Quarto rendering.
+have not been run), the on-screen keyboard toolbar, and Quarto rendering. Projecting the vault
+to files on mobile was dropped rather than built — see SPEC §6.3.
