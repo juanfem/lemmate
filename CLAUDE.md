@@ -83,12 +83,21 @@ before committing; the cross-platform legs mostly catch unix-only assumptions.
   `build-tools;35.0.1`+`36.1.0`, `ndk;27.3.13750724`, licences accepted), `cargo-tauri` 2.11.4 in
   `~/.cargo/bin`, and a JDK 21 at `/usr/lib/jvm/openjdk-bin-21` — an added slot, not the default,
   because AGP rejects the system's JDK 25 while `sdkmanager` is happy with it. `source
-  crates/mobile/scripts/android-env.sh` sets all of it. `crates/mobile/gen/android` does not
-  exist yet: `cargo tauri android init` has not been run.
-- The target-dir tmpfs is the binding constraint on Android builds, not the toolchain: a *debug*
-  `staticlib` for `lemmate-mobile` bundles every rlib and blows the quota outright (`Disk quota
-  exceeded (os error 122)`) with ~5 GB free. Build Android targets `--release`, and clear
-  `$CARGO_TARGET_DIR/<triple>` between attempts.
+  crates/mobile/scripts/android-env.sh` sets all of it. `cargo tauri android init` has been run
+  and `crates/mobile/gen/android` is committed; `cargo tauri android build --apk --target
+  aarch64` assembles. Re-running `init` reverts the manifest's cleartext scoping — see
+  `crates/mobile/README.md`. AGP's R8 wants `build-tools;35.0.0` exactly, whatever newer ones
+  are installed, and Gradle leaves ~130 MB in `gen/android/app/build` inside the synced tree.
+- The target-dir tmpfs is the binding constraint on Android builds, not the toolchain. It is
+  mounted `usrquota` with no quota tools installed, so hitting the limit surfaces only as `Disk
+  quota exceeded (os error 122)` from whatever was writing — `llvm-ar`, or a plain `rmeta`
+  write during an ordinary `cargo test`. A *debug* `staticlib` for `lemmate-mobile` bundles
+  every rlib and blows it on its own. Build Android targets `--release`, and reclaim with `rm
+  -rf $CARGO_TARGET_DIR/<triple>` or `cargo clean --profile dev -p …` when host builds start
+  failing for no apparent reason.
+- rustup was installed `--profile minimal`, so `cargo fmt`/`cargo clippy` resolve to rustup's
+  cargo once `~/.cargo/bin` is first on `PATH` and fail with "not installed for the toolchain"
+  unless `rustup component add rustfmt clippy` has been run — it has.
 - Registry sources live under `~/.cargo/registry/src/*/` — check crate APIs there; versions have
   moved past training data (yrs 0.27 with built-in `sync`, ulid 3 `Ulid::generate()`, ureq 3,
   axum 0.8, notify 8, similar 3, tauri 2).
