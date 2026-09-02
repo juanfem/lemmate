@@ -114,8 +114,10 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
     a device you own; a tab is often someone else's machine, and hoarding a copy of the vault
     there — on their bandwidth — is not a favour.
 
-  What separates even the installed case from a native client is the *engine*: no local FTS, no
-  projection to files, no watcher.
+  Search follows the same split: `/api/v1/search` whenever the server answers, and an offline
+  index over the cached notes when it does not (§6.4). What separates even the installed case
+  from a native client is the *engine*: no SQLite, no watcher, and no projection to files —
+  which mobile no longer wants anyway (§6.3).
 
 ### 3.3 Technology choices
 
@@ -350,6 +352,15 @@ whatever was still open and left that one in IndexedDB until someone reopened it
 unacknowledged local changes are kept in localStorage, stay subscribed until the server
 acknowledges, and are re-subscribed on the next start. The vault doc needs none of this: it is
 subscribed for the life of the session, so notes *created* offline arrive with it.
+
+Offline search runs over those cached copies. Each is indexed on arrival with
+`markdown/index.ts` — the same parser, over the same title and `plain_text` the server puts in
+its FTS — and the result is kept in IndexedDB, which doubles as the record of what is cached and
+at which version. Matching is by substring rather than FTS5's tokens, and ranking is occurrence
+counts weighted towards titles rather than bm25, so offline results are broader and more crudely
+ordered than the server's; the pane says it is offline while this is in use. The parser is a
+lazily-loaded chunk and is not precached: a browser tab never indexes anything and should not
+pay 185 kB for the machinery.
 
 A service worker precaches the built shell so the app starts with no network, and a web app
 manifest makes it installable — on iOS an installed web app is also exempt from Safari's

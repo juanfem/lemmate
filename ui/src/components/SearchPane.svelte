@@ -1,16 +1,43 @@
 <script lang="ts">
   import { api, type SearchHit } from '../lib/api.ts'
+  import { searchNotes, type IndexedNote } from '../lib/search.ts'
+  import { loadVault } from '../lib/searchstore.ts'
 
   /**
    * Cross-vault search (SPEC §10): `/api/v1/search` ranks every vault the account can read
    * together, and the relay answers it for its one vault. Hits name a note id, which the shell
    * resolves back to a vault through the workspace.
+   *
+   * With no server, the offline index stands in — the notes an installed client has cached,
+   * matched by lib/search.ts. It is weaker than SQLite's FTS and says so on screen, because a
+   * result list that quietly stops being complete is worse than one that admits it.
    */
-  let { label, onOpen }: { label?: (noteId: string) => string; onOpen: (id: string) => void } = $props()
+  let {
+    label,
+    onOpen,
+    vaults = [],
+  }: {
+    label?: (noteId: string) => string
+    onOpen: (id: string) => void
+    /** Vault ids to search offline; the server needs no such hint. */
+    vaults?: string[]
+  } = $props()
   let query = $state('')
   let hits: SearchHit[] = $state([])
   let error = $state('')
+  let offline = $state(false)
   let timer: ReturnType<typeof setTimeout> | undefined
+
+  async function offlineSearch(q: string): Promise<SearchHit[]> {
+    const notes: IndexedNote[] = []
+    for (const vault of vaults) {
+      for (const row of (await loadVault(vault)).values()) {
+        notes.push({ id: row.id, vault: row.vault, title: row.title, text: row.text })
+      }
+    }
+    if (notes.length === 0) throw new Error('nothing cached on this device')
+    return searchNotes(notes, q)
+  }
 
   function search() {
     clearTimeout(timer)
@@ -18,13 +45,26 @@
       const q = query.trim()
       if (!q) {
         hits = []
+        error = ''
+        offline = false
         return
       }
       try {
         hits = await api.searchAll(q)
         error = ''
-      } catch (e) {
-        error = String(e)
+        offline = false
+      } catch {
+        // The server is the better answer whenever there is one, so this is a fallback rather
+        // than a mode: no toggle, and it reverts the moment the network is back.
+        try {
+          hits = await offlineSearch(q)
+          offline = true
+          error = ''
+        } catch (e) {
+          hits = []
+          offline = false
+          error = `Search needs the server (${String(e)}).`
+        }
       }
     }, 150)
   }
@@ -33,6 +73,7 @@
 <div class="search">
   <input bind:value={query} oninput={search} placeholder="Search…" />
   {#if error}<p class="error">{error}</p>{/if}
+  {#if offline}<p class="note">Offline — searching the {hits.length === 1 ? 'note' : 'notes'} cached on this device.</p>{/if}
   <ul>
     {#each hits as h (h.note_id)}
       <li>
@@ -98,6 +139,11 @@
     display: block;
     color: var(--muted);
     font-size: 0.8rem;
+  }
+  .note {
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin: 0 0.5rem 0.2rem;
   }
   .error {
     color: #c33;

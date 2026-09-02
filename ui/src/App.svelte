@@ -843,7 +843,7 @@
           </nav>
         {/if}
       {:else if sidebar === 'search'}
-        <SearchPane label={labelOfNote} onOpen={open} />
+        <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
       {:else if sidebar === 'tags'}
         {#if session}<TagsPane vault={session.id} version={tagsVersion} onOpen={open} />{/if}
       {:else if sidebar === 'outline'}

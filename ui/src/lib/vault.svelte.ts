@@ -10,8 +10,9 @@ import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import { api } from './api.ts'
-import { loadIds, loadMap, saveIds, saveMap } from './idstore.ts'
+import { loadIds, saveIds } from './idstore.ts'
 import { isInstalled } from './install.ts'
+import { loadVault, noteKey, putNotes, removeNotes, type StoredNote } from './searchstore.ts'
 
 /** Breathing room between background note fetches, so they stay behind the foreground. */
 const PREFETCH_GAP_MS = 50
@@ -59,18 +60,6 @@ export class VaultSession {
    */
   private pending: Set<string>
   private readonly pendingKey: string
-  /**
-   * The version of each note whose content has been pulled for offline reading: note id to the
-   * server's `updated_at` at the time it was fetched.
-   *
-   * A note doc only reaches IndexedDB once it has been subscribed, so without this only notes
-   * someone had opened were readable with the network down — the vault's file tree was complete
-   * and almost none of it would open. Holding the version rather than a bare "have it" also
-   * makes the copies *stay* right: a note edited on another device shows a newer `updated_at`
-   * in the listing, and gets fetched again.
-   */
-  private cached: Map<string, string>
-  private readonly cachedKey: string
   private stocking = false
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private onVisible: (() => void) | null = null
@@ -95,8 +84,6 @@ export class VaultSession {
     this.noteOnly = opts.noteOnly ?? false
     this.pendingKey = `lemmate.pending.${id}`
     this.pending = loadIds(this.pendingKey)
-    this.cachedKey = `lemmate.cached.${id}`
-    this.cached = loadMap(this.cachedKey)
     this.ownsClient = !opts.client
     this.client = opts.client ?? new SyncClient(opts.wsUrl ?? SyncClient.wsUrl())
     if (this.ownsClient) {
@@ -211,30 +198,44 @@ export class VaultSession {
       // cheaper than opening the docs to find out.
       const listed = await api.notes(this.id).catch(() => null)
       if (!listed) return
+      const held = await loadVault(this.id)
+      // Loaded here rather than imported at the top: the indexer drags in micromark and its
+      // mdast extensions, ~185 kB that only a client building an offline index has any use
+      // for. A browser tab never gets this far and never downloads it.
+      const { index: indexMarkdown } = await import('../markdown/index.ts')
       for (const note of listed) {
         if (this.client.status !== 'online') break
         // No version from the server means nothing to compare, so treat having it as enough.
-        const want = note.updated_at ?? this.cached.get(note.id) ?? ''
-        if (this.cached.get(note.id) === want) continue
-        // An open note is already live; re-syncing it here would fight with its editor.
-        if (this.open.has(note.id)) {
-          this.cached.set(note.id, want)
-          continue
-        }
-        const { release } = this.acquire(note.id)
+        const want = note.updated_at ?? held.get(note.id)?.version ?? ''
+        if (held.get(note.id)?.version === want) continue
+        const { doc, release } = this.acquire(note.id)
+        let text: string
         try {
           await this.whenSynced(note.id)
+          text = doc.getText('content').toString()
         } finally {
           release()
         }
-        this.cached.set(note.id, want)
-        saveMap(this.cachedKey, this.cached)
+        // The same parser the server runs, over the same text (SPEC §5), so both sides search
+        // the same words. Only the *matching* differs — see lib/search.ts.
+        const ix = indexMarkdown(text)
+        await putNotes([
+          {
+            key: noteKey(this.id, note.id),
+            vault: this.id,
+            id: note.id,
+            version: want,
+            title: ix.title ?? note.title,
+            text: ix.plain_text,
+          } satisfies StoredNote,
+        ])
+        held.set(note.id, { key: '', vault: this.id, id: note.id, version: want, title: null, text: '' })
         await new Promise((resolve) => setTimeout(resolve, PREFETCH_GAP_MS))
       }
-      // Notes deleted elsewhere should stop taking up room in the record.
+      // Notes deleted elsewhere should stop taking up room, and stop turning up in results.
       const alive = new Set(listed.map((n) => n.id))
-      for (const id of [...this.cached.keys()]) if (!alive.has(id)) this.cached.delete(id)
-      saveMap(this.cachedKey, this.cached)
+      const gone = [...held.keys()].filter((id) => !alive.has(id))
+      await removeNotes(gone.map((id) => noteKey(this.id, id)))
     } finally {
       this.stocking = false
     }

@@ -106,9 +106,12 @@ from someone else's computer does not leave a copy of everything on it. Write an
 pushed the next time the app opens with a connection, whether or not you reopen the notes
 concerned. The status line at the foot of the sidebar says `offline` while you are.
 
-What needs the server is anything the server computes: search, backlinks, tags, trash, version
-history, sharing, and attachments you have not already looked at. A note someone edits on
-another device also refreshes here only when you open it.
+Search keeps working offline too, over the notes on the device — the pane says so while it is,
+because the offline index is broader and more roughly ordered than the server's: it matches
+inside words, so `invoice` finds `invoices`, which the server would not.
+
+What still needs the server: backlinks, tags, trash, version history, sharing, and attachments
+you have not already looked at.
 
 ### (e) On a phone or a narrow window
 

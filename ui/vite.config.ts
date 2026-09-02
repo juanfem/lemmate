@@ -17,7 +17,13 @@ function serviceWorker(): Plugin {
     name: 'lemmate-service-worker',
     apply: 'build',
     generateBundle(_options, bundle) {
-      const emitted = Object.keys(bundle)
+      const emitted = Object.entries(bundle)
+        // Only the shell. A lazily-loaded chunk — the markdown indexer is one — is code that
+        // some clients never run: precaching it would make every browser tab download the
+        // offline-search machinery it will never use. They are still cached, by the fetch
+        // handler, the first time something actually asks for one.
+        .filter(([, out]) => out.type !== 'chunk' || out.isEntry)
+        .map(([name]) => name)
         .filter((f) => !f.endsWith('.map'))
         // KaTeX ships every face three times over and its stylesheet lists woff2 first, so the
         // other two are never fetched by anything that can run this app. Precaching them
