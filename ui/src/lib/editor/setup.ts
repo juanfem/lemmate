@@ -41,19 +41,25 @@ const theme = EditorView.theme({
   '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35 },
   '.cm-foldGutter:hover .cm-gutterElement': { opacity: 1 },
   '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
-  '.cm-heading': { lineHeight: '1.3', marginTop: '0.6em' },
+  // Space above a heading is *padding*, never margin: CodeMirror's height map measures each
+  // line with getBoundingClientRect(), which excludes margins, so a margin here desynchronises
+  // the map from the DOM and every click, drag and Up/Down below it lands on the wrong line.
+  '.cm-heading': { lineHeight: '1.3', paddingTop: '0.6em' },
   '.cm-h1': { fontSize: '1.9em' },
   '.cm-h2': { fontSize: '1.5em' },
   '.cm-h3': { fontSize: '1.25em' },
   '.cm-h4': { fontSize: '1.1em' },
   '.cm-blockquote': { borderLeft: '3px solid var(--accent)', paddingLeft: '0.75em', color: 'var(--muted)' },
-  '.cm-frontmatter': { fontFamily: 'var(--ui)', fontSize: '0.8em', color: 'var(--muted)', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.3em 0.7em', margin: '0 0 1em', cursor: 'text' },
+  // The gap below the properties is padding on an unstyled wrapper rather than a margin on the
+  // box itself, for the same measuring reason as `.cm-heading` above.
+  '.cm-frontmatter': { paddingBottom: '1em' },
+  '.cm-frontmatter-box': { fontFamily: 'var(--ui)', fontSize: '0.8em', color: 'var(--muted)', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.3em 0.7em', cursor: 'text' },
   '.cm-tag': { color: 'var(--accent)', background: 'var(--accent-bg)', borderRadius: '999px', padding: '0 0.4em' },
   '.cm-wikilink': { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer' },
   '.cm-wikilink:hover': { textDecoration: 'underline' },
   '.cm-wikilink-src': { color: 'var(--accent)' },
   '.cm-math-block': { display: 'block', textAlign: 'center', padding: '0.5em 0' },
-  '.cm-embed-image': { maxWidth: '100%', display: 'block', margin: '0.5em 0' },
+  '.cm-embed-image': { maxWidth: '100%', display: 'block', padding: '0.5em 0' },
   '.cm-task-checkbox': { marginRight: '0.4em', verticalAlign: 'middle' },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },
   '.cm-tooltip.cm-tooltip-autocomplete': { fontFamily: 'var(--ui)', fontSize: '0.85em', border: '1px solid var(--border)', background: 'var(--panel)', borderRadius: '6px' },

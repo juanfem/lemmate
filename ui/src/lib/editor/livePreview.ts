@@ -142,11 +142,17 @@ class FrontMatterWidget extends WidgetType {
     return other.summary === this.summary
   }
   toDOM() {
-    const el = document.createElement('div')
-    el.className = 'cm-frontmatter'
-    el.textContent = this.summary || 'properties'
-    el.title = 'Front matter — click to edit'
-    return el
+    // An unstyled wrapper carries the gap below the box as padding: a margin on the box itself
+    // would sit outside the rect CodeMirror measures this widget with, and shift every line
+    // under it away from where the height map thinks it is.
+    const wrap = document.createElement('div')
+    wrap.className = 'cm-frontmatter'
+    const box = document.createElement('div')
+    box.className = 'cm-frontmatter-box'
+    box.textContent = this.summary || 'properties'
+    box.title = 'Front matter — click to edit'
+    wrap.appendChild(box)
+    return wrap
   }
   ignoreEvent() {
     return false
