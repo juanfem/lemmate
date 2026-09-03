@@ -1,8 +1,9 @@
 # Lemmate — Specification
 
 Status: draft v0.4 (2026-08-30) — M0–M2 implemented, accounts through single-use invites and
-password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI), with mobile and
-Quarto render outstanding; see README status
+password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI, the installable
+offline web client of §6.4, the mobile shell as far as an APK that assembles), with the app on a
+device and Quarto render outstanding; see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
@@ -342,9 +343,16 @@ Note content is prefetched in the background once the vault doc has synced, and 
 client is installed (`display-mode: standalone` and friends, or iOS's `navigator.standalone`) —
 one note at a time, skipping what is already stored, abandoned the moment the socket drops and
 resumed on the next sync. The Tauri shells report a browser display mode and are excluded,
-correctly: their relay already holds the vault on local disk. It does not keep those copies fresh: a note changed on another device updates here
-when it is opened. Keeping every cached doc current would mean subscribing the whole vault
-permanently, which is a different design.
+correctly: their relay already holds the vault on local disk.
+
+Those copies are kept current without subscribing the whole vault permanently, which would be a
+different design. The client records each cached note's server version — `updated_at` on the
+listing, which is stamped whenever a note's content is indexed — and re-checks the listing when
+the vault doc syncs, every minute, and whenever the app returns to the foreground, which on a
+phone is the moment someone opens it expecting what they wrote elsewhere. Only notes whose
+version moved are fetched again; one listing answers "which of my copies are stale" for a whole
+vault without a handshake per note. An *open* note is exempt: it is subscribed on the socket and
+already updates as anyone edits it.
 
 Edits made offline outlive the view that made them. A note doc is only pushed while it is
 subscribed, so a note edited and then closed had nowhere to go — reconnecting re-handshook
@@ -370,8 +378,9 @@ state rather than replaying a stale answer, and the notes come from the CRDT doc
 The last known vault ids are kept alongside, because sessions are built from the vault list and
 without one there is nothing to open the cached docs *with*.
 
-Offline is therefore: read and edit what you have opened, reconciling on reconnect. Search,
-backlinks, tags, trash, history, sharing and un-fetched attachments are all server-side and go
+Offline is therefore: read, edit and search what is on the device — the whole vault once the
+client is installed, only what has been opened in an ordinary tab — reconciling on reconnect.
+Backlinks, tags, trash, history, sharing and un-fetched attachments are all server-side and go
 dark — the gap between this and a native client (SPEC §3.2) is by design, not by omission.
 
 ---
@@ -656,8 +665,9 @@ Accounts, OIDC, vault roles, per-note shares, public links, real-time cursors/pr
 version history, trash, web client, Docker + fly.io recipe.
 
 **M3 — Mobile and power features**
-Android/iOS apps with projection, pandoc export (PDF/slides/HTML/DOCX), citations,
-`.qmd` awareness + quarto render, REST API, CLI, MCP, embeds/transclusion.
+Android/iOS apps (no projection — §6.3), an installable offline web client, pandoc export
+(PDF/slides/HTML/DOCX), citations, `.qmd` awareness + quarto render, REST API, CLI, MCP,
+embeds/transclusion.
 
 ---
 

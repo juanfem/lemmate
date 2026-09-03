@@ -17,7 +17,7 @@ Three clients, one engine:
 | Client | What it is | Offline |
 |---|---|---|
 | **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: the sync engine runs on your machine, owns the vault folder, and serves the same web UI on loopback. | Yes — full local copy, local search, edits journalled and pushed on reconnect. |
-| **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | No. There is no IndexedDB cache yet, so a reload while disconnected loses unsent edits. |
+| **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | Yes, with limits — notes and unsent edits live in IndexedDB; install it (§1d) and the whole vault comes too, including offline search. |
 | **CLI** (`lemmate`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
 
 ---
@@ -208,7 +208,7 @@ Callout `collapse="true"` is not implemented.
 
 ### Editing behaviour
 
-- **Live preview only.** The source/reading-mode toggle in SPEC §8 is not built yet.
+- **Three views per pane** — live, source, reading (§3, `Ctrl+E`).
 - **Checkboxes are clickable** — clicking a rendered box rewrites `[ ]` ↔ `[x]` in the source.
 - **Autocomplete**: type `[[` for note paths, `#` for existing tags. The `@` citation, `:::`
   callout and `/` slash menus described in SPEC §8 are not implemented.
@@ -567,9 +567,12 @@ encryption, and peer-to-peer sync.
 catching up, "syncing…". Reconnection is automatic with exponential backoff up to 30 s.
 
 **Offline.** On desktop and `lemmate sync`, everything keeps working: edits are journalled in
-`<vault>/.lemmate/local.db` and reconciled when the server returns. In the **browser** there is
-no local persistence yet — a reload while offline loses anything unsent, so avoid reloading a
-disconnected tab.
+`<vault>/.lemmate/local.db` and reconciled when the server returns. In the **browser** the notes
+and any unsent edits are kept in IndexedDB, so reloading a disconnected tab is safe and the
+changes go up when the connection does — whether or not you reopen the notes concerned. An
+installed client (§1d) goes further: it starts with no network at all and holds the whole vault,
+not only what you have opened. Backlinks, tags, trash, history and sharing still need the
+server.
 
 **Conflicts never produce markers.** Two people, two devices, or a device and an external
 editor can all edit the same note at once; the CRDT merges the results. External file edits are
