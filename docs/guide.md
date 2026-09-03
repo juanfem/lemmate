@@ -295,6 +295,16 @@ folder, and remembers which folders you collapsed. Moving, creating and deleting
 by drag-and-drop is not built yet — use *Rename / move* (which takes a full path) or move the
 file on disk.
 
+**Files you add yourself.** Copying a `.md` or `.qmd` file into a vault folder is a way of
+creating a note, not something the app tolerates: the watcher picks it up about a second later,
+the note appears in the tree, and it syncs like any other. The file is rewritten in place to
+carry an `id:` in its front matter (§2) — that line appearing is how you know it was adopted.
+The extension decides what it becomes: `.md` and `.qmd` are notes, anything else is treated as
+an attachment. Files that arrive while the app is closed are picked up at the next start, so
+`git checkout`, `rsync` and an editor writing a new file all work; a file that already carries
+an `id:` keeps it, which is what makes moving a note between vault folders by hand a move
+rather than a copy.
+
 **Two file browsers.** The toolbar above the tree switches between them, and remembers which
 one you left it on:
 
