@@ -2,7 +2,7 @@
 
 TypeScript side of the project. Today: the markdown indexer that must agree with `lemmate-core`
 on the shared `corpus/`. Later: the CodeMirror 6 live-preview editor and the Svelte 5 shell
-used by the desktop, mobile, and web clients.
+used by the desktop and web clients.
 
 ```sh
 npm install

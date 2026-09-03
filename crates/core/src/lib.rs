@@ -1,4 +1,4 @@
-//! lemmate-core — the shared engine behind the server, desktop, and mobile apps.
+//! lemmate-core — the shared engine behind the server, the desktop app, and the CLI.
 //!
 //! Responsibilities (see SPEC.md §3.1):
 //! - CRDT note documents ([`doc`]) backed by yrs, with text-diff application ([`diff`]).

@@ -3,10 +3,10 @@
 # Build:  docker build -t lemmate .
 # Run:    docker run -p 8080:8080 -v lemmate_data:/data lemmate
 #
-# The workspace also contains the two Tauri 2 shells, crates/desktop and crates/mobile, which
-# need webkit2gtk/GTK and an Android NDK respectively and are never built here: every cargo
-# invocation names -p lemmate-server -p lemmate-cli explicitly. Their manifests still have to be
-# present and stubbed below, because cargo will not load a workspace with a member missing.
+# The workspace also contains the Tauri 2 desktop shell, crates/desktop, which needs
+# webkit2gtk/GTK and is never built here: every cargo invocation names -p lemmate-server
+# -p lemmate-cli explicitly. Its manifest still has to be present and stubbed below, because
+# cargo will not load a workspace with a member missing.
 
 # ---- Stage 1: build the web client (ui/dist) -------------------------------------------------
 FROM node:24-alpine AS ui
@@ -38,14 +38,13 @@ ENV CARGO_TARGET_DIR=/src/target
 # graph is compiled into a layer that is reused until Cargo.toml/Cargo.lock change. This works
 # on plain `docker build` with no BuildKit cache mounts required.
 #
-# Every member's manifest, including the two shells that are never compiled here.
+# Every member's manifest, including the desktop shell that is never compiled here.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/core/Cargo.toml crates/core/Cargo.toml
 COPY crates/server/Cargo.toml crates/server/Cargo.toml
 COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 COPY crates/desktop/Cargo.toml crates/desktop/Cargo.toml
-COPY crates/mobile/Cargo.toml crates/mobile/Cargo.toml
-RUN mkdir -p crates/core/src crates/server/src crates/cli/src crates/desktop/src crates/mobile/src \
+RUN mkdir -p crates/core/src crates/server/src crates/cli/src crates/desktop/src \
     && echo '' > crates/core/src/lib.rs \
     && echo 'fn main() {}' > crates/server/src/main.rs \
     && echo 'fn main() {}' > crates/cli/src/main.rs \
@@ -53,9 +52,6 @@ RUN mkdir -p crates/core/src crates/server/src crates/cli/src crates/desktop/src
     && echo '' > crates/server/src/lib.rs \
     && echo 'fn main() {}' > crates/desktop/src/main.rs \
     && echo 'fn main() {}' > crates/desktop/build.rs \
-    && echo '' > crates/mobile/src/lib.rs \
-    && echo 'fn main() {}' > crates/mobile/src/main.rs \
-    && echo 'fn main() {}' > crates/mobile/build.rs \
     && cargo build --release --locked -p lemmate-server -p lemmate-cli
 
 # --- real build ---

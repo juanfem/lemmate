@@ -3,7 +3,7 @@
 Self-hosted, open-source, multi-user markdown notes. See [SPEC.md](SPEC.md) for the full
 specification; this README covers the repository and the current milestone.
 
-## Status: M3 — mobile and power features (in progress)
+## Status: M3 — power features (in progress)
 
 | Crate / package | Path | What it is |
 |---|---|---|
@@ -11,23 +11,21 @@ specification; this README covers the repository and the current milestone.
 | `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
 | `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
-| `lemmate-mobile` | `crates/mobile` | Tauri 2 shell for Android and iOS: the same relay, with the web assets compiled in and the vault inside app storage as CRDT only (mobile does not project to files, SPEC §6.3). Type-checks and tests in CI; the Android project is committed and an unsigned release APK assembles, but nothing has run on a device — see [crates/mobile/README.md](crates/mobile/README.md). |
 | `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
 `docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server,
-remote CLI, the all-vaults workspace, Obsidian import from the UI, an installable web client
-that works offline, and the mobile shell as far as an APK that assembles; running it on a
-phone, the keyboard toolbar and Quarto rendering remain.
+remote CLI, the all-vaults workspace, Obsidian import from the UI, and an installable web
+client that works offline; the on-screen keyboard toolbar and Quarto rendering remain. The
+native mobile shell was dropped — see [Still to come](#still-to-come).
 
-Verification: `cargo test --workspace --exclude lemmate-desktop --exclude lemmate-mobile`
-(Rust — the Tauri crates need webkit2gtk, and the desktop one an existing `ui/dist`, so CI
-type-checks both in a job that has them and runs the mobile crate's tests there), `cd ui && npm
-test` (corpus plus live e2e when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built
+Verification: `cargo test --workspace --exclude lemmate-desktop`
+(Rust — the Tauri crate needs webkit2gtk and an existing `ui/dist`, so CI type-checks it in a
+job that has them), `cd ui && npm test` (corpus plus live e2e when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built
 binaries), and `ui/scripts/cdp.mjs` for headless-Chrome smoke runs against a running server —
 including `offline:` steps that cut the network on a live page. CI additionally compiles the
-whole workspace, Tauri shells included, on macOS and Windows.
+whole workspace, the Tauri shell included, on macOS and Windows.
 
 Install: CI packages unsigned builds for Linux, macOS and Windows on every push to `main` — the
 binaries plus `web/` in one archive, and the desktop installers (`.deb`/`.rpm`/AppImage, `.dmg`,
@@ -169,9 +167,9 @@ updates older than 90 days that a snapshot makes redundant are pruned (server fl
 ## Build and test
 
 ```sh
-cargo build --workspace --exclude lemmate-desktop --exclude lemmate-mobile
-cargo test  --workspace --exclude lemmate-desktop --exclude lemmate-mobile
-cargo check -p lemmate-desktop -p lemmate-mobile && cargo test -p lemmate-mobile   # webkit2gtk; ui/dist must exist
+cargo build --workspace --exclude lemmate-desktop
+cargo test  --workspace --exclude lemmate-desktop
+cargo check -p lemmate-desktop                        # webkit2gtk; ui/dist must exist
 cargo run -p lemmate-cli -- doctor
 cargo run -p lemmate-cli -- index corpus/basic.md --json
 cargo run -p lemmate-cli -- search /path/to/vault "quick fox"
@@ -196,13 +194,16 @@ as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 
 ## Still to come
 
-Everything in the table above exists today. What M3 still owes: the mobile app on a real
-device, the on-screen keyboard toolbar, and Quarto rendering. On mobile, `cargo tauri android
-build --apk` assembles an unsigned release APK from the committed Android project, but nothing
-has been installed or run, and iOS has not been attempted for want of a Mac — the steps and
-what they need are in [crates/mobile/README.md](crates/mobile/README.md). Projecting the vault
-to files on mobile was dropped rather than built: see SPEC §6.3, and the Offline section above
-for what an installed web client does instead.
+Everything in the table above exists today. What M3 still owes: the on-screen keyboard
+toolbar and Quarto rendering.
+
+**The native mobile shell is gone.** There was a `crates/mobile` — a Tauri 2 shell that got as
+far as an unsigned Android APK that assembled but had never run on a device, with iOS untried
+for want of a Mac. It was drifting away from the desktop and web behaviour faster than it was
+gaining ground, and the phone case is already covered: the web client installs to the home
+screen, holds the whole vault in IndexedDB, and works with the network down. It was removed in
+favour of that, and its history is in git if a native shell is ever wanted again — though the
+sane starting point then is the web client, not the old crate.
 
 ## License
 

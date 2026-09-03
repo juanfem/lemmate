@@ -25,8 +25,8 @@ uploads, to that workflow run:
   macOS, an `.msi` and an NSIS `-setup.exe` on Windows.
 
 Download them from the run's page under **Artifacts**; a `v*` tag also collects all three sets
-into a draft GitHub release. They are kept for 14 days, and there is no Android APK — an
-unsigned one would not install on any device.
+into a draft GitHub release. They are kept for 14 days. There is no mobile build: on a phone,
+install the web client from your browser instead (see [the guide](guide.md#d-web-client)).
 
 None of it is signed or notarised, so the desktop installers need a hand past macOS's Gatekeeper
 and Windows' SmartScreen. On macOS this is not subtle: the app from the `.dmg` fails to launch

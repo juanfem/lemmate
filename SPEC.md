@@ -1,9 +1,9 @@
 # Lemmate — Specification
 
-Status: draft v0.4 (2026-08-30) — M0–M2 implemented, accounts through single-use invites and
+Status: draft v0.5 (2026-09-03) — M0–M2 implemented, accounts through single-use invites and
 password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI, the installable
-offline web client of §6.4, the mobile shell as far as an APK that assembles), with the app on a
-device and Quarto render outstanding; see README status
+offline web client of §6.4), with the keyboard toolbar and Quarto render outstanding; the native
+mobile shell was dropped (§14); see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
 ---
@@ -46,7 +46,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 | Vault doc | The CRDT document holding the vault's structure (note IDs ↔ paths, folders, bookmarks). |
 | Projection | The on-disk `.md` file materialised from a doc. |
 | Server | The always-on sync + persistence + web + API process. |
-| Client | Desktop app, mobile app, web app, or CLI. |
+| Client | Desktop app, web app, or CLI. |
 | Member | A user with a role on a vault. |
 
 ---
@@ -66,19 +66,20 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
             └───────────▲─────────────────▲───────────────▲───────┘
                         │ ws+https        │               │
         ┌───────────────┴──────┐  ┌───────┴───────┐  ┌────┴──────┐
-        │ desktop (Tauri 2)    │  │ mobile        │  │ web       │
-        │  core crate (Rust)   │  │ (Tauri 2)     │  │ (browser) │
+        │ desktop (Tauri 2)    │  │ cli           │  │ web       │
+        │  core crate (Rust)   │  │ (lemmate)     │  │ (browser) │
         │  local SQLite        │  │ core crate    │  │ IndexedDB │
         │  file projection     │  │ local SQLite  │  │ cache     │
-        │  file watcher        │  │ file proj.*   │  │           │
+        │  file watcher        │  │ file proj.    │  │           │
         │  local FTS           │  │ local FTS     │  │           │
         └──────────────────────┘  └───────────────┘  └───────────┘
-                     shared TypeScript UI (CM6 + Yjs) in all three
+             shared TypeScript UI (CM6 + Yjs) in desktop and web;
+             on a phone the web client, installed (§6.4, §14)
 ```
 
 ### 3.1 Components
 
-- **`core` crate (Rust)** — shared by server, desktop, and mobile. Contains: yrs document
+- **`core` crate (Rust)** — shared by the server, the desktop app, and the CLI. Contains: yrs document
   handling, SQLite persistence of updates/snapshots, sync protocol client/server halves,
   file projection + external-change ingestion, markdown parsing for link/tag extraction,
   FTS indexing. No UI. This is the single most important module; the server and the native
@@ -86,14 +87,12 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 - **`server`** — axum HTTP/WebSocket server embedding `core`. Serves the web client. Single
   static binary. Configuration by environment variables / one TOML file.
 - **`ui`** — TypeScript, framework-agnostic core around CodeMirror 6 + Yjs; app shell in
-  **Svelte 5 [decided]** (small bundle, matters on mobile webviews). Identical bundle in
-  desktop, mobile, and web.
-- **`desktop`, `mobile`** — Tauri 2 shells. Both run `core`'s local relay in-process and point
-  the webview at it over loopback HTTP, rather than exposing `core` through Tauri commands
+  **Svelte 5 [decided]** (small bundle, matters on phone browsers). Identical bundle in
+  desktop and web.
+- **`desktop`** — Tauri 2 shell. It runs `core`'s local relay in-process and points the webview
+  at it over loopback HTTP, rather than exposing `core` through Tauri commands
   **[decided: built that way]** — the UI then speaks one protocol to a server, a relay and a
-  phone alike, and the bundle stays identical. Nothing crosses Tauri IPC. The mobile shell
-  additionally compiles the web assets in, because an APK's resources are not files a static
-  file server can open.
+  phone alike, and the bundle stays identical. Nothing crosses Tauri IPC.
 - **`cli`** — `lemmate` binary. Talks to a server over the REST API, or to a local vault
   directly via `core` **[recommended: server-only in v1, direct-local later]**.
 
@@ -101,8 +100,8 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 
 - Client ↔ server only. **No peer-to-peer.** Every device syncs through the server it is
   logged into. A vault lives on exactly one server.
-- Native clients (desktop, mobile) are **offline-first**: full local copy, full local search,
-  edits queue and merge on reconnect.
+- Native clients (the desktop app, and `lemmate sync` behind it) are **offline-first**: full
+  local copy, full local search, edits queue and merge on reconnect.
 - The web client is **online-first** for anything the server computes — search, backlinks,
   tags, trash, history, sharing. Its notes depend on how it is being run
   **[decided: revised]**:
@@ -117,8 +116,8 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 
   Search follows the same split: `/api/v1/search` whenever the server answers, and an offline
   index over the cached notes when it does not (§6.4). What separates even the installed case
-  from a native client is the *engine*: no SQLite, no watcher, and no projection to files —
-  which mobile no longer wants anyway (§6.3).
+  from a native client is the *engine*: no SQLite, no watcher, and no projection to files.
+  On a phone that is the whole client — there is no native mobile shell (§14).
 
 ### 3.3 Technology choices
 
@@ -129,7 +128,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 | Server | Rust, axum, tokio | Single binary, shares `core`. |
 | Database | SQLite (WAL) | Per server, not per vault. Attachments outside the DB. |
 | Search | SQLite FTS5, trigram + unicode61 | Same engine on server and native clients. |
-| Native shells | Tauri 2 **[decided: native mobile]** | Linux/macOS/Windows/Android/iOS from one codebase. |
+| Native shell | Tauri 2 **[decided]** | Linux/macOS/Windows from one codebase. No mobile shell — §14. |
 | Markdown parser (JS) | micromark + mdast with custom extensions | Used by editor decorations, link/tag extraction on the client. |
 | Markdown parser (Rust) | `markdown-rs` (micromark port) + custom extensions | Used by `core` for indexing. Must agree with the JS parser on the §5 subset — enforced by a shared conformance test corpus. |
 | Maths | KaTeX | Client-side render of `$…$` / `$$…$$`. |
@@ -297,7 +296,7 @@ Per vault, then, a local directory (the projection, §6.3) plus a sidecar:
 <vault>/
   .lemmate/
     local.db          # same schema subset as the server: docs, updates, snapshots, index
-    attachments/      # content-addressed cache; pinned or LRU (mobile)
+    attachments/      # content-addressed cache
   Daily/2026-08-29.md
   Projects/…
   attachments/…      # human-readable projection of referenced attachments
@@ -327,18 +326,8 @@ Read direction (disk → CRDT):
   files without the content-hash heuristic. Hand-made files without one still get the
   heuristic and gain an `id:` on first sync.
 
-**Mobile does not project [decided].** The vault lives in the app's own storage as CRDT and
-nothing else; there are no `.md` files for the rest of the phone to see. This once promised the
-Storage Access Framework on Android and the Files app on iOS, and dropping that costs less than
-it appears to: the projection exists so that *other tools* can work on the notes — an editor, a
-script, an LLM writing into the folder, a plain `mv` — and those are desktop habits. Nobody
-points a language model at a directory on their phone. What is left on mobile once the files
-are gone is the app itself, which reads and writes the CRDT directly.
-
-It also removes the least reliable part of the mobile design. Background watching does not work
-on either platform, so the plan had been to reconcile the folder on every foreground: a
-conflict-detection pass, on a device whose OS may have killed the app mid-write, guarding files
-that in practice only that same app was ever going to touch.
+Projection is a property of the clients that own a folder — the desktop app and `lemmate sync`.
+The web client has none (§6.4), and neither does the phone, which *is* the web client (§14).
 
 ### 6.4 Web client
 
@@ -403,8 +392,8 @@ dark — the gap between this and a native client (SPEC §3.2) is by design, not
 - Reconnect: client sends state vectors for all cached docs; server replies with missing
   updates. Offline queues are just the local update log not yet acked.
 - Attachments: `PUT /v/:vault/attachments/:hash` (idempotent), `GET …/:hash`. Clients
-  upload before inserting the reference so a synced note never dangles. Mobile pins
-  attachments of notes opened in the last 30 days, LRU beyond a configurable cache size.
+  upload before inserting the reference so a synced note never dangles. Native clients cache
+  fetched attachments under `.lemmate/attachments/`, LRU beyond a configurable cache size.
 - Vault doc subscriptions are automatic for members; per-note shares subscribe to the
   note doc only and see the note in a "Shared with me" view.
 
@@ -437,7 +426,7 @@ Editing features:
 - Find/replace in note; multi-cursor. (Vim keymap: not planned for M1 **[decided]**.)
 - Spellcheck via the platform webview.
 - Collaboration: remote cursors and selections with name labels; presence list per note.
-- Mobile: toolbar row above the keyboard for markup, indent, checkbox, link, image.
+- On a phone: toolbar row above the on-screen keyboard for markup, indent, checkbox, link, image.
 
 ---
 
@@ -630,13 +619,25 @@ GUI). JSON output with `--json` for scripting.
 | Platform | Shell | Offline | Projection | Vaults | Notes |
 |---|---|---|---|---|---|
 | Linux / macOS / Windows | Tauri 2 | full | yes, watched | all, one folder each under a root | Primary target. |
-| Android | Tauri 2 | full | no — §6.3 | one | |
-| iOS | Tauri 2 | full | no — §6.3 | one | Background sync limited by OS. |
-| Web | browser | cached docs only | no | all | Served by the server; no install. |
+| Android / iOS | the web client, installed | whole vault (§6.4) | no | all | Home-screen install; no store app. |
+| Web | browser | cached docs, or the whole vault once installed | no | all | Served by the server. |
 
 The desktop shell runs one engine per vault behind one local relay, so the UI sees the same
 workspace it sees against a server: one socket, frames addressed by doc id, one vault list, and
 search across all of them.
+
+**No native mobile shell [decided: dropped 2026-09-03].** There was one — a Tauri 2 crate that
+reached an unsigned Android APK that assembled but had never run on a device, with iOS untried.
+It is removed. Two reasons. It was Android in practice and drifting from what the desktop and
+web clients do, so every behaviour landed twice and the second copy was always behind. And the
+thing it was for is already built: the web client installs to the home screen, holds the whole
+vault in IndexedDB, edits and searches offline, and lays itself out for a narrow screen. What a
+native shell would add over that is a local SQLite engine and file projection — and projection
+is exactly what mobile had already given up (§6.3 as it stood), which left the shell earning
+little more than an icon the web client also has.
+
+If a native shell is ever wanted again, the starting point is the web client — a Tauri window
+around the bundle that already works there — not the removed crate. Its history stays in git.
 
 Minimum: single-binary server on Linux amd64/arm64; Docker image; `fly.toml` with a
 persistent volume for `lemmate.db` and attachments.
@@ -674,10 +675,10 @@ desktops. Usable as a daily driver.
 Accounts, OIDC, vault roles, per-note shares, public links, real-time cursors/presence,
 version history, trash, web client, Docker + fly.io recipe.
 
-**M3 — Mobile and power features**
-Android/iOS apps (no projection — §6.3), an installable offline web client, pandoc export
-(PDF/slides/HTML/DOCX), citations, `.qmd` awareness + quarto render, REST API, CLI, MCP,
-embeds/transclusion.
+**M3 — The phone, and power features**
+An installable offline web client — which is what the phone gets, the native mobile apps having
+been dropped (§14) — the on-screen keyboard toolbar, pandoc export (PDF/slides/HTML/DOCX),
+citations, `.qmd` awareness + quarto render, REST API, CLI, MCP, embeds/transclusion.
 
 ---
 
@@ -692,3 +693,4 @@ embeds/transclusion.
 | Citations | One `references.bib` per vault; per-note `bibliography:` as a later export feature. |
 | Vim keymap | Not for now. |
 | Obsidian plugins in use | File Tree Alternative, Self-hosted LiveSync — both covered by built-ins (§9, §7). |
+| Native mobile apps (2026-09-03) | Dropped; the installed web client is the phone client — §14. |

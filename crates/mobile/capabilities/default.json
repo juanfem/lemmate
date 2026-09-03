@@ -1,6 +1,0 @@
-{
-  "identifier": "default",
-  "description": "Baseline permissions for the single webview, which is created in Rust and loads the local relay over http://127.0.0.1.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
-}
