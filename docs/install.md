@@ -1,7 +1,8 @@
 # Installing Lemmate
 
-Nothing is packaged or signed yet: every piece is built from this repository. Three things can
-be installed, and few people need all three.
+Nothing is signed, and nothing is in a distribution's repositories. CI does package plain
+builds — see [Ready-made builds](#ready-made-builds) below — and everything else in this
+document builds from source. Three things can be installed, and few people need all three.
 
 | What | Binary | When you need it |
 |---|---|---|
@@ -11,6 +12,26 @@ be installed, and few people need all three.
 
 The CLI alone is enough to use a Lemmate server — `lemmate sync --vault ~/vault --serve
 127.0.0.1:8081 --web-dir …` gives you the same UI in a browser tab, without a webview.
+
+## Ready-made builds
+
+Every push to `main`, and every `v*` tag, runs the `Artifacts` job in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) on Linux, macOS and Windows. Each one
+uploads, to that workflow run:
+
+- `lemmate-<platform>.tar.gz` (`.zip` on Windows) — the `lemmate` and `lemmate-server` binaries,
+  the web client in `web/` for `--web-dir`, and these docs.
+- the desktop installers for that platform: `.deb`, `.rpm` and an AppImage on Linux, a `.dmg` on
+  macOS, an `.msi` and an NSIS `-setup.exe` on Windows.
+
+Download them from the run's page under **Artifacts**; a `v*` tag also collects all three sets
+into a draft GitHub release. They are kept for 14 days, and there is no Android APK — an
+unsigned one would not install on any device.
+
+None of it is signed or notarised, so the desktop installers need the same hand past macOS's
+Gatekeeper and Windows' SmartScreen as a bundle you built yourself; both are described below.
+Binaries are built for the runner's architecture — x86-64 on Linux and Windows, Apple silicon on
+macOS — so anything else still means building from source.
 
 ## Prerequisites everywhere
 
@@ -89,7 +110,11 @@ Tray icons are off (`tauri`'s `tray-icon` feature is disabled), so libayatana-ap
 *not* required even though Tauri's own instructions list it.
 
 `cargo tauri build` writes `.deb`, `.rpm` and an AppImage under
-`target/release/bundle/{deb,rpm,appimage}/`. Per-user files live in `$XDG_CONFIG_HOME/lemmate`,
+`target/release/bundle/{deb,rpm,appimage}/`. If the AppImage step stops at `failed to run
+linuxdeploy`, the tools it downloads are AppImages themselves and your distribution has only
+FUSE 3; build it as CI does, with `APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 cargo tauri build`
+(`NO_STRIP` because linuxdeploy's strip pass fails on a binary the release profile has already
+stripped). The `.deb` and `.rpm` need neither. Per-user files live in `$XDG_CONFIG_HOME/lemmate`,
 falling back to `~/.config/lemmate`.
 
 ## macOS
@@ -145,6 +170,9 @@ cargo build --release --workspace --exclude lemmate-desktop
 
 `cargo tauri build` writes an MSI under `target\release\bundle\msi\` and an NSIS
 `…-setup.exe` under `bundle\nsis\`; the WiX and NSIS toolchains are downloaded on first use.
+Neither is code-signed, so SmartScreen shows "Windows protected your PC" on first run: *More
+info* → *Run anyway*, or unblock the file in its Properties dialog. Signing it properly needs a
+code-signing certificate and Tauri's `windows.certificateThumbprint` config.
 
 Per-user files live in `%APPDATA%\lemmate`. `credentials.toml` holds session tokens and is
 chmod 0600 on Unix — on Windows it simply inherits your profile's ACL, so treat a shared

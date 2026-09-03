@@ -151,3 +151,172 @@ jobs:
           tags: lemmate:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Installable artifacts: the server and CLI binaries, the web assets they serve, and the
+  # desktop bundles Tauri produces on each platform. Nothing here is signed or notarised, so
+  # these are a convenience for people who would otherwise build the tree themselves — see
+  # docs/install.md, which says the same about the bundles it tells you to build by hand.
+  #
+  # Only on main, on a v* tag, and on demand: three desktop bundles per pull-request push is a
+  # lot of runner minutes for something nobody downloads. No Android APK — `cargo tauri android
+  # build --apk` produces an *unsigned* release APK that no device will install, so it would be
+  # an artifact in name only until there is a signing key to give it.
+  artifacts:
+    name: Artifacts (${{ matrix.slug }})
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [rust, node]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x86_64
+          - os: macos-latest
+            slug: macos-aarch64
+          - os: windows-latest
+            slug: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same packages as the `shells` job, plus what the bundlers themselves need: libxdo for
+      # the desktop crate's link step, patchelf and file for the AppImage.
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: artifacts-${{ matrix.slug }}
+
+      # Real assets this time, not the empty placeholder the check jobs make: the server serves
+      # this directory with --web-dir, and tauri-build copies it into the desktop bundle.
+      - name: Build the web client
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build the server and the CLI
+        run: cargo build --locked --release -p lemmate-server -p lemmate-cli
+
+      # The npm package ships a prebuilt binary for each platform, so this costs seconds where
+      # `cargo install tauri-cli` costs minutes. WiX and NSIS are downloaded by the CLI itself.
+      - name: Build the desktop bundles
+        working-directory: crates/desktop
+        shell: bash
+        env:
+          # Linux only, and both were needed to get an AppImage out of this tree at all.
+          # linuxdeploy and appimagetool are themselves AppImages and want FUSE 2, which an
+          # Ubuntu 24.04 runner does not have; extracting them instead is the documented way
+          # round it. NO_STRIP because linuxdeploy's strip pass then fails on a binary the
+          # release profile has already stripped. Ignored on macOS and Windows.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          NO_STRIP: 1
+        run: |
+          npm install -g @tauri-apps/cli@^2
+          tauri build
+
+      # Cheap proof that what is about to be uploaded actually starts on this platform: a
+      # bundle that cannot run is worse than no bundle, and nothing else here executes them.
+      - name: Smoke-check the binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; else ext=""; fi
+          "target/release/lemmate$ext" --version
+          "target/release/lemmate-server$ext" --version
+          "target/release/lemmate$ext" doctor
+
+      - name: Collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/lemmate-${{ matrix.slug }}"
+          mkdir -p "$stage/web"
+          cp -r ui/dist/. "$stage/web/"
+          cp README.md docs/install.md docs/guide.md docs/deploy.md "$stage/"
+          for bin in lemmate lemmate-server; do
+            if [ -f "target/release/$bin.exe" ]; then
+              cp "target/release/$bin.exe" "$stage/"
+            else
+              cp "target/release/$bin" "$stage/"
+            fi
+          done
+          # `lemmate-server --web-dir web` from inside the unpacked folder, so say so there.
+          cat > "$stage/ARTIFACT.md" <<'EOF'
+          Unsigned build of Lemmate, straight from CI. `lemmate` is the CLI, `lemmate-server`
+          the server, and `web/` the client it serves:
+
+              ./lemmate-server --data-dir ./data --web-dir ./web
+              ./lemmate doctor
+
+          The desktop installers are published beside this archive, not inside it. See
+          install.md for prerequisites, and for why an unsigned bundle needs a hand past
+          Gatekeeper on macOS and SmartScreen on Windows.
+          EOF
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "lemmate-${{ matrix.slug }}.zip" "lemmate-${{ matrix.slug }}" > /dev/null
+          else
+            tar czf "lemmate-${{ matrix.slug }}.tar.gz" "lemmate-${{ matrix.slug }}"
+          fi
+          rm -rf "lemmate-${{ matrix.slug }}"
+
+      # deb/rpm/AppImage on Linux, dmg on macOS, msi and the NSIS setup.exe on Windows. The
+      # macOS .app is a directory and is left behind: the dmg carries it.
+      - name: Collect the desktop bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          find target/release/bundle -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lemmate-${{ matrix.slug }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # A v* tag turns the three artifact sets into a *draft* release: unsigned binaries should not
+  # appear under a published tag without someone looking at them first.
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          draft: true
+          generate_release_notes: true

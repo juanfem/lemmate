@@ -29,7 +29,9 @@ binaries), and `ui/scripts/cdp.mjs` for headless-Chrome smoke runs against a run
 including `offline:` steps that cut the network on a live page. CI additionally compiles the
 whole workspace, Tauri shells included, on macOS and Windows.
 
-Install (build the server, CLI and desktop app on Linux, macOS or Windows):
+Install: CI packages unsigned builds for Linux, macOS and Windows on every push to `main` — the
+binaries plus `web/` in one archive, and the desktop installers (`.deb`/`.rpm`/AppImage, `.dmg`,
+`.msi`/NSIS) beside it — and a `v*` tag drafts a release from them; to build instead, see
 [`docs/install.md`](docs/install.md). User guide (writing, organising, sharing, shortcuts, CLI,
 export, Obsidian migration): [`docs/guide.md`](docs/guide.md).
 

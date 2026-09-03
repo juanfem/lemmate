@@ -38,10 +38,12 @@ lemmate-server --no-auth --data-dir ./data --web-dir ui/dist   # dev server (aut
 node ui/scripts/cdp.mjs <url> <outdir> 'waitfor:…' 'click:…' 'eval:…' 'shot:name'   # headless-Chrome smoke runs
 ```
 
-CI (`.github/workflows/ci.yml`) runs the checks above on Linux, and three more jobs you cannot
+CI (`.github/workflows/ci.yml`) runs the checks above on Linux, and four more jobs you cannot
 reproduce here: `cargo check -p lemmate-desktop` with Tauri's system deps, a workspace check plus
-the credentials tests on macOS and Windows, and a Docker image build. Keep the local ones green
-before committing; the cross-platform legs mostly catch unix-only assumptions.
+the credentials tests on macOS and Windows, a Docker image build, and — only on `main`, on a `v*`
+tag, or on demand — an `artifacts` job that builds the release binaries and the Tauri bundles on
+all three platforms and uploads them (a tag also drafts a GitHub release). Keep the local ones
+green before committing; the cross-platform legs mostly catch unix-only assumptions.
 
 ## Conventions
 
@@ -114,4 +116,10 @@ before committing; the cross-platform legs mostly catch unix-only assumptions.
   `cargo check`/`build`/`run` touching `lemmate-desktop` fails with "resource path … doesn't
   exist" unless `ui/dist` exists. The contents do not matter — `mkdir -p ui/dist` is enough, and
   that is what CI does. It passes here only because `npm run build` has left the directory behind.
+- AppImage bundling (`cargo tauri build`) needs `APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1` here and
+  on GitHub's runners: linuxdeploy and appimagetool are AppImages wanting FUSE 2, and
+  linuxdeploy's strip pass then fails on the already-stripped release binary. `.deb`/`.rpm` are
+  unaffected. The CI `artifacts` job sets both. `cargo tauri build` also rewrites
+  `crates/desktop/Cargo.toml`, expanding `tauri`/`tauri-build` to `{ version = "2", features =
+  [] }` — check it out again after a local bundle build.
 - Env bool flags use `BoolishValueParser` (`1/0/yes/no` work); `LEMMATE_*` names are in `crates/server/src/main.rs`.
