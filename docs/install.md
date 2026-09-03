@@ -28,8 +28,10 @@ Download them from the run's page under **Artifacts**; a `v*` tag also collects 
 into a draft GitHub release. They are kept for 14 days, and there is no Android APK — an
 unsigned one would not install on any device.
 
-None of it is signed or notarised, so the desktop installers need the same hand past macOS's
-Gatekeeper and Windows' SmartScreen as a bundle you built yourself; both are described below.
+None of it is signed or notarised, so the desktop installers need a hand past macOS's Gatekeeper
+and Windows' SmartScreen. On macOS this is not subtle: the app from the `.dmg` fails to launch
+with "Lemmate is damaged and can't be opened" until you clear its quarantine flag with `xattr
+-dr com.apple.quarantine /Applications/Lemmate.app`. Both platforms are covered below.
 Binaries are built for the runner's architecture — x86-64 on Linux and Windows, Apple silicon on
 macOS — so anything else still means building from source.
 
@@ -135,16 +137,30 @@ cd crates/desktop && cargo tauri build --target universal-apple-darwin
 ```
 
 `cargo tauri build` writes `Lemmate.app` under `target/release/bundle/macos/` and a `.dmg` next
-to it in `bundle/dmg/`. The app is **unsigned and unnotarised**, so Gatekeeper refuses it on
-first launch: open it once from the context menu (right-click → Open → Open), or clear the
-quarantine flag after copying it into `/Applications`:
+to it in `bundle/dmg/`. The app is **unsigned and unnotarised**. A bundle you built yourself
+carries no quarantine flag and opens by double-click; one that arrived over the network — the
+CI `.dmg`, or a `.app` someone sent you — does, and Gatekeeper then refuses it with **"Lemmate
+is damaged and can't be opened. You should move it to the Trash."** That message is what an
+unsigned bundle looks like to Gatekeeper; nothing is actually corrupt. Copy the app into
+`/Applications`, then strip the flag:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Lemmate.app
 ```
 
+Do not expect the right-click → *Open* trick or *Open Anyway* in **System Settings → Privacy &
+Security** to help here: those offer a way past an app signed by a developer Apple has not
+notarised, not past an unsigned one. If the app still refuses to start after clearing
+quarantine, give the bundle an ad-hoc signature, which is enough for the kernel on Apple
+silicon:
+
+```sh
+codesign --force --deep --sign - /Applications/Lemmate.app
+```
+
 Signing it properly needs an Apple Developer ID and the `APPLE_*` environment variables Tauri's
-signing docs describe. Per-user files live in `~/Library/Application Support/lemmate`.
+signing docs describe; notarisation on top of that is what would make the `.dmg` open with no
+ceremony at all. Per-user files live in `~/Library/Application Support/lemmate`.
 
 ## Windows
 
