@@ -198,3 +198,7 @@ has been installed or run, and iOS has not been attempted for want of a Mac — 
 what they need are in [crates/mobile/README.md](crates/mobile/README.md). Projecting the vault
 to files on mobile was dropped rather than built: see SPEC §6.3, and the Offline section above
 for what an installed web client does instead.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Dependencies keep their own licences.

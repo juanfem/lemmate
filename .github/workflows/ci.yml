@@ -252,7 +252,7 @@ jobs:
           stage="dist/lemmate-${{ matrix.slug }}"
           mkdir -p "$stage/web"
           cp -r ui/dist/. "$stage/web/"
-          cp README.md docs/install.md docs/guide.md docs/deploy.md "$stage/"
+          cp LICENSE README.md docs/install.md docs/guide.md docs/deploy.md "$stage/"
           for bin in lemmate lemmate-server; do
             if [ -f "target/release/$bin.exe" ]; then
               cp "target/release/$bin.exe" "$stage/"

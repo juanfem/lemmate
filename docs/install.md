@@ -20,7 +20,7 @@ Every push to `main`, and every `v*` tag, runs the `Artifacts` job in
 uploads, to that workflow run:
 
 - `lemmate-<platform>.tar.gz` (`.zip` on Windows) — the `lemmate` and `lemmate-server` binaries,
-  the web client in `web/` for `--web-dir`, and these docs.
+  the web client in `web/` for `--web-dir`, these docs and the licence.
 - the desktop installers for that platform: `.deb`, `.rpm` and an AppImage on Linux, a `.dmg` on
   macOS, an `.msi` and an NSIS `-setup.exe` on Windows.
 

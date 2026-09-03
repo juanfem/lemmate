@@ -2,6 +2,7 @@
   "name": "lemmate-ui",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "description": "TypeScript side of notes: markdown parsing (shared corpus with lemmate-core), later the CodeMirror 6 editor and Svelte 5 shell.",
   "scripts": {
