@@ -28,13 +28,13 @@
   import Modal from './components/Modal.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
-  let setup = $state<{ config_path: string; suggested_vault_dir: string } | null>(null)
+  let setup = $state<{ config_path: string; suggested_root_dir: string } | null>(null)
   let setupStarting = $state(false)
   if (!readPublicToken())
     fetch('/api/v1/local/setup')
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { configured?: boolean; config_path?: string; suggested_vault_dir?: string } | null) => {
-        if (j && j.configured === false) setup = { config_path: j.config_path ?? '', suggested_vault_dir: j.suggested_vault_dir ?? '' }
+      .then((j: { configured?: boolean; config_path?: string; suggested_root_dir?: string } | null) => {
+        if (j && j.configured === false) setup = { config_path: j.config_path ?? '', suggested_root_dir: j.suggested_root_dir ?? '' }
       })
       .catch(() => {})
 

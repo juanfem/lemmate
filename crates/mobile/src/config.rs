@@ -71,16 +71,15 @@ impl Config {
         })
     }
 
-    /// Write what the setup screen produced. `vault_dir` and `web_dir` are dropped on the
-    /// floor: the form offers them because the desktop needs them, and on a phone they are
-    /// not the user's to choose.
+    /// Write what the setup screen produced. `root_dir` is dropped on the floor: the form offers
+    /// it because the desktop keeps a folder per vault, and on a phone the notes live in app
+    /// storage, which is not the user's to choose. `vault_id` stays a hand-written key here —
+    /// the phone opens one vault (SPEC §14: no projection), not the whole workspace.
     pub fn write_setup(path: &Path, req: &lemmate_core::local::SetupRequest) -> anyhow::Result<()> {
         let mut table = toml::Table::new();
         table.insert("server_url".into(), toml::Value::String(req.server_url.clone()));
-        for (key, value) in [("vault_id", req.vault_id.as_deref()), ("ca_cert", req.ca_cert.as_deref())] {
-            if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
-                table.insert(key.into(), toml::Value::String(v.to_owned()));
-            }
+        if let Some(v) = req.ca_cert.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            table.insert("ca_cert".into(), toml::Value::String(v.to_owned()));
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -114,10 +113,9 @@ mod tests {
         let paths = Paths::under(&dir);
         let req = lemmate_core::local::SetupRequest {
             // The form always sends one; on a phone it is ignored.
-            vault_dir: "/whatever/the/form/said".into(),
+            root_dir: "/whatever/the/form/said".into(),
             server_url: "https://notes.example.org".into(),
-            vault_id: Some("  ".into()),
-            ca_cert: None,
+            ca_cert: Some("  ".into()),
             email: None,
             password: None,
             register: false,
@@ -126,8 +124,8 @@ mod tests {
         Config::write_setup(&paths.config, &req).unwrap();
         let written = std::fs::read_to_string(&paths.config).unwrap();
         assert!(written.contains("notes.example.org"));
-        assert!(!written.contains("vault_dir"), "the phone owns the vault path: {written}");
-        assert!(!written.contains("vault_id"), "a blank vault id is not a vault id: {written}");
+        assert!(!written.contains("root_dir"), "the phone owns the vault path: {written}");
+        assert!(!written.contains("ca_cert"), "a blank CA path is not a CA path: {written}");
 
         let cfg = Config::load(&paths).expect("just written");
         assert_eq!(cfg.server_url, "https://notes.example.org");

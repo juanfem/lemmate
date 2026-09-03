@@ -285,7 +285,13 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 
 ### 6.2 Native clients
 
-Per vault, a local directory chosen by the user (the projection, §6.3) plus a sidecar:
+A desktop client holds every vault the account can read (§9, "one workspace"): the user chooses
+a **root** directory and each vault is a folder below it, named after the vault, taking its
+short id until it has a name. Which vaults those are comes from the server on each start; the
+folders already on disk open with or without an answer. The binding is the sidecar's
+`vault_id`, never the folder name, so folders may be renamed and moved.
+
+Per vault, then, a local directory (the projection, §6.3) plus a sidecar:
 
 ```
 <vault>/
@@ -621,12 +627,16 @@ GUI). JSON output with `--json` for scripting.
 
 ## 14. Platforms
 
-| Platform | Shell | Offline | Projection | Notes |
-|---|---|---|---|---|
-| Linux / macOS / Windows | Tauri 2 | full | yes, watched | Primary target. |
-| Android | Tauri 2 | full | no — §6.3 | |
-| iOS | Tauri 2 | full | no — §6.3 | Background sync limited by OS. |
-| Web | browser | cached docs only | no | Served by the server; no install. |
+| Platform | Shell | Offline | Projection | Vaults | Notes |
+|---|---|---|---|---|---|
+| Linux / macOS / Windows | Tauri 2 | full | yes, watched | all, one folder each under a root | Primary target. |
+| Android | Tauri 2 | full | no — §6.3 | one | |
+| iOS | Tauri 2 | full | no — §6.3 | one | Background sync limited by OS. |
+| Web | browser | cached docs only | no | all | Served by the server; no install. |
+
+The desktop shell runs one engine per vault behind one local relay, so the UI sees the same
+workspace it sees against a server: one socket, frames addressed by doc id, one vault list, and
+search across all of them.
 
 Minimum: single-binary server on Linux amd64/arm64; Docker image; `fly.toml` with a
 persistent volume for `lemmate.db` and attachments.

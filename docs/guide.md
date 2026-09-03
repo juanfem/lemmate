@@ -16,7 +16,7 @@ Three clients, one engine:
 
 | Client | What it is | Offline |
 |---|---|---|
-| **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: the sync engine runs on your machine, owns the vault folder, and serves the same web UI on loopback. | Yes — full local copy, local search, edits journalled and pushed on reconnect. |
+| **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: one sync engine per vault runs on your machine, each owning its folder, and they serve the same web UI on loopback. | Yes — full local copy of every vault, local search, edits journalled and pushed on reconnect. |
 | **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | Yes, with limits — notes and unsent edits live in IndexedDB; install it (§1d) and the whole vault comes too, including offline search. |
 | **CLI** (`lemmate`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
 
@@ -53,16 +53,34 @@ Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on 
 `LEMMATE_CONFIG_DIR` to put it somewhere else). With no config file it opens a **setup screen**
 asking for:
 
-- **Vault folder** — where your `.md` files live on this computer (created if missing);
+- **Notes folder** — the folder your notes live in on this computer (created if missing);
 - **Server URL** — e.g. `https://notes.example.org`;
-- **Vault id** — leave empty to create a new vault, or paste a ULID to join an existing one;
 - **Email / password**, with a "create this account" checkbox for the first account on a new
   server — and, under it, a box to paste an invite link if someone sent you one. Leave email and
   password empty for a `--no-auth` server.
 
-Submitting signs in, writes `desktop.toml`, starts the relay and opens the vault. Every key has
-a flag (`--vault-dir`, `--server-url`, `--vault-id`, `--ca-cert`, `--web-dir`, `--config`) and
-most have an environment variable; see [`../crates/desktop/README.md`](../crates/desktop/README.md).
+There is no vault to name. The app opens **every vault your account can read**, one subfolder of
+the notes folder each, so the tree looks exactly as it does in a browser:
+
+```
+~/lemmate/
+  Work/          ← a vault named "Work"
+  Recipes/
+  vault-3f9c2a/  ← a vault nobody has named yet; it takes its name on a later launch
+```
+
+The list comes from the server each time the app starts, so a vault created or shared with you
+elsewhere appears on the next launch. A vault you create here — *New vault* in the tree — gets
+its folder straight away, named after its id until the next launch renames it to the name you
+gave it. Folders already on disk open whether or not the server
+answers — that is what keeps the app working offline — and a folder you rename yourself keeps
+its vault, because the vault is recorded in the folder's `.lemmate/`, not in its name.
+
+Submitting signs in, writes `desktop.toml`, starts the relay and opens the workspace. Every key
+has a flag (`--root-dir`, `--server-url`, `--ca-cert`, `--web-dir`, `--config`) and most have an
+environment variable; see [`../crates/desktop/README.md`](../crates/desktop/README.md). To open a
+single vault folder instead of all of them, pass `--vault-dir` (with `--vault-id` to join an
+existing vault) — which is also what a `desktop.toml` written before this keeps doing.
 
 The window is the web client served by the embedded relay, so it keeps working with the server
 unreachable.
@@ -93,7 +111,8 @@ vault with nothing open), `#/n/<vault>/<note>` for a note shared directly with y
 `#/s/<token>` for a public read-only link. The first two follow you as you move, so the address
 bar is always a link back to what you are reading.
 
-The local relay serves exactly one vault, so in the desktop app the tree has a single root.
+The desktop app is the same workspace: its local relay runs one sync engine per vault, so the
+tree has the same roots and the same routes — with every vault available offline (§1b).
 
 The web client installs. "Add to Home Screen" on iOS, or the install button in a
 Chromium browser, gives it its own icon and window — and on iOS that also stops Safari
@@ -592,7 +611,7 @@ note that stays empty or edits that quietly do not stick. Check your role on the
 | `<vault>/.lemmate/attachments/` | Content-addressed attachment cache |
 | `<vault>/attachments/` | The human-readable projection of referenced attachments |
 | `<config>/credentials.toml` | Saved session tokens, one per server (mode 0600 on Unix) |
-| `<config>/desktop.toml` | Desktop app configuration |
+| `<config>/desktop.toml` | Desktop app configuration (`root_dir`, the folder the vault folders live in) |
 | `<data-dir>/lemmate.db`, `<data-dir>/attachments/` | Everything on the server |
 
 `<config>` is `~/.config/lemmate` on Linux (or `$XDG_CONFIG_HOME/lemmate`), `~/Library/Application

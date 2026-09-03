@@ -1,14 +1,35 @@
 # lemmate-desktop
 
 The Tauri 2 desktop shell (SPEC §3.1, §14). It is deliberately thin: it starts the engine's
-**local relay** for one vault and opens **one window** on the URL that relay serves.
+**local relay** for every vault the account can read and opens **one window** on the URL that
+relay serves.
 
 ```
-lemmate-desktop ──> lemmate_core::client::start(SyncOptions, LocalOptions)
-                     │  binds 127.0.0.1:0, serves ui/dist + the local API,
-                     │  syncs the vault with the server in a background task
-                     └──> window at http://127.0.0.1:<port>/#/v/<vault-id>
+lemmate-desktop ──> lemmate_core::client::start_many(Vec<SyncOptions>, LocalOptions)
+                     │  binds 127.0.0.1:<stable port>, serves ui/dist + the local API,
+                     │  one engine per vault — folder, sidecar, watcher, connection —
+                     │  all behind one relay, frames routed by doc id
+                     └──> window at http://127.0.0.1:<port>/
 ```
+
+Each vault gets its own folder under the root:
+
+```
+<root_dir>/
+  Work/            ← a vault named "Work"
+    .lemmate/      ← its sidecar: local.db, attachments
+  vault-3f9c2a/    ← a vault with no name yet; renamed to its name on the next launch
+```
+
+Which vaults those are comes from the server (`GET /api/v1/vaults`) on each launch; folders
+already on disk open whether or not the server answers, which is what makes the app work
+offline. The folder ↔ vault binding is the sidecar, never the folder name, so a folder you
+rename yourself keeps working and is never renamed back.
+
+**New vault** in the tree mints its id in the browser and speaks it over the socket — there is
+no REST call to intercept — so the relay holds those frames, opens a folder and an engine for
+the vault, and carries on. That is what `vault_root` in `LocalOptions` is for; a shell pointed
+at a single vault leaves it unset and frames for any other vault are dropped, as before.
 
 Nothing is exposed to the webview over Tauri IPC — the UI talks to the relay over plain
 HTTP/WebSocket, exactly as the web client talks to the server. The `LocalHandle` is kept in
@@ -21,32 +42,40 @@ Tauri managed state and `abort()`ed on `RunEvent::Exit`.
 `%APPDATA%\lemmate` on Windows, or `$LEMMATE_CONFIG_DIR` when that is set:
 
 ```toml
-vault_dir  = "/home/you/notes"              # required — the vault folder, created if missing
+root_dir   = "/home/you/lemmate"            # required — one folder per vault goes in here
 server_url = "https://notes.example.org"    # required — server base URL
-vault_id   = "01J8Z9…"                      # optional ULID: join an existing vault
 ca_cert    = "/etc/ssl/private-ca.pem"      # optional: trust a private CA for wss:// / https://
 web_dir    = "/path/to/ui/dist"             # optional: override the web assets the relay serves
 ```
+
+To open a **single** vault instead of the workspace — a folder that is already a vault, or one
+you want on its own — give `vault_dir` in place of `root_dir`, optionally with a `vault_id` to
+join an existing vault. That is also what a `desktop.toml` written before roots existed says, so
+those keep working unchanged, and the window then opens on `#/v/<vault-id>` as it always did.
 
 Every key has a flag that overrides it, and most have an environment variable:
 
 | Flag | Env | Key |
 |---|---|---|
 | `--config FILE` | `LEMMATE_DESKTOP_CONFIG` | — (which file to read) |
-| `--vault-dir DIR` | `LEMMATE_VAULT_DIR` | `vault_dir` |
+| `--root-dir DIR` | `LEMMATE_ROOT_DIR` | `root_dir` |
+| `--vault-dir DIR` | `LEMMATE_VAULT_DIR` | `vault_dir` (instead of a root) |
 | `--server-url URL` | `LEMMATE_SERVER` | `server_url` |
 | `--vault-id ULID` | — | `vault_id` |
 | `--ca-cert FILE` | `LEMMATE_CA_CERT` | `ca_cert` |
 | `--web-dir DIR` | `LEMMATE_WEB_DIR` | `web_dir` |
 
-Without a usable configuration the app opens a **setup screen** in the window (vault folder, server, optional account) and writes this file for you; the flags below still override it.
+Without a usable configuration the app opens a **setup screen** in the window (notes folder,
+server, optional account) and writes this file for you; the flags above still override it. The
+screen never asks for a vault id: which vaults you have is the server's answer, not yours to
+type.
 
 ## Running in development
 
 ```sh
 (cd ui && npm install && npm run build)     # the relay serves ui/dist; build it first
 cargo run -p lemmate-server -- --data-dir ./data
-cargo run -p lemmate-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
+cargo run -p lemmate-desktop -- --root-dir /path/to/notes --server-url http://127.0.0.1:8080
 
 RUST_LOG=info cargo run -p lemmate-desktop    # …with the config file instead of flags
 ```

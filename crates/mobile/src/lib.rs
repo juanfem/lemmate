@@ -112,6 +112,8 @@ fn start_relay(cfg: &Config, web_dir: PathBuf) -> Result<LocalHandle> {
     let opts = |port| LocalOptions {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         web_dir: Some(web_dir.clone()),
+        // The phone holds one vault (SPEC §14), so there is no root to create another under.
+        vault_root: None,
     };
     tauri::async_runtime::block_on(async {
         match client::start(sync.clone(), opts(port)).await {

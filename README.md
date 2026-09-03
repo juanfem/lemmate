@@ -64,8 +64,12 @@ vaults, tabs may hold notes from different ones, the quick switcher lists them a
 runs across them (`GET /api/v1/search`). Tags, history, trash and sharing are per vault and
 follow the focused note. It is all one WebSocket — frames are addressed by doc id, so the
 connection was never per vault. A vault can be given a name (stored in the vault doc, shared
-with every replica); without one the tree shows a short form of its id. The local relay serves
-exactly one vault, so on the desktop the tree simply has a single root.
+with every replica); without one the tree shows a short form of its id.
+
+The desktop is the same workspace, not a cut-down one: its local relay holds **one sync engine
+per vault** — each with its own folder under the root you picked, its own sidecar and its own
+connection — so the tree has the same roots the web client shows, and every one of them keeps
+working with the server unreachable.
 
 The Files sidebar offers two browsers over the same folders, switched from its toolbar: the
 interleaved **tree**, and a **folders/notes split** after Obsidian's *File Tree Alternative*
@@ -125,7 +129,8 @@ pandoc.
 `lemmate-desktop` reads `desktop.toml` from the per-user configuration directory
 (`~/.config/lemmate`, `~/Library/Application Support/lemmate`, `%APPDATA%\lemmate`;
 `LEMMATE_CONFIG_DIR` overrides); without one it opens a setup screen
-(vault folder, server, optional account) and writes it. Sessions come from `lemmate login` or the
+(notes folder, server, optional account) and writes it. That folder is a *root*: every vault the
+account can read is opened in its own subfolder below it, `vault_dir` still opens exactly one. Sessions come from `lemmate login` or the
 setup screen. The window is the web client served by the embedded relay, so it works offline.
 
 ## `lemmate sync`

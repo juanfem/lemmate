@@ -29,6 +29,7 @@ pub mod store;
 pub mod sync;
 pub mod tls;
 pub mod vault_doc;
+pub mod vaults;
 pub mod watcher;
 
 pub use doc::NoteDoc;

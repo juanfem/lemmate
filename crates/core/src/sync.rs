@@ -34,6 +34,21 @@ impl Frame {
         out
     }
 
+    /// The doc id of an encoded frame without copying its payload — what the local relay routes
+    /// on when it holds several vaults and only needs to know which engine a frame belongs to.
+    pub fn peek_doc_id(bytes: &[u8]) -> Result<&str> {
+        if bytes.len() < 2 {
+            return Err(Error::Frame("too short"));
+        }
+        let n = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+        let id = bytes.get(2..2 + n).ok_or(Error::Frame("doc id truncated"))?;
+        let doc_id = std::str::from_utf8(id).map_err(|_| Error::Frame("doc id not utf-8"))?;
+        if doc_id.is_empty() {
+            return Err(Error::Frame("empty doc id"));
+        }
+        Ok(doc_id)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 2 {
             return Err(Error::Frame("too short"));

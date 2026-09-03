@@ -473,7 +473,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let rt = tokio::runtime::Runtime::new()?;
             let report = match serve {
                 Some(bind) => rt.block_on(async {
-                    let handle = client::start(opts, LocalOptions { bind, web_dir }).await?;
+                    let handle =
+                        client::start(opts, LocalOptions { bind, web_dir, vault_root: None }).await?;
                     println!("local relay: http://{}/#/v/{}", handle.addr, handle.vault_id);
                     handle.wait().await
                 })?,

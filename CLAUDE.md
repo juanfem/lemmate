@@ -19,7 +19,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 | `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials + per-platform config paths (`paths.rs`), import/export, pandoc |
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
-| `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it |
+| `crates/desktop` | Tauri 2 shell: starts the relay for every vault the account can read — one engine and folder each, under `root_dir` — and opens one window on it |
 | `crates/mobile` | Tauri 2 Android/iOS shell: same relay, `ui/dist` compiled in with `include_dir!` and unpacked into app storage. Host-checkable (`cargo check -p lemmate-mobile`); no Android toolchain here yet — `crates/mobile/README.md` lists what it needs |
 | `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts` one vault, `workspace.svelte.ts` all of them on one socket, `api.ts`, `import.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
@@ -57,6 +57,10 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
 - The client holds **every vault at once** over one WebSocket (frames are addressed by doc id):
   `Workspace` owns the socket and fans `onSynced`/`onDenied` out to its `VaultSession`s. Note
   ids are unique across vaults, so tabs, search hits and links still name a note by id alone.
+- So does the **local relay**: `client::start_many` runs one `Engine` per vault behind one
+  `local::serve`, and `local::Routes` says which vault owns a note so a frame can be addressed.
+  Frames for a note no vault has claimed yet are *held* there, because the UI writes a note's
+  text before its vault entry; a single-vault relay keeps the engine's own `pending_docs` path.
 - Obsidian import is Rust in both directions: `import::import_upload` classifies and converts
   one uploaded file, the server creates notes through the room docs, the relay writes them into
   the vault folder. The UI only batches the upload (`ui/src/lib/import.ts`).

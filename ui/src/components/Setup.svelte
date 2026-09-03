@@ -1,11 +1,13 @@
 <script lang="ts">
   // First-run setup for the desktop app (SPEC §14): the relay runs in setup mode until the
-  // shell has a vault directory, a server, and (if the server has accounts) a session.
+  // shell has a folder for the notes, a server, and (if the server has accounts) a session.
+  //
+  // No vault is named here. The shell opens every vault the account can read, one folder each
+  // under the folder below — the same workspace the web client shows (SPEC §9).
   import { untrack } from 'svelte'
-  let { status, onDone }: { status: { config_path: string; suggested_vault_dir: string }; onDone: () => void } = $props()
-  let vaultDir = $state(untrack(() => status.suggested_vault_dir))
+  let { status, onDone }: { status: { config_path: string; suggested_root_dir: string }; onDone: () => void } = $props()
+  let rootDir = $state(untrack(() => status.suggested_root_dir))
   let serverUrl = $state('')
-  let vaultId = $state('')
   let email = $state('')
   let password = $state('')
   let register = $state(false)
@@ -22,9 +24,8 @@
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          vault_dir: vaultDir.trim(),
+          root_dir: rootDir.trim(),
           server_url: serverUrl.trim().replace(/\/+$/u, ''),
-          vault_id: vaultId.trim() || null,
           email: email.trim() || null,
           password: password || null,
           register,
@@ -46,9 +47,8 @@
   <form onsubmit={submit}>
     <h1>Set up notes</h1>
     <p class="muted">Where your notes live on this computer, and which server to sync with. Saved to <code>{status.config_path}</code>.</p>
-    <label>Vault folder <input bind:value={vaultDir} required /></label>
+    <label>Notes folder <span class="hint">(one folder per vault goes in here)</span> <input bind:value={rootDir} required /></label>
     <label>Server URL <input bind:value={serverUrl} placeholder="https://notes.example.org" required /></label>
-    <label>Vault id <span class="hint">(leave empty to create a new vault)</span> <input bind:value={vaultId} placeholder="01ARZ3…" /></label>
     <fieldset>
       <legend>Account on the server</legend>
       <label>Email <input type="email" bind:value={email} autocomplete="username" /></label>

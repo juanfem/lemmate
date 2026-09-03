@@ -1,13 +1,20 @@
 //! The local relay (SPEC §3.2, §14): an HTTP server on loopback that lets a UI in the same
-//! machine use the engine as its server — `/ws` speaks the frame protocol against the engine's
-//! in-memory docs, `/api/v1/…` answers from the sidecar store, and the built web client is
+//! machine use the engine as its server — `/ws` speaks the frame protocol against the engines'
+//! in-memory docs, `/api/v1/…` answers from the sidecar stores, and the built web client is
 //! served at `/`. Everything works with the real server unreachable; edits are journaled and
 //! pushed when it comes back.
+//!
+//! One relay fronts **one engine per vault** (SPEC §9, "one workspace"): the desktop opens every
+//! vault the account can read, each with its own folder, sidecar and connection, and the UI sees
+//! them the way it sees the server's — one socket, frames addressed by doc id, `/api/v1/vaults`
+//! listing them all. Routing a frame to the right engine is what [`Routes`] is for.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -20,9 +27,10 @@ use tokio::sync::{mpsc, oneshot};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::error::{Error, Result};
-use crate::ids::{NoteId, VaultId};
+use crate::ids::{DocId, NoteId, VaultId};
 use crate::import::UploadReport;
 use crate::store::{NoteRow, SearchHit};
+use crate::sync::Frame;
 
 /// Events the relay feeds into the engine loop.
 pub enum LocalEvent {
@@ -110,6 +118,9 @@ pub struct LocalOptions {
     pub bind: SocketAddr,
     /// Built web client (`ui/dist`) to serve at `/`.
     pub web_dir: Option<PathBuf>,
+    /// Where a vault the UI creates gets its folder (SPEC §9). `None` — the default — means a
+    /// relay with a fixed set of vaults: frames for any other vault are dropped, as before.
+    pub vault_root: Option<PathBuf>,
 }
 
 /// A loopback port for `vault_dir`, the same one every time.
@@ -141,18 +152,233 @@ pub fn stable_port(vault_dir: &std::path::Path) -> u16 {
     u16::try_from(FIRST + offset).unwrap_or(0)
 }
 
-pub(crate) struct LocalState {
+/// One engine behind the relay, and the vault it serves.
+struct EngineRef {
+    vault: VaultId,
     tx: mpsc::UnboundedSender<LocalEvent>,
+}
+
+pub(crate) struct LocalState {
+    /// Not fixed at start: a UI that creates a vault (SPEC §9) adds one here, through
+    /// [`Registrar`], without dropping the connection.
+    engines: RwLock<Vec<EngineRef>>,
+    /// The local UIs currently connected, so an engine that arrives late can still reach them.
+    peers: RwLock<HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>,
+    routes: Arc<Routes>,
+    /// Where a request to open an unknown vault goes; `None` on a relay with a fixed set.
+    wanted: Option<mpsc::UnboundedSender<VaultId>>,
     next_peer: AtomicU64,
 }
 
-/// Bind the relay and start serving; returns the bound address and the event receiver the
-/// engine must drain.
-pub(crate) async fn serve(
-    opts: &LocalOptions,
-) -> Result<(SocketAddr, mpsc::UnboundedReceiver<LocalEvent>, tokio::task::JoinHandle<()>)> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let state = Arc::new(LocalState { tx, next_peer: AtomicU64::new(1) });
+impl LocalState {
+    fn send_to(&self, vault: VaultId, ev: LocalEvent) -> bool {
+        match self.sender(vault) {
+            Some(tx) => tx.send(ev).is_ok(),
+            None => false,
+        }
+    }
+
+    /// A clone of one engine's channel. Cloned rather than borrowed because the callers are
+    /// async: a lock guard must not be held across an await.
+    fn sender(&self, vault: VaultId) -> Option<mpsc::UnboundedSender<LocalEvent>> {
+        let engines = self.engines.read().ok()?;
+        engines.iter().find(|e| e.vault == vault).map(|e| e.tx.clone())
+    }
+
+    /// Every engine's channel, in the order the vaults were opened.
+    fn senders(&self) -> Vec<mpsc::UnboundedSender<LocalEvent>> {
+        match self.engines.read() {
+            Ok(engines) => engines.iter().map(|e| e.tx.clone()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The same event to every engine: a local UI arriving or leaving concerns all of them.
+    fn broadcast(&self, ev: impl Fn() -> LocalEvent) {
+        if let Ok(engines) = self.engines.read() {
+            for engine in engines.iter() {
+                let _ = engine.tx.send(ev());
+            }
+        }
+    }
+
+    fn holds(&self, vault: VaultId) -> bool {
+        self.engines.read().map(|e| e.iter().any(|e| e.vault == vault)).unwrap_or(false)
+    }
+
+    fn only_engine(&self) -> Option<VaultId> {
+        let engines = self.engines.read().ok()?;
+        (engines.len() == 1).then(|| engines[0].vault)
+    }
+
+    /// Route one frame from a local UI to the engine that owns its doc.
+    ///
+    /// A vault frame names its vault outright. A note frame names only the note, and the UI
+    /// writes a new note's text *before* its vault entry, so the first frames of a new note can
+    /// arrive before any engine has heard of it: [`Routes::hold`] keeps them until one claims
+    /// the note. With a single vault there is nothing to decide, and the engine's own
+    /// pending-doc path (which journals what it receives) handles it as it always has.
+    ///
+    /// A frame for an unknown *vault* is a vault the UI has just created. It is held the same
+    /// way while the shell opens a folder and an engine for it — see [`Registrar::add`].
+    fn route_frame(&self, peer: u64, bytes: Vec<u8>) {
+        let Ok(doc_id) = Frame::peek_doc_id(&bytes) else { return };
+        let Ok(doc) = doc_id.parse::<DocId>() else { return };
+        let vault = match doc {
+            DocId::Vault(v) if self.holds(v) => v,
+            DocId::Vault(v) => {
+                self.routes.hold(doc, peer, bytes);
+                if let Some(wanted) = &self.wanted {
+                    let _ = wanted.send(v);
+                }
+                return;
+            }
+            DocId::Note(n) => match self.routes.owner(n).or_else(|| self.only_engine()) {
+                Some(v) => v,
+                None => {
+                    self.routes.hold(doc, peer, bytes);
+                    return;
+                }
+            },
+        };
+        self.send_to(vault, LocalEvent::PeerFrame { id: peer, bytes });
+    }
+}
+
+/// Adds an engine to a running relay: what a shell uses to open a vault a UI has just created.
+pub(crate) struct Registrar(Arc<LocalState>);
+
+impl Registrar {
+    /// Register `vault` and return the event receiver its engine must drain. `None` when the
+    /// relay already holds that vault, which is what makes a repeated request harmless.
+    pub(crate) fn add(&self, vault: VaultId) -> Option<mpsc::UnboundedReceiver<LocalEvent>> {
+        let mut engines = self.0.engines.write().ok()?;
+        if engines.iter().any(|e| e.vault == vault) {
+            return None;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Everyone already connected is this engine's peer too, or it could never answer them.
+        if let Ok(peers) = self.0.peers.read() {
+            for (id, peer) in peers.iter() {
+                let _ = tx.send(LocalEvent::PeerConnected { id: *id, tx: peer.clone() });
+            }
+        }
+        engines.push(EngineRef { vault, tx });
+        Some(rx)
+    }
+}
+
+/// Which vault owns which note, and the frames waiting for an answer.
+///
+/// Shared between the relay and every engine: engines publish the notes they hold (see
+/// `Engine::sync_routes`), the relay reads the map to address a frame. Frames for a note nobody
+/// owns yet are held rather than dropped — they are usually a note being created, and dropping
+/// them would lose whatever the UI typed before it wrote the vault entry.
+#[derive(Default)]
+pub(crate) struct Routes {
+    table: Mutex<RouteTable>,
+}
+
+#[derive(Default)]
+struct RouteTable {
+    owner: HashMap<NoteId, VaultId>,
+    held: HashMap<DocId, Vec<Held>>,
+}
+
+struct Held {
+    peer: u64,
+    bytes: Vec<u8>,
+    since: Instant,
+}
+
+/// How long a frame waits for a vault to claim its doc, and how much waits at once. A doc
+/// nobody ever claims is a bug elsewhere; these bounds keep it from being a leak.
+const HOLD_FOR: Duration = Duration::from_secs(60);
+const HOLD_DOCS: usize = 256;
+const HOLD_FRAMES: usize = 64;
+
+impl Routes {
+    pub(crate) fn owner(&self, note: NoteId) -> Option<VaultId> {
+        self.table.lock().ok()?.owner.get(&note).copied()
+    }
+
+    fn hold(&self, doc: DocId, peer: u64, bytes: Vec<u8>) {
+        let Ok(mut t) = self.table.lock() else { return };
+        let now = Instant::now();
+        t.held.retain(|_, frames| {
+            frames.retain(|h| now.duration_since(h.since) < HOLD_FOR);
+            !frames.is_empty()
+        });
+        if t.held.len() >= HOLD_DOCS && !t.held.contains_key(&doc) {
+            return;
+        }
+        let frames = t.held.entry(doc).or_default();
+        if frames.len() >= HOLD_FRAMES {
+            frames.remove(0);
+        }
+        frames.push(Held { peer, bytes, since: now });
+    }
+
+    /// Record the notes `vault` holds, and take back the frames held for it: those for notes it
+    /// has just taken on, and — the first time it claims anything — those for the vault doc
+    /// itself, which is how a vault the UI created reaches the engine opened for it.
+    pub(crate) fn claim(&self, vault: VaultId, notes: &HashSet<NoteId>) -> Vec<(u64, Vec<u8>)> {
+        let Ok(mut t) = self.table.lock() else { return Vec::new() };
+        t.owner.retain(|id, v| *v != vault || notes.contains(id));
+        let mut released: Vec<Held> = t.held.remove(&DocId::Vault(vault)).unwrap_or_default();
+        for id in notes {
+            if t.owner.insert(*id, vault).is_none()
+                && let Some(frames) = t.held.remove(&DocId::Note(*id))
+            {
+                released.extend(frames);
+            }
+        }
+        released.sort_by_key(|h| h.since);
+        released.into_iter().map(|h| (h.peer, h.bytes)).collect()
+    }
+
+    /// A peer that went away is not coming back for its held frames.
+    fn forget_peer(&self, peer: u64) {
+        let Ok(mut t) = self.table.lock() else { return };
+        t.held.retain(|_, frames| {
+            frames.retain(|h| h.peer != peer);
+            !frames.is_empty()
+        });
+    }
+}
+
+/// What [`serve`] hands back: the bound address, one event receiver per vault (in the order
+/// they were given), the server task, the routing table the engines publish into, and — when
+/// the caller allows new vaults — the requests for them and the way to answer.
+pub(crate) struct Served {
+    pub addr: SocketAddr,
+    pub events: Vec<mpsc::UnboundedReceiver<LocalEvent>>,
+    pub task: tokio::task::JoinHandle<()>,
+    pub routes: Arc<Routes>,
+    /// Vaults a UI has created and the relay does not hold yet.
+    pub wanted: Option<mpsc::UnboundedReceiver<VaultId>>,
+    pub registrar: Registrar,
+}
+
+/// Bind the relay and start serving one engine per vault; each engine must drain its receiver.
+pub(crate) async fn serve(opts: &LocalOptions, vault_ids: &[VaultId]) -> Result<Served> {
+    let mut engines = Vec::with_capacity(vault_ids.len());
+    let mut events = Vec::with_capacity(vault_ids.len());
+    for vault in vault_ids {
+        let (tx, rx) = mpsc::unbounded_channel();
+        engines.push(EngineRef { vault: *vault, tx });
+        events.push(rx);
+    }
+    let routes = Arc::new(Routes::default());
+    let (wanted_tx, wanted_rx) = mpsc::unbounded_channel();
+    let state = Arc::new(LocalState {
+        engines: RwLock::new(engines),
+        peers: RwLock::new(HashMap::new()),
+        routes: routes.clone(),
+        wanted: opts.vault_root.is_some().then_some(wanted_tx),
+        next_peer: AtomicU64::new(1),
+    });
+    let registrar = Registrar(state.clone());
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
     let router = Router::new()
@@ -160,6 +386,7 @@ pub(crate) async fn serve(
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/local/setup", get(configured))
         .route("/api/v1/vaults", get(vaults))
+        .route("/api/v1/search", get(search_all))
         .route("/api/v1/vaults/{vault}/notes", get(notes).post(create_note))
         .route("/api/v1/vaults/{vault}/import", axum::routing::post(import_vault))
         .route(
@@ -190,25 +417,33 @@ pub(crate) async fn serve(
             tracing::warn!(%e, "local relay stopped");
         }
     });
-    Ok((addr, rx, task))
+    Ok(Served {
+        addr,
+        events,
+        task,
+        routes,
+        wanted: opts.vault_root.is_some().then_some(wanted_rx),
+        registrar,
+    })
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<LocalState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| peer_session(socket, state))
 }
 
+/// One local UI. Every engine hears about the peer — each fans its own docs out to it — while
+/// frames coming the other way go to the one engine that owns the doc they name.
 async fn peer_session(mut socket: WebSocket, state: Arc<LocalState>) {
     let id = state.next_peer.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    if state.tx.send(LocalEvent::PeerConnected { id, tx }).is_err() {
-        return;
+    if let Ok(mut peers) = state.peers.write() {
+        peers.insert(id, tx.clone());
     }
+    state.broadcast(|| LocalEvent::PeerConnected { id, tx: tx.clone() });
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
-                Some(Ok(WsMessage::Binary(b))) => {
-                    if state.tx.send(LocalEvent::PeerFrame { id, bytes: b.to_vec() }).is_err() { break }
-                }
+                Some(Ok(WsMessage::Binary(b))) => state.route_frame(id, b.to_vec()),
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
@@ -218,12 +453,30 @@ async fn peer_session(mut socket: WebSocket, state: Arc<LocalState>) {
             },
         }
     }
-    let _ = state.tx.send(LocalEvent::PeerGone { id });
+    if let Ok(mut peers) = state.peers.write() {
+        peers.remove(&id);
+    }
+    state.broadcast(|| LocalEvent::PeerGone { id });
+    state.routes.forget_peer(id);
 }
 
-async fn ask(state: &LocalState, query: LocalQuery) -> std::result::Result<LocalReply, StatusCode> {
+/// Put a query to the engine serving `vault`; 404 when this relay does not hold that vault.
+async fn ask(
+    state: &LocalState,
+    vault: &str,
+    query: LocalQuery,
+) -> std::result::Result<LocalReply, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let tx = state.sender(vault).ok_or(StatusCode::NOT_FOUND)?;
+    ask_engine(&tx, query).await
+}
+
+async fn ask_engine(
+    engine: &mpsc::UnboundedSender<LocalEvent>,
+    query: LocalQuery,
+) -> std::result::Result<LocalReply, StatusCode> {
     let (reply, rx) = oneshot::channel();
-    state.tx.send(LocalEvent::Query { query, reply }).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    engine.send(LocalEvent::Query { query, reply }).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     match rx.await {
         Ok(LocalReply::Error(e)) => {
             tracing::warn!(%e, "local query");
@@ -285,27 +538,53 @@ fn summaries(rows: Vec<NoteRow>) -> Vec<NoteSummary> {
 type Resp<T> = std::result::Result<axum::Json<T>, StatusCode>;
 
 async fn vaults(State(s): State<Arc<LocalState>>) -> Resp<Vec<VaultSummary>> {
-    match ask(&s, LocalQuery::Vaults).await? {
-        LocalReply::Vaults(v) => Ok(axum::Json(
-            v.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect(),
-        )),
-        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let engines = s.senders();
+    let mut out = Vec::with_capacity(engines.len());
+    for engine in &engines {
+        if let LocalReply::Vaults(v) = ask_engine(engine, LocalQuery::Vaults).await? {
+            out.extend(v.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }));
+        }
     }
+    Ok(axum::Json(out))
 }
 
-async fn notes(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> Resp<Vec<NoteSummary>> {
-    match ask(&s, LocalQuery::Notes).await? {
+/// Search every vault this relay holds (SPEC §10), the endpoint the web client uses when it
+/// does not know — or care — which vault a hit is in. Each engine ranks its own notes and the
+/// lists are concatenated: FTS scores from separate SQLite databases are not comparable, so
+/// there is nothing honest to merge on.
+async fn search_all(
+    State(s): State<Arc<LocalState>>,
+    Query(p): Query<SearchParams>,
+) -> Resp<Vec<SearchHitOut>> {
+    let limit = p.limit.min(100);
+    let mut out = Vec::new();
+    for engine in &s.senders() {
+        let q = LocalQuery::Search { q: p.q.clone(), limit };
+        if let LocalReply::Search(hits) = ask_engine(engine, q).await? {
+            out.extend(hits.into_iter().map(hit_out));
+        }
+        if out.len() >= limit as usize {
+            break;
+        }
+    }
+    out.truncate(limit as usize);
+    Ok(axum::Json(out))
+}
+
+fn hit_out(h: SearchHit) -> SearchHitOut {
+    SearchHitOut { note_id: h.note_id.to_string(), title: h.title, snippet: h.snippet }
+}
+
+async fn notes(State(s): State<Arc<LocalState>>, Path(vault): Path<String>) -> Resp<Vec<NoteSummary>> {
+    match ask(&s, &vault, LocalQuery::Notes).await? {
         LocalReply::Notes(rows) => Ok(axum::Json(summaries(rows))),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-async fn note(
-    State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
-) -> Resp<NoteBody> {
+async fn note(State(s): State<Arc<LocalState>>, Path((vault, id)): Path<(String, String)>) -> Resp<NoteBody> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::Note(id)).await? {
+    match ask(&s, &vault, LocalQuery::Note(id)).await? {
         LocalReply::Note(Some((row, content))) => {
             Ok(axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }))
         }
@@ -316,10 +595,10 @@ async fn note(
 
 async fn backlinks(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
 ) -> Resp<Vec<NoteSummary>> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::Backlinks(id)).await? {
+    match ask(&s, &vault, LocalQuery::Backlinks(id)).await? {
         LocalReply::Backlinks(rows) => Ok(axum::Json(summaries(rows))),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -357,28 +636,28 @@ fn written(
 
 async fn create_note(
     State(s): State<Arc<LocalState>>,
-    Path(_vault): Path<String>,
+    Path(vault): Path<String>,
     axum::Json(body): axum::Json<NewNote>,
 ) -> std::result::Result<(StatusCode, axum::Json<NoteBody>), StatusCode> {
-    written(ask(&s, LocalQuery::CreateNote { path: body.path, content: body.content }).await?, true)
+    written(ask(&s, &vault, LocalQuery::CreateNote { path: body.path, content: body.content }).await?, true)
 }
 
 async fn replace_note(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
     axum::Json(body): axum::Json<PutNote>,
 ) -> std::result::Result<(StatusCode, axum::Json<NoteBody>), StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    written(ask(&s, LocalQuery::ReplaceNote { id, content: body.content }).await?, false)
+    written(ask(&s, &vault, LocalQuery::ReplaceNote { id, content: body.content }).await?, false)
 }
 
 async fn rename_note(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
     axum::Json(body): axum::Json<PatchNote>,
 ) -> std::result::Result<StatusCode, StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::RenameNote { id, path: body.path }).await? {
+    match ask(&s, &vault, LocalQuery::RenameNote { id, path: body.path }).await? {
         LocalReply::Done => Ok(StatusCode::NO_CONTENT),
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         LocalReply::Conflict(_) => Err(StatusCode::CONFLICT),
@@ -388,10 +667,10 @@ async fn rename_note(
 
 async fn delete_note(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
 ) -> std::result::Result<StatusCode, StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::DeleteNote(id)).await? {
+    match ask(&s, &vault, LocalQuery::DeleteNote(id)).await? {
         LocalReply::Done => Ok(StatusCode::NO_CONTENT),
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -400,12 +679,12 @@ async fn delete_note(
 
 async fn daily(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, date)): Path<(String, String)>,
+    Path((vault, date)): Path<(String, String)>,
 ) -> Resp<NoteBody> {
     if date.len() != 10 || !date.chars().all(|c| c.is_ascii_digit() || c == '-') {
         return Err(StatusCode::BAD_REQUEST);
     }
-    match ask(&s, LocalQuery::Daily(date)).await? {
+    match ask(&s, &vault, LocalQuery::Daily(date)).await? {
         LocalReply::Written(Some((row, content))) => {
             Ok(axum::Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }))
         }
@@ -421,8 +700,8 @@ struct TrashOut {
     deleted_at: String,
 }
 
-async fn trash(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> Resp<Vec<TrashOut>> {
-    match ask(&s, LocalQuery::Trash).await? {
+async fn trash(State(s): State<Arc<LocalState>>, Path(vault): Path<String>) -> Resp<Vec<TrashOut>> {
+    match ask(&s, &vault, LocalQuery::Trash).await? {
         LocalReply::Trash(rows) => Ok(axum::Json(
             rows.into_iter()
                 .map(|(n, d)| TrashOut { id: n.id.to_string(), path: n.path, title: n.title, deleted_at: d })
@@ -434,10 +713,10 @@ async fn trash(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> 
 
 async fn restore(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
 ) -> Resp<NoteSummary> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::Restore(id)).await? {
+    match ask(&s, &vault, LocalQuery::Restore(id)).await? {
         LocalReply::Written(Some((row, _))) => Ok(axum::Json(NoteSummary {
             id: row.id.to_string(),
             path: row.path,
@@ -457,7 +736,7 @@ struct ExportIn {
 /// Export through pandoc with the vault's `export/` folder as resources (SPEC §12).
 async fn export_note(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
     axum::Json(body): axum::Json<ExportIn>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -465,7 +744,7 @@ async fn export_note(
     if !crate::pandoc::pandoc_available(None) {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
-    match ask(&s, LocalQuery::Export { id, format }).await? {
+    match ask(&s, &vault, LocalQuery::Export { id, format }).await? {
         LocalReply::Exported(bytes, mime) => Ok((
             [
                 (header::CONTENT_TYPE, mime.to_owned()),
@@ -504,10 +783,10 @@ fn version_out(v: crate::store::VersionRow) -> VersionOut {
 
 async fn versions(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
 ) -> Resp<Vec<VersionOut>> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::Versions(id)).await? {
+    match ask(&s, &vault, LocalQuery::Versions(id)).await? {
         LocalReply::Versions(v) => Ok(axum::Json(v.into_iter().map(version_out).collect())),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -515,11 +794,13 @@ async fn versions(
 
 async fn save_version(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id)): Path<(String, String)>,
+    Path((vault, id)): Path<(String, String)>,
     axum::Json(body): axum::Json<SaveVersion>,
 ) -> Resp<VersionOut> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::SaveVersion(id, body.label.unwrap_or_else(|| "saved version".into()))).await? {
+    match ask(&s, &vault, LocalQuery::SaveVersion(id, body.label.unwrap_or_else(|| "saved version".into())))
+        .await?
+    {
         LocalReply::SavedVersion(v) => Ok(axum::Json(version_out(v))),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -527,18 +808,18 @@ async fn save_version(
 
 async fn version_at(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, id, seq)): Path<(String, String, i64)>,
+    Path((vault, id, seq)): Path<(String, String, i64)>,
 ) -> Resp<VersionBody> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, LocalQuery::VersionAt(id, seq)).await? {
+    match ask(&s, &vault, LocalQuery::VersionAt(id, seq)).await? {
         LocalReply::VersionAt(Some(content)) => Ok(axum::Json(VersionBody { seq, content })),
         LocalReply::VersionAt(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-async fn tags(State(s): State<Arc<LocalState>>, Path(_vault): Path<String>) -> Resp<Vec<TagCount>> {
-    match ask(&s, LocalQuery::Tags).await? {
+async fn tags(State(s): State<Arc<LocalState>>, Path(vault): Path<String>) -> Resp<Vec<TagCount>> {
+    match ask(&s, &vault, LocalQuery::Tags).await? {
         LocalReply::Tags(t) => {
             Ok(axum::Json(t.into_iter().map(|(tag, count)| TagCount { tag, count }).collect()))
         }
@@ -553,10 +834,10 @@ struct TagParams {
 
 async fn tagged(
     State(s): State<Arc<LocalState>>,
-    Path(_vault): Path<String>,
+    Path(vault): Path<String>,
     Query(p): Query<TagParams>,
 ) -> Resp<Vec<NoteSummary>> {
-    match ask(&s, LocalQuery::Tagged(p.tag)).await? {
+    match ask(&s, &vault, LocalQuery::Tagged(p.tag)).await? {
         LocalReply::Tagged(rows) => Ok(axum::Json(summaries(rows))),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -564,24 +845,20 @@ async fn tagged(
 
 async fn search(
     State(s): State<Arc<LocalState>>,
-    Path(_vault): Path<String>,
+    Path(vault): Path<String>,
     Query(p): Query<SearchParams>,
 ) -> Resp<Vec<SearchHitOut>> {
-    match ask(&s, LocalQuery::Search { q: p.q, limit: p.limit.min(100) }).await? {
-        LocalReply::Search(hits) => Ok(axum::Json(
-            hits.into_iter()
-                .map(|h| SearchHitOut { note_id: h.note_id.to_string(), title: h.title, snippet: h.snippet })
-                .collect(),
-        )),
+    match ask(&s, &vault, LocalQuery::Search { q: p.q, limit: p.limit.min(100) }).await? {
+        LocalReply::Search(hits) => Ok(axum::Json(hits.into_iter().map(hit_out).collect())),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 async fn attachment(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, hash)): Path<(String, String)>,
+    Path((vault, hash)): Path<(String, String)>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
-    match ask(&s, LocalQuery::Attachment(hash)).await? {
+    match ask(&s, &vault, LocalQuery::Attachment(hash)).await? {
         LocalReply::Attachment(Some((bytes, mime))) => Ok(([(header::CONTENT_TYPE, mime)], bytes)),
         LocalReply::Attachment(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -598,7 +875,7 @@ struct Stored {
 /// like any attachment (hashed, uploaded, recorded in the vault doc once a note references it).
 async fn put_attachment(
     State(s): State<Arc<LocalState>>,
-    Path((_vault, hash)): Path<(String, String)>,
+    Path((vault, hash)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Resp<Stored> {
@@ -606,7 +883,7 @@ async fn put_attachment(
         return Err(StatusCode::BAD_REQUEST);
     }
     let name = headers.get("x-filename").and_then(|v| v.to_str().ok()).unwrap_or("file").to_owned();
-    match ask(&s, LocalQuery::StoreAttachment { name, bytes: body.to_vec() }).await? {
+    match ask(&s, &vault, LocalQuery::StoreAttachment { name, bytes: body.to_vec() }).await? {
         LocalReply::Stored { path, hash } => Ok(axum::Json(Stored { path, hash })),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -624,7 +901,7 @@ impl From<LocalQuery> for LocalEvent {
 /// them into the vault folder, so they travel to the server as ordinary local edits.
 async fn import_vault(
     State(s): State<Arc<LocalState>>,
-    Path(_vault): Path<String>,
+    Path(vault): Path<String>,
     mut form: Multipart,
 ) -> Resp<UploadReport> {
     let mut files = Vec::new();
@@ -633,7 +910,7 @@ async fn import_vault(
         let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
         files.push((rel, bytes.to_vec()));
     }
-    match ask(&s, LocalQuery::Import { files }).await? {
+    match ask(&s, &vault, LocalQuery::Import { files }).await? {
         LocalReply::Imported(report) => Ok(axum::Json(report)),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -645,13 +922,14 @@ pub(crate) fn err_reply(e: Error) -> LocalReply {
 
 // ---- First-run setup (SPEC §14 desktop) -------------------------------------------------------
 
-/// What the desktop shell needs before it can start the engine.
+/// What the desktop shell needs before it can start the engines.
+///
+/// No vault is named: the shell opens every vault the account can read, one folder each under
+/// `root_dir` (SPEC §9). Which vaults those are is the server's answer, not the user's to type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetupRequest {
-    pub vault_dir: String,
+    pub root_dir: String,
     pub server_url: String,
-    #[serde(default)]
-    pub vault_id: Option<String>,
     #[serde(default)]
     pub ca_cert: Option<String>,
     /// Sign in (or register) on the server and save the token before starting.
@@ -671,8 +949,8 @@ pub struct SetupRequest {
 pub struct SetupStatus {
     pub configured: bool,
     pub config_path: String,
-    /// Suggested default vault directory for the form.
-    pub suggested_vault_dir: String,
+    /// Suggested default folder for the form: the root the vaults go under.
+    pub suggested_root_dir: String,
 }
 
 pub(crate) struct SetupState {
@@ -688,12 +966,12 @@ pub async fn serve_setup(
     bind: SocketAddr,
     web_dir: Option<PathBuf>,
     config_path: PathBuf,
-    suggested_vault_dir: PathBuf,
+    suggested_root_dir: PathBuf,
 ) -> Result<(SocketAddr, oneshot::Receiver<SetupRequest>, tokio::task::JoinHandle<()>)> {
     let (tx, rx) = oneshot::channel();
     let state = Arc::new(SetupState {
         config_path,
-        suggested: suggested_vault_dir,
+        suggested: suggested_root_dir,
         done: tokio::sync::Mutex::new(Some(tx)),
     });
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -722,7 +1000,7 @@ async fn setup_status(State(s): State<Arc<SetupState>>) -> axum::Json<SetupStatu
     axum::Json(SetupStatus {
         configured: false,
         config_path: s.config_path.display().to_string(),
-        suggested_vault_dir: s.suggested.display().to_string(),
+        suggested_root_dir: s.suggested.display().to_string(),
     })
 }
 
@@ -730,7 +1008,7 @@ async fn setup_submit(
     State(s): State<Arc<SetupState>>,
     axum::Json(req): axum::Json<SetupRequest>,
 ) -> StatusCode {
-    if req.vault_dir.trim().is_empty()
+    if req.root_dir.trim().is_empty()
         || !(req.server_url.starts_with("http://") || req.server_url.starts_with("https://"))
     {
         return StatusCode::BAD_REQUEST;
@@ -800,7 +1078,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status["configured"], false);
-        assert_eq!(status["suggested_vault_dir"], "/home/me/notes");
+        assert_eq!(status["suggested_root_dir"], "/home/me/notes");
         // The UI's usual probes must not break the shell while unconfigured.
         let me = tokio::task::spawn_blocking({
             let base = base.clone();
@@ -831,20 +1109,20 @@ mod tests {
                 }
             })
         };
-        assert_eq!(submit(serde_json::json!({"vault_dir": "", "server_url": "x"})).await.unwrap(), 400);
+        assert_eq!(submit(serde_json::json!({"root_dir": "", "server_url": "x"})).await.unwrap(), 400);
         assert_eq!(
             submit(
-                serde_json::json!({"vault_dir": "/v", "server_url": "https://s.example", "register": true})
+                serde_json::json!({"root_dir": "/v", "server_url": "https://s.example", "register": true})
             )
             .await
             .unwrap(),
             202
         );
         let req = rx.await.unwrap();
-        assert_eq!(req.vault_dir, "/v");
+        assert_eq!(req.root_dir, "/v");
         assert!(req.register);
         assert_eq!(
-            submit(serde_json::json!({"vault_dir": "/v", "server_url": "https://s.example"})).await.unwrap(),
+            submit(serde_json::json!({"root_dir": "/v", "server_url": "https://s.example"})).await.unwrap(),
             409
         );
         task.abort();

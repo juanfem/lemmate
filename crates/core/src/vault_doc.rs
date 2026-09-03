@@ -17,6 +17,9 @@ pub const ATTACHMENTS_FIELD: &str = "attachments";
 /// Ordered bookmark list, shared by every replica (SPEC §4.3, §9). The web client owns this
 /// list; Rust only ever appends to it, on import.
 pub const BOOKMARKS_FIELD: &str = "bookmarks";
+/// Vault-level settings shared by every replica. The web client owns this map; Rust only reads
+/// `name` from it, to label the vault's folder on a native client.
+pub const META_FIELD: &str = "meta";
 
 /// One entry of the bookmark list. `kind` is `note`, `folder`, `search` or `heading`; the
 /// importer only produces `note`.
@@ -34,6 +37,7 @@ pub struct VaultDoc {
     notes: MapRef,
     attachments: MapRef,
     bookmarks: ArrayRef,
+    meta: MapRef,
 }
 
 impl Default for VaultDoc {
@@ -48,7 +52,8 @@ impl VaultDoc {
         let notes = doc.get_or_insert_map(NOTES_FIELD);
         let attachments = doc.get_or_insert_map(ATTACHMENTS_FIELD);
         let bookmarks = doc.get_or_insert_array(BOOKMARKS_FIELD);
-        Self { doc, notes, attachments, bookmarks }
+        let meta = doc.get_or_insert_map(META_FIELD);
+        Self { doc, notes, attachments, bookmarks, meta }
     }
 
     pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
@@ -101,6 +106,31 @@ impl VaultDoc {
             .collect();
         v.sort();
         v
+    }
+
+    /// The vault's display name, if the user has given it one. Written only by the web client
+    /// (`meta.name`); a native client reads it to label the vault and to name its folder.
+    pub fn name(&self) -> Option<String> {
+        let txn = self.doc.transact();
+        match self.meta.get(&txn, "name") {
+            Some(Out::Any(Any::String(s))) => Some(s.to_string()).filter(|s| !s.trim().is_empty()),
+            _ => None,
+        }
+    }
+
+    /// Name the vault for every replica; returns the update (empty if unchanged). The web
+    /// client is what normally writes this — Rust reads it to label a vault's folder — but
+    /// import and tests need to be able to set it too.
+    pub fn set_name(&self, name: &str) -> Vec<u8> {
+        if self.name().as_deref() == Some(name) {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            self.meta.insert(&mut txn, "name", Any::from(name));
+        }
+        self.diff_since(&before)
     }
 
     /// Set a note's path; returns the update (empty if unchanged).

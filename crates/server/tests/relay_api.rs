@@ -26,7 +26,9 @@ async fn relay(server: SocketAddr, dir: &std::path::Path) -> LocalHandle {
         ca_cert: None,
         token: None,
     };
-    start(opts, LocalOptions { bind: "127.0.0.1:0".parse().unwrap(), web_dir: None }).await.unwrap()
+    start(opts, LocalOptions { bind: "127.0.0.1:0".parse().unwrap(), web_dir: None, vault_root: None })
+        .await
+        .unwrap()
 }
 
 async fn call(method: &'static str, url: String, body: Option<Value>) -> (u16, Value) {

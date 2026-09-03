@@ -8,7 +8,8 @@
 //! other side is missing. The same engine will back the Tauri shells.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -25,7 +26,7 @@ use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
 use crate::import::{Upload, UploadReport};
 pub use crate::local::LocalOptions;
-use crate::local::{LocalEvent, LocalQuery, LocalReply, err_reply};
+use crate::local::{LocalEvent, LocalQuery, LocalReply, Routes, err_reply};
 use crate::markdown::{self, NoteIndex};
 use crate::projection::{Projection, ingest_external_edit};
 use crate::store::{NoteRow, RetentionPolicy, Store, now_ms};
@@ -76,23 +77,41 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
     run_inner(engine, opts, rx).await
 }
 
-/// A running engine with its local relay (SPEC §3.2): the address to point a UI at, and the
-/// task to await or abort.
+/// The running engines with their local relay (SPEC §3.2): the address to point a UI at, and
+/// the tasks to await or abort.
 pub struct LocalHandle {
     pub addr: SocketAddr,
+    /// The first vault opened — the only one for a single-vault relay, and what a caller that
+    /// wants to open the UI on one vault should use.
     pub vault_id: VaultId,
-    task: tokio::task::JoinHandle<Result<SyncReport>>,
+    /// The vaults this relay served at startup, in the order they were opened. A vault created
+    /// later by a UI is not listed here; ask the relay (`GET /api/v1/vaults`) for the live set.
+    pub vaults: Vec<VaultId>,
+    /// Behind a lock because the set grows: opening a vault a UI created adds an engine.
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<Result<SyncReport>>>>>,
+    supervisor: Option<tokio::task::JoinHandle<()>>,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl LocalHandle {
+    /// Wait for the first engine to finish. Only meaningful in `once` mode, which is only ever
+    /// used with a single vault.
     pub async fn wait(self) -> Result<SyncReport> {
-        let r = self.task.await.map_err(|e| Error::Sync(e.to_string()))?;
-        self.server.abort();
+        let first = self.tasks.lock().ok().and_then(|mut t| (!t.is_empty()).then(|| t.remove(0)));
+        let Some(first) = first else { return Err(Error::Sync("the relay has no engine".into())) };
+        let r = first.await.map_err(|e| Error::Sync(e.to_string()))?;
+        self.abort();
         r
     }
     pub fn abort(&self) {
-        self.task.abort();
+        if let Ok(tasks) = self.tasks.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
+        }
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.abort();
+        }
         self.server.abort();
     }
 }
@@ -100,13 +119,109 @@ impl LocalHandle {
 /// Bind the local relay, start the engine in a background task, and return once the listener
 /// is up. The relay keeps working while the real server is unreachable.
 pub async fn start(opts: SyncOptions, local: LocalOptions) -> Result<LocalHandle> {
+    start_many(vec![opts], local).await
+}
+
+/// The same, for every vault a client holds at once (SPEC §9): one engine — folder, sidecar,
+/// watcher and connection — per vault, all behind one relay, so the UI sees the workspace it
+/// sees against the server. Vaults are opened in order and the first failure is returned, since
+/// a shell that silently drops a vault is worse than one that will not start.
+pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<LocalHandle> {
     crate::tls::install_crypto_provider();
-    let engine = Engine::open(&opts)?;
-    let vault_id = engine.vault_id;
-    let (addr, rx, server) = crate::local::serve(&local).await?;
-    info!(%addr, "local relay listening");
-    let task = tokio::spawn(run_inner(engine, opts, rx));
-    Ok(LocalHandle { addr, vault_id, task, server })
+    if opts.is_empty() {
+        return Err(Error::Sync("the local relay needs at least one vault".into()));
+    }
+    let mut engines = Vec::with_capacity(opts.len());
+    for o in &opts {
+        engines.push(Engine::open(o)?);
+    }
+    let vaults: Vec<VaultId> = engines.iter().map(|e| e.vault_id).collect();
+    let template = opts[0].clone();
+    let served = crate::local::serve(&local, &vaults).await?;
+    info!(addr = %served.addr, vaults = vaults.len(), "local relay listening");
+    let tasks: Vec<_> = engines
+        .into_iter()
+        .zip(opts)
+        .zip(served.events)
+        .map(|((mut engine, o), rx)| {
+            engine.routes = Some(served.routes.clone());
+            tokio::spawn(run_inner(engine, o, rx))
+        })
+        .collect();
+    let tasks = Arc::new(Mutex::new(tasks));
+
+    // A UI may create a vault (SPEC §9): it mints the id itself and speaks it over the socket,
+    // and the relay holds those frames while this opens a folder and an engine for it. Without
+    // a root to put the folder in there is nothing to open, and `serve` never asks.
+    let supervisor = match (served.wanted, local.vault_root.clone()) {
+        (Some(mut wanted), Some(root)) => {
+            let (registrar, routes, tasks) = (served.registrar, served.routes.clone(), tasks.clone());
+            Some(tokio::spawn(async move {
+                while let Some(vault) = wanted.recv().await {
+                    match open_new_vault(&root, vault, &template, &registrar, &routes) {
+                        Ok(Some(task)) => {
+                            if let Ok(mut t) = tasks.lock() {
+                                t.push(task);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!(%vault, %e, "could not open the vault the UI created"),
+                    }
+                }
+            }))
+        }
+        _ => None,
+    };
+    Ok(LocalHandle { addr: served.addr, vault_id: vaults[0], vaults, tasks, supervisor, server: served.task })
+}
+
+/// Open a vault a local UI has just created: a folder under `root`, an engine on it, and a
+/// place in the relay. `Ok(None)` when the relay already holds it, which is what makes a
+/// repeated request — a UI resending its handshake — harmless.
+///
+/// The folder is named after the vault id; the name the user gave it lives in the vault doc,
+/// arrives moments later, and renames the folder on the next launch (`vaults::rehome`), when
+/// nothing is holding it open.
+fn open_new_vault(
+    root: &Path,
+    vault: VaultId,
+    template: &SyncOptions,
+    registrar: &crate::local::Registrar,
+    routes: &Arc<Routes>,
+) -> Result<Option<tokio::task::JoinHandle<Result<SyncReport>>>> {
+    let dir = root.join(crate::vaults::default_folder_name(vault));
+    std::fs::create_dir_all(&dir)?;
+    let opts = SyncOptions { vault_dir: dir, vault_id: Some(vault), once: false, ..template.clone() };
+    // Opened before registering, so a vault that cannot be opened is not one the relay claims.
+    let mut engine = Engine::open(&opts)?;
+    let Some(rx) = registrar.add(vault) else { return Ok(None) };
+    engine.routes = Some(routes.clone());
+    info!(%vault, dir = %opts.vault_dir.display(), "opened a vault created by the UI");
+    Ok(Some(tokio::spawn(run_inner(engine, opts, rx))))
+}
+
+/// The vault a directory already belongs to, or `None` if it holds no sidecar yet. Lets a shell
+/// work out which vaults it has on disk before opening any of them.
+pub fn vault_id_at(vault_dir: &Path) -> Result<Option<VaultId>> {
+    let db = Projection::new(vault_dir).sidecar_dir().join("local.db");
+    if !db.is_file() {
+        return Ok(None);
+    }
+    Store::open(db)?.meta_get("vault_id")?.map(|s| s.parse()).transpose()
+}
+
+/// The name a vault has been given (`meta.name` in its vault doc), read from a directory's
+/// sidecar without starting an engine — what a shell labels the vault's folder with.
+pub fn vault_name_at(vault_dir: &Path) -> Result<Option<String>> {
+    let db = Projection::new(vault_dir).sidecar_dir().join("local.db");
+    if !db.is_file() {
+        return Ok(None);
+    }
+    let store = Store::open(db)?;
+    let Some(id) = store.meta_get("vault_id")?.map(|s| s.parse()).transpose()? else {
+        return Ok(None);
+    };
+    Ok(store.load_vault_doc(id)?.name())
 }
 
 async fn run_inner(
@@ -438,6 +553,10 @@ pub struct Engine {
     peers: HashMap<u64, Peer>,
     /// Note docs a local UI created that have no vault entry yet (the UI writes text first).
     pending_docs: HashMap<NoteId, NoteDoc>,
+    /// Where the relay looks up which vault owns a note. `None` for a bare `run` with no relay.
+    routes: Option<Arc<Routes>>,
+    /// Set whenever the set of notes this engine holds changes, so `sync_routes` republishes it.
+    routes_dirty: bool,
 }
 
 impl Engine {
@@ -491,6 +610,8 @@ impl Engine {
             orphan_check_due: true,
             peers: HashMap::new(),
             pending_docs: HashMap::new(),
+            routes: None,
+            routes_dirty: true,
         })
     }
 
@@ -621,6 +742,7 @@ impl Engine {
         self.store.set_projected_text(DocId::Note(id), rel, &text)?;
         self.by_path.insert(rel.to_owned(), id);
         self.notes.insert(id, NoteState { doc, path: rel.to_owned() });
+        self.routes_dirty = true;
         self.index(id, rel, &text)?;
         let vu = self.vault.set_path(id, rel);
         self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
@@ -1131,6 +1253,7 @@ impl Engine {
                     self.by_path.insert(path.clone(), id);
                     self.notes.insert(id, NoteState { doc, path: path.clone() });
                     self.dirty.insert(id, Instant::now());
+                    self.routes_dirty = true;
                     self.handshake(DocId::Note(id));
                     info!(path = %path, %id, "adopted note from vault");
                 }
@@ -1178,6 +1301,7 @@ impl Engine {
         self.by_path.remove(path);
         self.notes.remove(&id);
         self.dirty.remove(&id);
+        self.routes_dirty = true;
         self.handshakes.remove(&DocId::Note(id).to_string());
         Ok(())
     }
@@ -1266,6 +1390,31 @@ impl Engine {
         Ok(())
     }
 
+    /// Tell the relay which notes this vault owns, and take back the frames it was holding for
+    /// notes we have just adopted. A note created by a local UI is written before its vault
+    /// entry exists, so those frames — the note's first content — arrive before anyone can say
+    /// where they belong; this is where they land.
+    fn sync_routes(&mut self) {
+        if !self.routes_dirty {
+            return;
+        }
+        self.routes_dirty = false;
+        let Some(routes) = self.routes.clone() else { return };
+        let mut ids: HashSet<NoteId> = self.notes.keys().copied().collect();
+        // Bounded: `claim` only releases frames for notes that were not ours a moment ago, and
+        // each release empties that note's queue.
+        for _ in 0..8 {
+            let released = routes.claim(self.vault_id, &ids);
+            if released.is_empty() {
+                break;
+            }
+            for (peer, bytes) in released {
+                self.handle_frame(Origin::Peer(peer), &bytes);
+            }
+            ids = self.notes.keys().copied().collect();
+        }
+    }
+
     fn on_local_event(&mut self, ev: LocalEvent) {
         match ev {
             LocalEvent::PeerConnected { id, tx } => {
@@ -1279,6 +1428,7 @@ impl Engine {
                 let _ = reply.send(self.answer(query));
             }
         }
+        self.sync_routes();
     }
 
     fn answer(&mut self, q: LocalQuery) -> LocalReply {
@@ -1356,6 +1506,7 @@ impl Engine {
                         let doc = self.store.load_doc(DocId::Note(id))?;
                         self.by_path.insert(row.path.clone(), id);
                         self.notes.insert(id, NoteState { doc, path: row.path.clone() });
+                        self.routes_dirty = true;
                         let vu = self.vault.set_path(id, &row.path);
                         self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
                         self.handshake(DocId::Note(id));
@@ -1515,6 +1666,7 @@ impl Engine {
     }
 
     fn tick(&mut self) -> Result<()> {
+        self.sync_routes();
         let now = Instant::now();
         if now.duration_since(self.last_maintenance) >= MAINTENANCE_INTERVAL {
             self.maintain_all()?;
