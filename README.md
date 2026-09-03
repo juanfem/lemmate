@@ -8,10 +8,10 @@ specification; this README covers the repository and the current milestone.
 | Crate / package | Path | What it is |
 |---|---|---|
 | `lemmate-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
-| `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`), serves the web client. |
-| `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
-| `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for the configured vault and opens one window on it. |
-| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
+| `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`, including vault deletion for merges), serves the web client. |
+| `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), `serve` (standalone relay, no server), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
+| `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for every vault under the configured root — with a server, or standalone with none — and opens one window on it. |
+| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, connecting a server and merging vaults (SPEC §3.2), sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
@@ -32,6 +32,41 @@ binaries plus `web/` in one archive, and the desktop installers (`.deb`/`.rpm`/A
 `.msi`/NSIS) beside it — and a `v*` tag drafts a release from them; to build instead, see
 [`docs/install.md`](docs/install.md). User guide (writing, organising, sharing, shortcuts, CLI,
 export, Obsidian migration): [`docs/guide.md`](docs/guide.md).
+
+## Without a server
+
+The desktop app does not need one. Leave `server_url` out of `desktop.toml` — or answer the
+setup screen without ticking *Sync with a server* — and it runs **standalone**: each vault is a
+folder under the root you picked, and nothing goes on the network.
+
+```sh
+lemmate-desktop --root-dir ~/lemmate                       # standalone desktop app
+lemmate serve --root ~/lemmate --web-dir ui/dist           # …the same, headless, in a browser
+```
+
+This is not a cut-down mode. The relay the window talks to already answers everything the UI
+asks — the tree, cross-vault search, backlinks, tags, outline, trash, history, daily notes,
+templates, attachments, Obsidian import, pandoc export — out of each vault's `.lemmate/`
+sidecar, because that is what makes the app work offline. What a server adds is what a server
+is for: your other devices, other people, sharing and public links, accounts. Those are not
+offered in a standalone window, and the status line reads `local` rather than `online`.
+
+**Adding a server later** is a command in the palette: *Connect a server…*. It signs in (or
+registers, or redeems an invite), checks the server actually answers before touching anything,
+writes `desktop.toml` and restarts the app onto it. Every vault on the machine then goes up as
+its own vault, notes, history and attachments included — a vault nobody owns is claimed by the
+account that syncs it. Wrong password, unreachable host, untrusted private CA: all reported in
+the dialog rather than discovered after a restart that syncs nothing. If a vault id already
+belongs to somebody else, the server's refusal is shown in the window instead of being swallowed
+by the loopback socket.
+
+**Or fold one vault into another**: *Merge a vault into another…* in the palette moves every
+note of one vault into a folder of the other — **keeping their ids**, their history and their
+attachments, so links and backlinks still resolve — and then erases the vault they came from,
+here and on the server. It shows the plan first: where each note lands, which names collided and
+were numbered, which attachments are copied, renamed (with the notes that point at them
+rewritten) or already identical. A vault whose server is unreachable refuses to be merged away,
+since the last step is deleting it there.
 
 ## Accounts and access
 
@@ -127,9 +162,11 @@ pandoc.
 `lemmate-desktop` reads `desktop.toml` from the per-user configuration directory
 (`~/.config/lemmate`, `~/Library/Application Support/lemmate`, `%APPDATA%\lemmate`;
 `LEMMATE_CONFIG_DIR` overrides); without one it opens a setup screen
-(notes folder, server, optional account) and writes it. That folder is a *root*: every vault the
-account can read is opened in its own subfolder below it, `vault_dir` still opens exactly one. Sessions come from `lemmate login` or the
-setup screen. The window is the web client served by the embedded relay, so it works offline.
+(notes folder, and an optional server with its account) and writes it. That folder is a *root*:
+every vault the account can read is opened in its own subfolder below it — standalone, the
+subfolders that are there — and `vault_dir` still opens exactly one. Sessions come from
+`lemmate login` or the setup screen. The window is the web client served by the embedded relay,
+so it works offline, and with no server at all.
 
 ## `lemmate sync`
 
@@ -174,6 +211,7 @@ cargo run -p lemmate-cli -- doctor
 cargo run -p lemmate-cli -- index corpus/basic.md --json
 cargo run -p lemmate-cli -- search /path/to/vault "quick fox"
 cargo run -p lemmate-cli -- sync --vault /path/to/vault --server http://127.0.0.1:8080 --once
+cargo run -p lemmate-cli -- serve --root /path/to/notes --web-dir ui/dist   # no server at all
 cargo run -p lemmate-server -- --data-dir ./data        # http://127.0.0.1:8080/healthz
 cargo run -p lemmate-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
 (cd ui && npm install && npm test)                    # TypeScript side of the corpus test

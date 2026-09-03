@@ -26,6 +26,28 @@ already on disk open whether or not the server answers, which is what makes the 
 offline. The folder ↔ vault binding is the sidecar, never the folder name, so a folder you
 rename yourself keeps working and is never renamed back.
 
+**A server is optional** (SPEC §3.2). Leave `server_url` out and the shell runs *standalone*:
+the folders under the root are the vaults, no connection is made, and the relay answers
+everything the UI asks — search, backlinks, tags, trash, history, daily notes, import, export,
+attachments — from the sidecar, as it already does offline. Sharing and accounts are the
+server's, so the UI does not offer them; the status line says `local` instead of `online`.
+
+**Merging vaults** (*Merge a vault into another…*) is the relay's, not this crate's: it is the
+one thing that holds two engines at once, so `POST /api/v1/local/merge` surveys both, plans the
+move, copies the files across and retires the source — which deletes itself on the server too if
+it had one. The shell only notices that a vault it opened has gone: the engine's task ends, and
+`vaults::plan` finds one fewer folder on the next launch.
+
+**Connecting one later** is a command in the UI (*Connect a server…*), and this crate is the
+half that answers it. The relay carries the request out through `LocalHandle::connect` — it only
+offers the endpoint at all when `LocalOptions::config_path` names a file — and `watch_for_connect`
+signs in, asks the server which vaults the account can read (proving the URL, the token and the
+CA before anything is written), records the server in `desktop.toml` with `Config::set_server`,
+and calls `AppHandle::restart`. The engines were built from the old configuration and cannot be
+given a server in place; the restart keeps the same arguments, so the app comes back on the file
+it just wrote. The HTTP answer goes out half a second before the process does, so the dialog
+that asked shows "connected" rather than a dropped connection.
+
 **New vault** in the tree mints its id in the browser and speaks it over the socket — there is
 no REST call to intercept — so the relay holds those frames, opens a folder and an engine for
 the vault, and carries on. That is what `vault_root` in `LocalOptions` is for; a shell pointed
@@ -43,7 +65,7 @@ Tauri managed state and `abort()`ed on `RunEvent::Exit`.
 
 ```toml
 root_dir   = "/home/you/lemmate"            # required — one folder per vault goes in here
-server_url = "https://notes.example.org"    # required — server base URL
+server_url = "https://notes.example.org"    # optional — omit to run standalone
 ca_cert    = "/etc/ssl/private-ca.pem"      # optional: trust a private CA for wss:// / https://
 web_dir    = "/path/to/ui/dist"             # optional: override the web assets the relay serves
 ```
@@ -65,20 +87,26 @@ Every key has a flag that overrides it, and most have an environment variable:
 | `--ca-cert FILE` | `LEMMATE_CA_CERT` | `ca_cert` |
 | `--web-dir DIR` | `LEMMATE_WEB_DIR` | `web_dir` |
 
-Without a usable configuration the app opens a **setup screen** in the window (notes folder,
-server, optional account) and writes this file for you; the flags above still override it. The
-screen never asks for a vault id: which vaults you have is the server's answer, not yours to
-type.
+Without a usable configuration — meaning no folder for the notes, with or without a server —
+the app opens a **setup screen** in the window (notes folder, and *Sync with a server* with the
+URL and optional account behind it) and writes this file for you; the flags above still override
+it. The screen never asks for a vault id: which vaults you have is the server's answer, not
+yours to type, and standalone it is whatever is under the root.
 
 ## Running in development
 
 ```sh
 (cd ui && npm install && npm run build)     # the relay serves ui/dist; build it first
-cargo run -p lemmate-server -- --data-dir ./data
+cargo run -p lemmate-desktop -- --root-dir /path/to/notes            # standalone
+
+cargo run -p lemmate-server -- --data-dir ./data                     # …or with a server
 cargo run -p lemmate-desktop -- --root-dir /path/to/notes --server-url http://127.0.0.1:8080
 
 RUST_LOG=info cargo run -p lemmate-desktop    # …with the config file instead of flags
 ```
+
+`lemmate serve --root /path/to/notes --web-dir ui/dist` is the same standalone relay without
+the Tauri window, which is the quickest way to exercise it in a browser.
 
 ## Web assets
 

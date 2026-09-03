@@ -22,6 +22,7 @@ pub mod ids;
 pub mod import;
 pub mod local;
 pub mod markdown;
+pub mod merge;
 pub mod pandoc;
 pub mod paths;
 pub mod projection;

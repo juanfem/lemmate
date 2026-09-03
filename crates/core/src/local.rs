@@ -85,6 +85,22 @@ pub enum LocalQuery {
     Import {
         files: Vec<(String, Vec<u8>)>,
     },
+    // Merging one vault into another (SPEC §3.2, `crate::merge`). The relay drives both
+    // engines: it surveys them, moves the files across one at a time, and retires the source.
+    /// What this vault holds, by path — the input to [`crate::merge::plan`].
+    Survey,
+    /// Read one vault-relative file as bytes.
+    ReadFile(String),
+    /// Write one vault-relative file. A note path is processed immediately, so the destination
+    /// adopts the id in its front matter before the next one arrives; anything else is left for
+    /// the note that references it to pick up.
+    WriteFile {
+        path: String,
+        bytes: Vec<u8>,
+    },
+    /// Delete this vault's files and its sidecar, and stop. There is no undo: the caller has
+    /// copied everything somewhere else first.
+    Retire,
 }
 
 pub enum LocalReply {
@@ -110,6 +126,21 @@ pub enum LocalReply {
         hash: String,
     },
     Imported(UploadReport),
+    Survey {
+        name: Option<String>,
+        notes: Vec<(NoteId, String)>,
+        attachments: Vec<(String, String)>,
+        /// Why this vault cannot be merged away right now, if it cannot: a vault that syncs
+        /// with a server has to be deleted there too, and that needs the server.
+        blocked: Option<String>,
+    },
+    File(Option<Vec<u8>>),
+    /// What retiring a vault left behind: files the vault did not know about (so they were not
+    /// copied anywhere), and whether the folder itself is gone.
+    Retired {
+        left: Vec<String>,
+        folder_removed: bool,
+    },
     Error(String),
 }
 
@@ -121,6 +152,10 @@ pub struct LocalOptions {
     /// Where a vault the UI creates gets its folder (SPEC §9). `None` — the default — means a
     /// relay with a fixed set of vaults: frames for any other vault are dropped, as before.
     pub vault_root: Option<PathBuf>,
+    /// The configuration file this shell will rewrite if the UI asks to connect a server
+    /// (SPEC §3.2). `None` — a relay configured by flags, like `lemmate serve` — cannot be
+    /// reconfigured from the page, and `POST /api/v1/local/connect` says so.
+    pub config_path: Option<PathBuf>,
 }
 
 /// A loopback port for `vault_dir`, the same one every time.
@@ -167,6 +202,15 @@ pub(crate) struct LocalState {
     routes: Arc<Routes>,
     /// Where a request to open an unknown vault goes; `None` on a relay with a fixed set.
     wanted: Option<mpsc::UnboundedSender<VaultId>>,
+    /// The server the engines behind this relay sync with, or `None` when they are standalone
+    /// (SPEC §3.2). What the UI does with it is cosmetic — a standalone app has no "offline" to
+    /// report and no account to name — but it is the only way for a page served on loopback to
+    /// tell the two apart.
+    upstream: Option<String>,
+    /// Set when the shell can rewrite its configuration; see [`LocalOptions::config_path`].
+    config_path: Option<PathBuf>,
+    /// Where a request to connect a server goes, and `None` when nothing is listening.
+    connect: Option<mpsc::UnboundedSender<ConnectAsk>>,
     next_peer: AtomicU64,
 }
 
@@ -242,6 +286,18 @@ impl LocalState {
             },
         };
         self.send_to(vault, LocalEvent::PeerFrame { id: peer, bytes });
+    }
+}
+
+impl LocalState {
+    /// Stop routing to a vault: its engine has retired (merged into another) and is about to
+    /// return. The counterpart of [`Registrar::add`].
+    fn forget(&self, vault: VaultId) {
+        if let Ok(mut engines) = self.engines.write() {
+            engines.retain(|e| e.vault != vault);
+        }
+        // Claiming nothing for it drops every note the routing table had under this vault.
+        self.routes.claim(vault, &HashSet::new());
     }
 }
 
@@ -357,11 +413,21 @@ pub(crate) struct Served {
     pub routes: Arc<Routes>,
     /// Vaults a UI has created and the relay does not hold yet.
     pub wanted: Option<mpsc::UnboundedReceiver<VaultId>>,
+    /// Requests from the UI to give this standalone app a server; `None` when the shell named
+    /// no configuration file to write.
+    pub connect: Option<mpsc::UnboundedReceiver<ConnectAsk>>,
     pub registrar: Registrar,
 }
 
 /// Bind the relay and start serving one engine per vault; each engine must drain its receiver.
-pub(crate) async fn serve(opts: &LocalOptions, vault_ids: &[VaultId]) -> Result<Served> {
+///
+/// `upstream` is the server those engines sync with, if any; it is reported to the UI on
+/// `GET /api/v1/local/setup` and used for nothing else here.
+pub(crate) async fn serve(
+    opts: &LocalOptions,
+    vault_ids: &[VaultId],
+    upstream: Option<String>,
+) -> Result<Served> {
     let mut engines = Vec::with_capacity(vault_ids.len());
     let mut events = Vec::with_capacity(vault_ids.len());
     for vault in vault_ids {
@@ -371,11 +437,16 @@ pub(crate) async fn serve(opts: &LocalOptions, vault_ids: &[VaultId]) -> Result<
     }
     let routes = Arc::new(Routes::default());
     let (wanted_tx, wanted_rx) = mpsc::unbounded_channel();
+    let (connect_tx, connect_rx) = mpsc::unbounded_channel();
+    let reconfigurable = opts.config_path.is_some();
     let state = Arc::new(LocalState {
         engines: RwLock::new(engines),
         peers: RwLock::new(HashMap::new()),
         routes: routes.clone(),
         wanted: opts.vault_root.is_some().then_some(wanted_tx),
+        upstream,
+        config_path: opts.config_path.clone(),
+        connect: reconfigurable.then_some(connect_tx),
         next_peer: AtomicU64::new(1),
     });
     let registrar = Registrar(state.clone());
@@ -385,6 +456,8 @@ pub(crate) async fn serve(opts: &LocalOptions, vault_ids: &[VaultId]) -> Result<
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/local/setup", get(configured))
+        .route("/api/v1/local/connect", axum::routing::post(connect_server))
+        .route("/api/v1/local/merge", axum::routing::post(merge_vaults))
         .route("/api/v1/vaults", get(vaults))
         .route("/api/v1/search", get(search_all))
         .route("/api/v1/vaults/{vault}/notes", get(notes).post(create_note))
@@ -423,6 +496,7 @@ pub(crate) async fn serve(opts: &LocalOptions, vault_ids: &[VaultId]) -> Result<
         task,
         routes,
         wanted: opts.vault_root.is_some().then_some(wanted_rx),
+        connect: reconfigurable.then_some(connect_rx),
         registrar,
     })
 }
@@ -922,14 +996,19 @@ pub(crate) fn err_reply(e: Error) -> LocalReply {
 
 // ---- First-run setup (SPEC §14 desktop) -------------------------------------------------------
 
-/// What the desktop shell needs before it can start the engines.
+/// What the desktop shell needs before it can start the engines: a folder, and — only if the
+/// notes are to sync — a server.
 ///
-/// No vault is named: the shell opens every vault the account can read, one folder each under
-/// `root_dir` (SPEC §9). Which vaults those are is the server's answer, not the user's to type.
+/// No vault is named. With a server the shell opens every vault the account can read, one
+/// folder each under `root_dir` (SPEC §9), and which vaults those are is the server's answer,
+/// not the user's to type; standalone, it opens whatever folders are under the root and creates
+/// one on a first run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetupRequest {
     pub root_dir: String,
-    pub server_url: String,
+    /// `None` (or empty) sets the app up standalone: no server, no account, nothing on the wire.
+    #[serde(default)]
+    pub server_url: Option<String>,
     #[serde(default)]
     pub ca_cert: Option<String>,
     /// Sign in (or register) on the server and save the token before starting.
@@ -1008,8 +1087,12 @@ async fn setup_submit(
     State(s): State<Arc<SetupState>>,
     axum::Json(req): axum::Json<SetupRequest>,
 ) -> StatusCode {
-    if req.root_dir.trim().is_empty()
-        || !(req.server_url.starts_with("http://") || req.server_url.starts_with("https://"))
+    if req.root_dir.trim().is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    // A server is optional, but a half-typed one is a mistake, not a request to go standalone.
+    if let Some(url) = req.server_url.as_deref().map(str::trim).filter(|u| !u.is_empty())
+        && !(url.starts_with("http://") || url.starts_with("https://"))
     {
         return StatusCode::BAD_REQUEST;
     }
@@ -1022,9 +1105,196 @@ async fn setup_submit(
     }
 }
 
-/// On a configured relay, the UI asks the same endpoint and gets `configured: true`.
-pub(crate) async fn configured() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({ "configured": true }))
+/// On a configured relay, the UI asks the same endpoint and gets `configured: true`, plus the
+/// mode it is running in: `"local"` for a standalone app, `"synced"` for one with a server.
+///
+/// `can_connect` says whether `POST /api/v1/local/connect` will be listened to, so the UI only
+/// offers "connect a server" where there is a configuration file to write it into.
+pub(crate) async fn configured(State(s): State<Arc<LocalState>>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "configured": true,
+        "mode": if s.upstream.is_some() { "synced" } else { "local" },
+        "server": s.upstream,
+        "can_connect": s.connect.is_some(),
+        "config_path": s.config_path.as_ref().map(|p| p.display().to_string()),
+    }))
+}
+
+// ---- Merging one vault into another (SPEC §3.2) -----------------------------------------------
+
+/// Fold `from` into `into`, both held by this relay.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MergeRequest {
+    pub from: String,
+    pub into: String,
+    /// Folder inside the destination for the source's tree; `null` uses the source vault's
+    /// name, `""` merges at the destination's root.
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Work out the plan and change nothing. The dialog asks for this first.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MergeResponse {
+    plan: crate::merge::MergePlan,
+    applied: bool,
+    /// Files the retired folder still held — nothing the vault knew about, so nothing that was
+    /// copied — and whether the folder itself is gone.
+    left: Vec<String>,
+    folder_removed: bool,
+}
+
+/// The whole operation, in the order that makes it safe: survey, plan, copy, and only then
+/// destroy. Anything that fails before the last step leaves both vaults exactly as they were.
+async fn merge_vaults(
+    State(s): State<Arc<LocalState>>,
+    axum::Json(req): axum::Json<MergeRequest>,
+) -> std::result::Result<axum::Json<MergeResponse>, (StatusCode, String)> {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_owned());
+    let from: VaultId = req.from.parse().map_err(|_| bad("`from` is not a vault id"))?;
+    let into: VaultId = req.into.parse().map_err(|_| bad("`into` is not a vault id"))?;
+    if from == into {
+        return Err(bad("a vault cannot be merged into itself"));
+    }
+    let fail = |e: StatusCode| (e, "the vaults could not be read".to_owned());
+    let LocalReply::Survey { name, notes, attachments, blocked } =
+        ask(&s, &req.from, LocalQuery::Survey).await.map_err(fail)?
+    else {
+        return Err(fail(StatusCode::INTERNAL_SERVER_ERROR));
+    };
+    // Refused here, before anything is copied: the alternative is a merge that half-happens.
+    if let Some(why) = blocked {
+        return Err((StatusCode::CONFLICT, why));
+    }
+    let source = crate::merge::Survey { notes, attachments };
+    let source_name = name;
+    let LocalReply::Survey { notes, attachments, .. } =
+        ask(&s, &req.into, LocalQuery::Survey).await.map_err(fail)?
+    else {
+        return Err(fail(StatusCode::INTERNAL_SERVER_ERROR));
+    };
+    let dest = crate::merge::Survey { notes, attachments };
+
+    let folder =
+        req.folder.clone().unwrap_or_else(|| crate::merge::default_folder(source_name.as_deref(), from));
+    let plan = crate::merge::plan(from, into, &folder, &source, &dest);
+    if req.dry_run {
+        return Ok(axum::Json(MergeResponse {
+            plan,
+            applied: false,
+            left: Vec::new(),
+            folder_removed: false,
+        }));
+    }
+
+    // Attachments first: a note is indexed the moment it lands, and an image already in place
+    // is one the destination records straight away instead of on the next sweep.
+    let moved = |e: StatusCode| (e, "the files could not be copied".to_owned());
+    for a in plan.attachments.iter().filter(|a| a.fate != crate::merge::AttachmentFate::Same) {
+        let LocalReply::File(Some(bytes)) =
+            ask(&s, &req.from, LocalQuery::ReadFile(a.from.clone())).await.map_err(moved)?
+        else {
+            // The vault doc names a file this disk does not have; the notes still point at the
+            // hash, and a synced destination will fetch it from the server.
+            tracing::warn!(path = %a.from, "attachment missing while merging");
+            continue;
+        };
+        let reply =
+            ask(&s, &req.into, LocalQuery::WriteFile { path: a.to.clone(), bytes }).await.map_err(moved)?;
+        if let LocalReply::Conflict(p) = reply {
+            return Err((StatusCode::CONFLICT, format!("{p} already exists in the destination")));
+        }
+    }
+
+    let rewrites = plan.attachment_rewrites();
+    for n in &plan.notes {
+        let LocalReply::File(Some(bytes)) =
+            ask(&s, &req.from, LocalQuery::ReadFile(n.from.clone())).await.map_err(moved)?
+        else {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{} could not be read", n.from)));
+        };
+        // Only the notes moving with the attachment need rewriting, and only where one had to
+        // be renamed; `rewrite_references` is a no-op otherwise.
+        let text = String::from_utf8(bytes)
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, format!("{} is not text", n.from)))?;
+        let text = crate::merge::rewrite_references(&text, &rewrites);
+        let reply =
+            ask(&s, &req.into, LocalQuery::WriteFile { path: n.to.clone(), bytes: text.into_bytes() })
+                .await
+                .map_err(moved)?;
+        if let LocalReply::Conflict(p) = reply {
+            return Err((StatusCode::CONFLICT, format!("{p} already exists in the destination")));
+        }
+    }
+
+    // Everything is somewhere else now, so the source can go.
+    let LocalReply::Retired { left, folder_removed } =
+        ask(&s, &req.from, LocalQuery::Retire).await.map_err(|e| (e, "the merge did not finish".into()))?
+    else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "the source vault would not retire".into()));
+    };
+    s.forget(from);
+    tracing::info!(%from, %into, notes = plan.notes.len(), "merged");
+    Ok(axum::Json(MergeResponse { plan, applied: true, left, folder_removed }))
+}
+
+// ---- Connecting a standalone app to a server (SPEC §3.2) --------------------------------------
+
+/// What the UI sends to give a running standalone app a server.
+///
+/// The account is optional the same way it is at setup: a server started with `--no-auth` wants
+/// none, and a token saved earlier by `lemmate login` is used when no password is given.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectRequest {
+    pub server_url: String,
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub register: bool,
+    #[serde(default)]
+    pub invite: Option<String>,
+}
+
+/// One such request, with the channel the shell answers on.
+///
+/// The shell is the half that can sign in and rewrite the configuration file, and it is also
+/// the half that knows whether that worked — so the HTTP response waits for it, and the dialog
+/// can say "wrong password" instead of leaving the user to guess why nothing changed.
+#[derive(Debug)]
+pub struct ConnectAsk {
+    pub request: ConnectRequest,
+    pub reply: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+async fn connect_server(
+    State(s): State<Arc<LocalState>>,
+    axum::Json(request): axum::Json<ConnectRequest>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    let url = request.server_url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err((StatusCode::BAD_REQUEST, "the server URL must start with http:// or https://".into()));
+    }
+    let Some(tx) = &s.connect else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "this app has no configuration file to write a server into".into(),
+        ));
+    };
+    let (reply, answer) = oneshot::channel();
+    if tx.send(ConnectAsk { request, reply }).is_err() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "the app is no longer listening".into()));
+    }
+    match answer.await {
+        Ok(Ok(())) => Ok(StatusCode::ACCEPTED),
+        Ok(Err(msg)) => Err((StatusCode::BAD_GATEWAY, msg)),
+        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "the app stopped before answering".into())),
+    }
 }
 
 #[cfg(test)]
@@ -1048,6 +1318,37 @@ mod tests {
     fn stable_port_derivation_is_pinned() {
         // A path that cannot exist, so `canonicalize` fails and the raw bytes are hashed.
         assert_eq!(stable_port(std::path::Path::new("/nonexistent-vault-for-tests")), 54678);
+    }
+
+    /// Setting up with no server at all: the standalone app (SPEC §3.2).
+    #[tokio::test]
+    async fn setup_accepts_a_configuration_with_no_server() {
+        let (addr, rx, task) = serve_setup(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            PathBuf::from("/tmp/x.toml"),
+            PathBuf::from("/home/me/notes"),
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{addr}");
+        let code = tokio::task::spawn_blocking(move || {
+            match ureq::post(format!("{base}/api/v1/local/setup"))
+                .header("content-type", "application/json")
+                .send(serde_json::json!({"root_dir": "/v"}).to_string().as_bytes())
+            {
+                Ok(r) => r.status().as_u16(),
+                Err(ureq::Error::StatusCode(c)) => c,
+                Err(e) => panic!("{e}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, 202);
+        let req = rx.await.unwrap();
+        assert_eq!(req.root_dir, "/v");
+        assert_eq!(req.server_url, None, "no server means standalone, not a default one");
+        task.abort();
     }
 
     #[tokio::test]
@@ -1110,6 +1411,11 @@ mod tests {
             })
         };
         assert_eq!(submit(serde_json::json!({"root_dir": "", "server_url": "x"})).await.unwrap(), 400);
+        // The server is optional now, but a half-typed one is still a mistake.
+        assert_eq!(
+            submit(serde_json::json!({"root_dir": "/v", "server_url": "notaurl"})).await.unwrap(),
+            400
+        );
         assert_eq!(
             submit(
                 serde_json::json!({"root_dir": "/v", "server_url": "https://s.example", "register": true})

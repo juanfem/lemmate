@@ -60,7 +60,8 @@
     onClose: (id: string) => void
     onFocus: () => void
     onBookmark: () => void
-    onShare: () => void
+    /** Absent where sharing has nowhere to happen — a vault held by a local relay. */
+    onShare?: () => void
     onRename: () => void
     onDelete: () => void
     onOpen: (id: string) => void
@@ -94,7 +95,7 @@
   // sets are cheap enough to render and let CSS pick.
   let menu: MenuState | null = $state(null)
   let moreItems = $derived([
-    ...(session?.noteOnly ? [] : [{ label: 'Share…', run: onShare }]),
+    ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
     { label: 'Rename / move…', run: onRename },
     { label: '', separator: true },
     { label: 'Move to trash', danger: true, run: onDelete },
@@ -158,7 +159,7 @@
         </span>
         <button onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
         <span class="wide-actions">
-          {#if !session.noteOnly}<button onclick={onShare} title="Share">Share</button>{/if}
+          {#if !session.noteOnly && onShare}<button onclick={onShare} title="Share">Share</button>{/if}
           <button onclick={onRename} title="Rename / move">Rename</button>
           <button onclick={onDelete} title="Move to trash">Delete</button>
         </span>

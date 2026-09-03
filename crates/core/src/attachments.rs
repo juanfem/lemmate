@@ -98,6 +98,16 @@ impl AttachmentStore {
         }
     }
 
+    /// Drop a whole vault's blobs, for a vault that has stopped existing (SPEC §3.2: merged
+    /// into another). Missing is fine — a vault that never had an attachment has no directory.
+    pub fn remove_vault(&self, vault: VaultId) -> Result<()> {
+        match fs::remove_dir_all(self.root.join(vault.to_string())) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn remove(&self, vault: VaultId, hash: &str) -> Result<()> {
         match fs::remove_file(self.path_for(vault, hash)?) {
             Ok(()) => Ok(()),

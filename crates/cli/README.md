@@ -6,8 +6,22 @@ API, and an MCP server for agents. See [SPEC.md](../../SPEC.md) §13 for the con
 ## CLI and MCP
 
 Local commands work on a directory (`index`, `search`, `import obsidian`, `export zip`,
-`doctor`) or keep one in sync with a server (`sync`); they are documented in the
-[repository README](../../README.md).
+`doctor`), keep one in sync with a server (`sync`), or run a whole workspace with no server at
+all (`serve`); they are documented in the [repository README](../../README.md).
+
+```sh
+lemmate serve --root ~/lemmate --web-dir ui/dist   # standalone: relay + web client on loopback
+```
+
+`serve` opens every vault folder under the root (making one on a first run), binds the root's
+stable loopback port unless `--bind` says otherwise, and runs until interrupted. It is the
+desktop app without the window: the same engines, projection, search and API, and nothing on
+the network (SPEC §3.2).
+
+It is configured by flags and has no file to rewrite, so the UI's *Connect a server…* is not
+offered here (`POST /api/v1/local/connect` answers 501) — to sync this folder, run `lemmate
+login` and then `lemmate sync --vault <dir> --server <url> --serve <addr>`, which is the same
+relay with a server behind it.
 
 The commands below talk to a server over `/api/v1` instead, so nothing is projected to disk.
 They all take the same connection options:

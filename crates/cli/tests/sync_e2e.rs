@@ -25,7 +25,7 @@ async fn start_server() -> (String, Arc<AppState>, tempfile::TempDir) {
 fn opts(dir: &Path, server: &str, vault_id: Option<VaultId>) -> SyncOptions {
     SyncOptions {
         vault_dir: dir.to_path_buf(),
-        server_url: server.to_owned(),
+        server_url: Some(server.to_owned()),
         vault_id,
         once: true,
         ca_cert: None,

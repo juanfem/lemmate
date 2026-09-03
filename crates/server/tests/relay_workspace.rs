@@ -32,7 +32,7 @@ async fn relay(server: SocketAddr, dirs: &[&Path], root: Option<&Path>) -> Local
         .iter()
         .map(|dir| SyncOptions {
             vault_dir: dir.to_path_buf(),
-            server_url: format!("http://{server}"),
+            server_url: Some(format!("http://{server}")),
             vault_id: None,
             once: false,
             ca_cert: None,
@@ -43,6 +43,7 @@ async fn relay(server: SocketAddr, dirs: &[&Path], root: Option<&Path>) -> Local
         bind: "127.0.0.1:0".parse().unwrap(),
         web_dir: None,
         vault_root: root.map(Path::to_path_buf),
+        config_path: None,
     };
     start_many(opts, local).await.unwrap()
 }

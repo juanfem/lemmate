@@ -45,12 +45,18 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const UPLOAD_RETRY: Duration = Duration::from_secs(5);
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Sidecar marker: attachments were recorded while standalone, so their bytes have never been
+/// offered to a server. Set when [`Engine::flush_uploads`] records one, cleared once a
+/// connected run has uploaded them all (SPEC §3.2, "a server is optional").
+const ATTACHMENTS_LOCAL_ONLY: &str = "attachments_local_only";
 
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
     pub vault_dir: PathBuf,
-    /// `http://host:port` or `https://host:port`; `/ws` is appended.
-    pub server_url: String,
+    /// `http://host:port` or `https://host:port`; `/ws` is appended. `None` is a **standalone**
+    /// vault (SPEC §3.2): the engine keeps the projection, the sidecar and the local relay, and
+    /// nothing goes on the wire.
+    pub server_url: Option<String>,
     /// Required to join an existing vault into an empty directory; otherwise taken from the
     /// sidecar, or generated for a brand-new vault.
     pub vault_id: Option<VaultId>,
@@ -87,6 +93,10 @@ pub struct LocalHandle {
     /// The vaults this relay served at startup, in the order they were opened. A vault created
     /// later by a UI is not listed here; ask the relay (`GET /api/v1/vaults`) for the live set.
     pub vaults: Vec<VaultId>,
+    /// Requests from the UI to give this app a server (SPEC §3.2), for a shell that named a
+    /// configuration file to write; `None` for one that cannot be reconfigured from the page.
+    /// Taken by the shell, which owns both halves of that job — signing in, and the file.
+    pub connect: Option<mpsc::UnboundedReceiver<crate::local::ConnectAsk>>,
     /// Behind a lock because the set grows: opening a vault a UI created adds an engine.
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<Result<SyncReport>>>>>,
     supervisor: Option<tokio::task::JoinHandle<()>>,
@@ -94,6 +104,16 @@ pub struct LocalHandle {
 }
 
 impl LocalHandle {
+    /// Run until the relay's listener stops — which is never, short of a bind error, so this is
+    /// how a shell says "serve until I am killed".
+    ///
+    /// Not [`LocalHandle::wait`]: engines come and go under a running relay. One is added when
+    /// the UI creates a vault, and one *ends* when a vault is merged away (SPEC §3.2), and the
+    /// first engine finishing is no reason to take the other vaults down with it.
+    pub async fn serve_forever(self) -> Result<()> {
+        self.server.await.map_err(|e| Error::Sync(e.to_string()))
+    }
+
     /// Wait for the first engine to finish. Only meaningful in `once` mode, which is only ever
     /// used with a single vault.
     pub async fn wait(self) -> Result<SyncReport> {
@@ -137,7 +157,8 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
     }
     let vaults: Vec<VaultId> = engines.iter().map(|e| e.vault_id).collect();
     let template = opts[0].clone();
-    let served = crate::local::serve(&local, &vaults).await?;
+    let upstream = opts.iter().find_map(|o| o.server_url.clone());
+    let served = crate::local::serve(&local, &vaults, upstream).await?;
     info!(addr = %served.addr, vaults = vaults.len(), "local relay listening");
     let tasks: Vec<_> = engines
         .into_iter()
@@ -172,7 +193,15 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
         }
         _ => None,
     };
-    Ok(LocalHandle { addr: served.addr, vault_id: vaults[0], vaults, tasks, supervisor, server: served.task })
+    Ok(LocalHandle {
+        addr: served.addr,
+        vault_id: vaults[0],
+        vaults,
+        connect: served.connect,
+        tasks,
+        supervisor,
+        server: served.task,
+    })
 }
 
 /// Open a vault a local UI has just created: a folder under `root`, an engine on it, and a
@@ -243,15 +272,20 @@ async fn run_inner(
         }
     });
 
-    let ws_url = ws_url(&opts.server_url)?;
+    let Some(server_url) = opts.server_url.clone() else {
+        return run_standalone(engine, &opts, local_rx, fs_rx).await;
+    };
+    let ws_url = ws_url(&server_url)?;
     let ca = opts.ca_cert.as_deref();
     let tls = if ws_url.starts_with("wss://") { Some(crate::tls::client_config(ca)?) } else { None };
     let agent = crate::tls::http_agent(ca)?;
+    // Kept for the retirement path below; the transfer worker takes the original.
+    let retire_agent = agent.clone();
     let (job_tx, job_rx) = mpsc::unbounded_channel::<TransferJob>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TransferDone>();
     tokio::spawn(transfer_worker(
         agent,
-        http_url(&opts.server_url)?,
+        http_url(&server_url)?,
         opts.token.clone(),
         engine.vault_id,
         engine.proj.root().to_path_buf(),
@@ -291,7 +325,31 @@ async fn run_inner(
                         ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
                         done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
                         ev = local_rx.recv(), if local_alive => match ev {
-                            Some(ev) => engine.on_local_event(ev),
+                            Some(ev) => {
+                                engine.on_local_event(ev);
+                                if engine.retiring {
+                                    let report = engine.report();
+                                    engine.on_disconnect();
+                                    writer.abort();
+                                    // Only now, with nothing of ours still able to arrive on
+                                    // that socket and re-create what we are about to delete.
+                                    let (base, token, vault) =
+                                        (http_url(&server_url)?, opts.token.clone(), engine.vault_id);
+                                    let agent = retire_agent.clone();
+                                    let deleted = tokio::task::spawn_blocking(move || {
+                                        delete_vault_upstream(&agent, &base, token.as_deref(), vault)
+                                    })
+                                    .await;
+                                    match deleted {
+                                        Ok(Ok(())) => info!(vault = %report.vault_id, "vault deleted on the server"),
+                                        Ok(Err(e)) => warn!(vault = %report.vault_id, %e,
+                                            "merged locally, but the server still holds this vault — delete it there \
+                                             or it comes back on the next launch"),
+                                        Err(e) => warn!(%e, "deleting the vault on the server"),
+                                    }
+                                    return Ok(report);
+                                }
+                            }
                             None => local_alive = false,
                         },
                         _ = ticker.tick() => {
@@ -334,13 +392,92 @@ async fn run_inner(
                 ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
                 done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
                 ev = local_rx.recv(), if local_alive => match ev {
-                    Some(ev) => engine.on_local_event(ev),
+                    Some(ev) => {
+                        engine.on_local_event(ev);
+                        if engine.retiring {
+                            return Ok(engine.report());
+                        }
+                    }
                     None => local_alive = false,
                 },
                 _ = tokio::time::sleep(TICK) => engine.tick()?,
             }
         }
         backoff = (backoff * 2).min(RECONNECT_MAX);
+    }
+}
+
+/// The loop for a vault with no server (SPEC §3.2): the projection, the watcher, the local
+/// relay and the journal, and nothing on the wire.
+///
+/// It is the offline arm of [`run_inner`] without the deadline that ends it — there is no
+/// connection to come back and no transfer worker, since a standalone vault's attachments never
+/// leave this disk. `--once` still means "settle and report", which here is the moment the
+/// debounced filesystem work has drained.
+async fn run_standalone(
+    mut engine: Engine,
+    opts: &SyncOptions,
+    mut local_rx: mpsc::UnboundedReceiver<LocalEvent>,
+    mut fs_rx: mpsc::UnboundedReceiver<FsEvent>,
+) -> Result<SyncReport> {
+    info!(vault = %engine.vault_id, "standalone: no server configured");
+    let mut local_alive = true;
+    let mut idle_since: Option<Instant> = None;
+    // An interval, not a `sleep` per iteration: the debounced work — projection, indexing,
+    // attachment bookkeeping — happens on this tick, and a UI busy enough to have an event
+    // ready every time round would otherwise keep pushing the deadline away and starve it.
+    let mut ticker = tokio::time::interval(TICK);
+    loop {
+        tokio::select! {
+            ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
+            ev = local_rx.recv(), if local_alive => match ev {
+                Some(ev) => {
+                    engine.on_local_event(ev);
+                    if engine.retiring {
+                        return Ok(engine.report());
+                    }
+                }
+                None => local_alive = false,
+            },
+            _ = ticker.tick() => {
+                engine.tick()?;
+                if let Some(msg) = engine.fatal.take() {
+                    return Err(Error::Sync(msg));
+                }
+                if opts.once {
+                    if engine.is_idle() {
+                        let since = *idle_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= FS_DEBOUNCE {
+                            return Ok(engine.report());
+                        }
+                    } else {
+                        idle_since = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Delete a vault on the server, which is how a merged-away vault stops existing for every
+/// other client (SPEC §3.2). Called once the engine's socket is closed, so nothing it sent can
+/// arrive afterwards and re-create the doc.
+fn delete_vault_upstream(agent: &ureq::Agent, base: &str, token: Option<&str>, vault: VaultId) -> Result<()> {
+    let mut req = agent.delete(format!("{}/api/v1/vaults/{vault}", base.trim_end_matches('/')));
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    req.call().map_err(|e| Error::Sync(e.to_string()))?;
+    Ok(())
+}
+
+/// Remove empty directories under `root`, deepest first, so a retired vault does not leave a
+/// skeleton of the tree it used to have. `root` itself is left to the caller.
+fn prune_empty_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        prune_empty_dirs(&dir);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
 
@@ -536,6 +673,11 @@ pub struct Engine {
     policy: RetentionPolicy,
     last_maintenance: Instant,
     once: bool,
+    /// No server to sync with: nothing waits on a connection (see [`SyncOptions::server_url`]).
+    standalone: bool,
+    /// Set by [`Engine::retire`]: this vault has been merged into another and its run loop is
+    /// to end. The relay stops routing to it at the same moment.
+    retiring: bool,
     /// Set in `once` mode when something failed that a retry loop would otherwise hide.
     fatal: Option<String>,
     // Attachments (SPEC §6.3, §7)
@@ -551,6 +693,9 @@ pub struct Engine {
     orphan_check_due: bool,
     // Local relay (SPEC §3.2)
     peers: HashMap<u64, Peer>,
+    /// Docs the server has refused, and the frame it refused them with, so a window opened
+    /// after the refusal is told too — see the `Message::Auth` arm of `try_handle_frame`.
+    denied: HashMap<String, Vec<u8>>,
     /// Note docs a local UI created that have no vault entry yet (the UI writes text first).
     pending_docs: HashMap<NoteId, NoteDoc>,
     /// Where the relay looks up which vault owns a note. `None` for a bare `run` with no relay.
@@ -600,6 +745,8 @@ impl Engine {
             policy: RetentionPolicy::default(),
             last_maintenance: Instant::now(),
             once: opts.once,
+            standalone: opts.server_url.is_none(),
+            retiring: false,
             fatal: None,
             transfers: None,
             in_flight: HashSet::new(),
@@ -609,6 +756,7 @@ impl Engine {
             local_hashes: HashMap::new(),
             orphan_check_due: true,
             peers: HashMap::new(),
+            denied: HashMap::new(),
             pending_docs: HashMap::new(),
             routes: None,
             routes_dirty: true,
@@ -620,7 +768,7 @@ impl Engine {
     }
 
     fn is_idle(&self) -> bool {
-        self.out.is_some()
+        (self.standalone || self.out.is_some())
             && self.handshakes.values().all(|h| *h == Handshake::Done)
             && self.dirty.is_empty()
             && self.pending_fs.is_empty()
@@ -663,6 +811,7 @@ impl Engine {
         for path in self.store.referenced_attachment_paths()? {
             self.want_upload(&path)?;
         }
+        self.backfill_standalone_attachments()?;
         for (path, hash) in self.vault.attachment_entries() {
             if let Some(local) = self.local_hash(&path)?
                 && local != hash
@@ -1017,6 +1166,78 @@ impl Engine {
         Ok(LocalReply::Done)
     }
 
+    // ---- Merging one vault into another (SPEC §3.2) -----------------------------------------
+
+    /// Every attachment a merge has to carry: what the vault doc records, plus what the notes
+    /// reference and this disk actually holds.
+    ///
+    /// The two differ for a moment after an image is added — standalone the entry is written on
+    /// the next tick, and with a server when the upload completes — and a merge that trusted the
+    /// doc alone would leave that file behind and move the note that points at it.
+    fn merge_attachments(&mut self) -> Result<Vec<(String, String)>> {
+        let mut entries: std::collections::BTreeMap<String, String> =
+            self.vault.attachment_entries().into_iter().collect();
+        for path in self.store.referenced_attachment_paths()? {
+            if !entries.contains_key(&path)
+                && let Some(hash) = self.local_hash(&path)?
+            {
+                entries.insert(path, hash);
+            }
+        }
+        Ok(entries.into_iter().collect())
+    }
+
+    /// Take one file from a vault being merged in.
+    ///
+    /// A note is processed straight away, so its front-matter id is adopted before anything else
+    /// arrives and the note is *the same note*, in a new place, rather than a copy. An
+    /// attachment is only written: it becomes an attachment of this vault when a note that
+    /// references it is indexed, which is exactly what happens a moment later.
+    fn merge_write(&mut self, path: &str, bytes: &[u8]) -> Result<LocalReply> {
+        if path.trim().is_empty() || path.contains("..") || path.contains('\\') {
+            return Ok(LocalReply::Conflict(format!("bad path {path}")));
+        }
+        if self.by_path.contains_key(path) {
+            return Ok(LocalReply::Conflict(path.to_owned()));
+        }
+        self.proj.write_bytes(path, bytes)?;
+        if Projection::is_note_path(&self.proj.resolve(path)?) {
+            self.process_path(path)?;
+        }
+        Ok(LocalReply::Done)
+    }
+
+    /// Delete everything this vault owns and stop.
+    ///
+    /// Only what the vault knows about: its notes, and the attachments its doc records. Anything
+    /// else the folder happens to hold is somebody's, not ours, so it stays — and is reported,
+    /// along with whether the folder went with it.
+    fn retire(&mut self) -> Result<LocalReply> {
+        let paths: Vec<String> = self.notes.values().map(|s| s.path.clone()).collect();
+        for path in paths {
+            if let Err(e) = self.proj.remove(&path) {
+                warn!(%path, %e, "removing a merged note");
+            }
+        }
+        // The same list the survey used, so an attachment recorded a moment ago is not left
+        // behind by the vault that no longer exists.
+        for (path, _) in self.merge_attachments()? {
+            let _ = self.proj.remove(&path);
+        }
+        // The sidecar is what makes the folder a vault (SPEC §6.2): with it gone, nothing on
+        // the next launch will open this directory as one.
+        let sidecar = self.proj.sidecar_dir();
+        if sidecar.is_dir() {
+            std::fs::remove_dir_all(&sidecar)?;
+        }
+        self.retiring = true;
+        let left = self.proj.walk_files().unwrap_or_default();
+        prune_empty_dirs(self.proj.root());
+        let folder_removed = std::fs::remove_dir(self.proj.root()).is_ok();
+        info!(vault = %self.vault_id, left = left.len(), folder_removed, "vault retired after a merge");
+        Ok(LocalReply::Retired { left, folder_removed })
+    }
+
     // ---- Attachments ------------------------------------------------------------------------
 
     /// Every local file a note references becomes an attachment: hashed, uploaded when the
@@ -1077,20 +1298,66 @@ impl Engine {
         Ok(())
     }
 
-    fn flush_uploads(&mut self) {
-        if self.out.is_none() || self.upload_retry_after.is_some_and(|t| Instant::now() < t) {
-            return;
+    /// A vault that ran standalone has attachment entries whose bytes no server has ever seen:
+    /// `want_upload` skips them, because the vault doc already names the hash it would upload.
+    /// Now that there is somewhere to send them, queue every one — `PUT` is content-addressed
+    /// and idempotent, so re-sending a blob the server already holds costs one request.
+    ///
+    /// The marker survives a quit halfway through, and clearing it waits for the last upload
+    /// ([`Engine::on_transfer_done`]), so an interrupted backfill simply happens again.
+    fn backfill_standalone_attachments(&mut self) -> Result<()> {
+        if self.standalone || self.store.meta_get(ATTACHMENTS_LOCAL_ONLY)?.is_none() {
+            return Ok(());
         }
-        let Some(tx) = &self.transfers else { return };
+        let mut queued = 0;
+        for (path, hash) in self.vault.attachment_entries() {
+            if self.is_attachment_file(&path)? {
+                self.pending_uploads.insert(path, hash);
+                queued += 1;
+            }
+        }
+        info!(queued, "uploading attachments recorded while standalone");
+        if queued == 0 {
+            self.store.meta_clear(ATTACHMENTS_LOCAL_ONLY)?;
+        }
+        Ok(())
+    }
+
+    fn flush_uploads(&mut self) -> Result<()> {
+        // Standalone: there is nowhere to upload to, so the vault-doc entry an upload would
+        // have written on completion is written here instead, from the file already on disk.
+        // Everything downstream reads that map — the relay's `GET …/attachments/{hash}`, the
+        // reconciliation above, orphan cleanup — so without this an image inserted into a note
+        // would be on disk and invisible to the app.
+        if self.standalone {
+            for (path, hash) in std::mem::take(&mut self.pending_uploads) {
+                self.local_hashes.insert(path.clone(), hash.clone());
+                if self.vault.attachment_hash(&path).as_deref() != Some(hash.as_str()) {
+                    let u = self.vault.set_attachment(&path, &hash);
+                    self.persist_and_send(DocId::Vault(self.vault_id), u)?;
+                    // The entry now names a hash no server has the bytes for; remember that,
+                    // because only a later connected run can put that right.
+                    self.store.meta_set(ATTACHMENTS_LOCAL_ONLY, "1")?;
+                    info!(path = %path, "attachment recorded");
+                }
+            }
+            return Ok(());
+        }
+        if self.out.is_none() || self.upload_retry_after.is_some_and(|t| Instant::now() < t) {
+            return Ok(());
+        }
+        let Some(tx) = &self.transfers else { return Ok(()) };
         for (path, _) in self.pending_uploads.drain() {
             self.in_flight.insert(path.clone());
             let _ = tx.send(TransferJob::Upload { path });
         }
+        Ok(())
     }
 
     /// Fetch every vault-doc attachment whose local file is missing or has different content.
     fn reconcile_attachments(&mut self) -> Result<()> {
-        if self.out.is_none() {
+        // Nothing to fetch from: a standalone vault's attachments only ever exist on this disk.
+        if self.standalone || self.out.is_none() {
             return Ok(());
         }
         for (path, hash) in self.vault.attachment_entries() {
@@ -1189,6 +1456,14 @@ impl Engine {
                 let u = self.vault.set_attachment(&path, &hash);
                 self.persist_and_send(DocId::Vault(self.vault_id), u)?;
                 info!(path = %path, "attachment uploaded");
+                // The last of a standalone backfill: the server now has every blob this
+                // vault's entries name, so the marker has nothing left to say.
+                if self.in_flight.is_empty()
+                    && self.pending_uploads.is_empty()
+                    && self.store.meta_get(ATTACHMENTS_LOCAL_ONLY)?.is_some()
+                {
+                    self.store.meta_clear(ATTACHMENTS_LOCAL_ONLY)?;
+                }
             }
             TransferDone::Downloaded { path, hash, bytes } => {
                 self.in_flight.remove(&path);
@@ -1311,6 +1586,9 @@ impl Engine {
     fn on_connect(&mut self, out: mpsc::UnboundedSender<Vec<u8>>) {
         self.out = Some(out);
         self.handshakes.clear();
+        // Whatever was refused before is about to be asked again; the answer may differ, since
+        // a permission is exactly the kind of thing that changes between two connections.
+        self.denied.clear();
         self.handshake(DocId::Vault(self.vault_id));
         let ids: Vec<NoteId> = self.notes.keys().chain(self.pending_docs.keys()).copied().collect();
         for id in ids {
@@ -1486,6 +1764,19 @@ impl Engine {
                 }
                 LocalQuery::CreateNote { path, content } => self.api_create(&path, &content)?,
                 LocalQuery::Import { files } => LocalReply::Imported(self.api_import(files)?),
+                LocalQuery::Survey => LocalReply::Survey {
+                    name: self.vault.name(),
+                    notes: self.notes.iter().map(|(id, s)| (*id, s.path.clone())).collect(),
+                    attachments: self.merge_attachments()?,
+                    // Merging a synced vault away ends with deleting it on the server, and a
+                    // merge that could not finish that would leave the empty shell to be pulled
+                    // back down on the next launch. Better to say so before anything moves.
+                    blocked: (!self.standalone && self.out.is_none())
+                        .then(|| "this vault syncs with a server it cannot reach right now".to_owned()),
+                },
+                LocalQuery::ReadFile(path) => LocalReply::File(self.proj.read_bytes(&path).ok()),
+                LocalQuery::WriteFile { path, bytes } => self.merge_write(&path, &bytes)?,
+                LocalQuery::Retire => self.retire()?,
                 LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
                 LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
                 LocalQuery::DeleteNote(id) => self.api_delete(id)?,
@@ -1568,6 +1859,11 @@ impl Engine {
             && let Some(peer) = self.peers.get_mut(&p)
         {
             peer.subs.insert(frame.doc_id.clone());
+            // Subscribing to something the server has refused: say so now rather than serving
+            // the local copy as if it were in sync with a server that will not take it.
+            if let Some(refusal) = self.denied.get(&frame.doc_id) {
+                let _ = peer.tx.send(refusal.clone());
+            }
         }
         match msg {
             Message::Sync(SyncMessage::SyncStep1(sv)) => {
@@ -1636,7 +1932,20 @@ impl Engine {
                 }
                 self.broadcast_local(&frame.doc_id, bytes, peer_id);
             }
-            Message::AwarenessQuery | Message::Auth(_) | Message::Custom(..) => {}
+            Message::Auth(reason) => {
+                // The server refusing a doc is the one failure a relay could hide completely:
+                // the window stays green because the socket it talks to is the local one. Pass
+                // the frame on — it is exactly what the web client gets, and the UI already
+                // knows how to show it — and keep it, so a window opened later is told as well.
+                if origin == Origin::Server
+                    && let Some(reason) = reason
+                {
+                    warn!(doc = %frame.doc_id, %reason, "the server refused this doc");
+                    self.denied.insert(frame.doc_id.clone(), bytes.to_vec());
+                    self.broadcast_local(&frame.doc_id, bytes, None);
+                }
+            }
+            Message::AwarenessQuery | Message::Custom(..) => {}
         }
         Ok(())
     }
@@ -1702,7 +2011,7 @@ impl Engine {
                 warn!(path = %rel, %e, "processing attachment");
             }
         }
-        self.flush_uploads();
+        self.flush_uploads()?;
 
         let ready: Vec<NoteId> = self
             .dirty
@@ -1785,7 +2094,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = SyncOptions {
             vault_dir: dir.path().into(),
-            server_url: "http://x".into(),
+            server_url: Some("http://x".into()),
             vault_id: None,
             once: true,
             ca_cert: None,
@@ -1806,7 +2115,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let opts = SyncOptions {
             vault_dir: dir.path().into(),
-            server_url: "http://x".into(),
+            server_url: Some("http://x".into()),
             vault_id: None,
             once: true,
             ca_cert: None,
@@ -1853,7 +2162,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let opts = SyncOptions {
             vault_dir: dir.path().into(),
-            server_url: "http://x".into(),
+            server_url: Some("http://x".into()),
             vault_id: None,
             once: true,
             ca_cert: None,

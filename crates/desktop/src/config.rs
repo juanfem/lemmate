@@ -5,7 +5,9 @@
 //! exactly one vault, for a config written before roots existed and for anyone who wants that;
 //! see [`Layout`].
 //!
-//! A configuration that names neither opens the setup screen; one that is half-given is a hard
+//! A server is optional: with none the app is **standalone** (SPEC §3.2) — every vault is a
+//! folder on this machine and nothing goes on the wire. A configuration that names no folder at
+//! all opens the setup screen; one given only by flags that still names no folder is a hard
 //! error with an explanation of the file format — see [`Config::resolve`].
 
 use std::path::{Path, PathBuf};
@@ -29,7 +31,7 @@ pub struct Cli {
     /// Open this one vault directory instead of a root of them; created by the engine if missing.
     #[arg(long, value_name = "DIR", env = "LEMMATE_VAULT_DIR", conflicts_with = "root_dir")]
     pub vault_dir: Option<PathBuf>,
-    /// Server base URL, e.g. https://notes.example.org
+    /// Server base URL to sync with, e.g. https://notes.example.org. Omit to run standalone.
     #[arg(long, value_name = "URL", env = "LEMMATE_SERVER")]
     pub server_url: Option<String>,
     /// Vault id (ULID) to join, when pulling an existing vault into an empty directory.
@@ -83,7 +85,11 @@ impl Layout {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub layout: Layout,
-    pub server_url: String,
+    /// The server to sync with, or `None` for a standalone app (SPEC §3.2).
+    pub server_url: Option<String>,
+    /// The file this configuration came from, and the one [`Config::set_server`] rewrites when
+    /// the UI asks to connect a server. `None` when there is nowhere to write (no home).
+    pub config_path: Option<PathBuf>,
     pub ca_cert: Option<PathBuf>,
     pub token: Option<String>,
     /// `--web-dir` / `LEMMATE_WEB_DIR`; `None` means "discover it" (see `main::resolve_web_dir`).
@@ -96,28 +102,29 @@ pub fn default_config_path() -> Option<PathBuf> {
     Some(lemmate_core::paths::config_dir()?.join("desktop.toml"))
 }
 
-/// The message printed when the configuration is incomplete.
+/// The message printed when the configuration names no folder for the notes.
 ///
-/// Reaching this means a *partial* configuration: a folder was given without a server URL or
-/// the other way round, so `needs_setup` stepped aside for the flags. With neither of them the
-/// app opens the setup screen instead of printing this.
+/// Reaching this means the flags were used — `--server-url` on its own, say — so `needs_setup`
+/// stepped aside for them. With no flags at all the app opens the setup screen instead.
 pub fn format_help(path: Option<&Path>) -> String {
     let shown = path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "desktop.toml in your configuration directory".into());
     format!(
-        "lemmate-desktop needs both a folder for your notes and a server URL, and only one of \
-         them was given.\n\
+        "lemmate-desktop needs a folder to keep your notes in, and none was given.\n\
          \n\
-         Pass the other flag as well:\n\
+         Pass one:\n\
          \n\
-         \x20   lemmate-desktop --root-dir /home/you/lemmate --server-url https://notes.example.org\n\
+         \x20   lemmate-desktop --root-dir /home/you/lemmate\n\
          \n\
-         Or run it with neither flag and it opens a setup screen that writes {shown} for you.\n\
-         That file looks like this, if you would rather write it yourself:\n\
+         That runs standalone: the notes live in that folder and nothing leaves this machine.\n\
+         Add --server-url https://notes.example.org to sync them with a server as well.\n\
+         \n\
+         Or run it with no flags at all and it opens a setup screen that writes {shown} for\n\
+         you. That file looks like this, if you would rather write it yourself:\n\
          \n\
          \x20   root_dir   = \"/home/you/lemmate\"           # required: one folder per vault below it\n\
-         \x20   server_url = \"https://notes.example.org\"    # required\n\
+         \x20   server_url = \"https://notes.example.org\"    # optional: omit to run standalone\n\
          \x20   ca_cert    = \"/etc/ssl/private-ca.pem\"      # optional: trust a private CA\n\
          \x20   web_dir    = \"/path/to/ui/dist\"             # optional: override the bundled web assets\n\
          \n\
@@ -134,8 +141,9 @@ pub struct SetupContext {
 }
 
 impl Config {
-    /// `Some` when neither the flags nor the config file name a folder and a server, i.e. the
-    /// app should open in setup mode instead of failing.
+    /// `Some` when neither the flags nor the config file name a folder for the notes, i.e. the
+    /// app should open in setup mode instead of failing. A server is not part of the question:
+    /// a configuration with a folder and no server is a standalone app, not a half-written one.
     pub fn needs_setup(cli: &Cli) -> Option<SetupContext> {
         if cli.root_dir.is_some() || cli.vault_dir.is_some() || cli.server_url.is_some() {
             return None;
@@ -145,7 +153,7 @@ impl Config {
             .ok()
             .and_then(|t| toml::from_str::<FileConfig>(&t).ok())
             .unwrap_or_default();
-        if (file.root_dir.is_some() || file.vault_dir.is_some()) && file.server_url.is_some() {
+        if file.root_dir.is_some() || file.vault_dir.is_some() {
             return None;
         }
         let home = lemmate_core::paths::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -163,9 +171,36 @@ impl Config {
     ) -> anyhow::Result<()> {
         let mut table = toml::Table::new();
         table.insert("root_dir".into(), toml::Value::String(req.root_dir.clone()));
-        table.insert("server_url".into(), toml::Value::String(req.server_url.clone()));
+        // No server key at all when the app is standalone, so the file says what it means.
+        if let Some(u) = req.server_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            table.insert("server_url".into(), toml::Value::String(u.to_owned()));
+        }
         if let Some(c) = req.ca_cert.as_deref().filter(|c| !c.trim().is_empty()) {
             table.insert("ca_cert".into(), toml::Value::String(c.trim().to_owned()));
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, toml::to_string(&table)?)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Record a server in the configuration file, leaving every other key as it was.
+    ///
+    /// This is the "connect a server later" half of SPEC §3.2, so it edits rather than rewrites:
+    /// the file may name a root, a single vault, web assets or a token, and none of that is this
+    /// function's business. A file that does not exist yet is created with just these keys —
+    /// the rest of the configuration is then coming from flags, which survive the restart.
+    pub fn set_server(path: &Path, server_url: &str, ca_cert: Option<&str>) -> anyhow::Result<()> {
+        let mut table = match std::fs::read_to_string(path) {
+            Ok(text) => text.parse::<toml::Table>().with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        table.insert("server_url".into(), toml::Value::String(server_url.to_owned()));
+        if let Some(c) = ca_cert {
+            table.insert("ca_cert".into(), toml::Value::String(c.to_owned()));
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -195,10 +230,12 @@ impl Config {
         // the file was written before roots existed.
         let root_dir = cli.root_dir.or_else(|| cli.vault_dir.is_none().then_some(file.root_dir).flatten());
         let vault_dir = cli.vault_dir.or_else(|| root_dir.is_none().then_some(file.vault_dir).flatten());
-        let server_url = cli.server_url.or(file.server_url);
-        let (Some(server_url), true) = (server_url, root_dir.is_some() || vault_dir.is_some()) else {
+        // Blank is the same as absent: the setup screen writes no key at all for a standalone
+        // app, but a hand-written `server_url = ""` means the same thing.
+        let server_url = cli.server_url.or(file.server_url).filter(|u| !u.trim().is_empty());
+        if root_dir.is_none() && vault_dir.is_none() {
             bail!("{}", format_help(path.as_deref()));
-        };
+        }
 
         let vault_id = match cli.vault_id.or(file.vault_id) {
             Some(s) => Some(
@@ -216,6 +253,7 @@ impl Config {
         Ok(Self {
             layout,
             server_url,
+            config_path: path,
             ca_cert: cli.ca_cert.or(file.ca_cert),
             token: cli.token.or(file.token),
             web_dir: cli.web_dir.or(file.web_dir),
@@ -267,15 +305,79 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_without_a_server_explains_itself() {
+    fn a_folder_without_a_server_is_a_standalone_app() {
         let tmp = tempfile::tempdir().unwrap();
         let p = write(tmp.path(), "root_dir = \"/n/all\"\n");
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()));
+        assert_eq!(cfg.server_url, None);
+
+        // An empty string is how a hand-written file says the same thing.
+        let p = write(tmp.path(), "root_dir = \"/n/all\"\nserver_url = \"\"\n");
+        assert_eq!(Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap().server_url, None);
+    }
+
+    #[test]
+    fn a_server_without_a_folder_explains_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(tmp.path(), "server_url = \"https://s\"\n");
         let e = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap_err().to_string();
         assert!(e.contains("--root-dir"), "the help names the flag to pass: {e}");
     }
 
     #[test]
-    fn setup_is_needed_only_when_nothing_names_a_folder_and_a_server() {
+    fn set_server_adds_a_server_and_keeps_everything_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(tmp.path(), "root_dir = \"/n/all\"\nweb_dir = \"/w\"\n");
+        Config::set_server(&p, "https://notes.example.org", Some("/ca.pem")).unwrap();
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.server_url.as_deref(), Some("https://notes.example.org"));
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()), "the notes folder survived");
+        assert_eq!(cfg.web_dir, Some("/w".into()), "so did everything else");
+        assert_eq!(cfg.ca_cert, Some("/ca.pem".into()));
+
+        // Changing servers replaces the key rather than appending a second one.
+        Config::set_server(&p, "https://other.example.org", None).unwrap();
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.server_url.as_deref(), Some("https://other.example.org"));
+        assert_eq!(cfg.ca_cert, Some("/ca.pem".into()), "and leaves the CA alone");
+    }
+
+    /// A configuration that lives entirely in flags: there is no file until one is written.
+    #[test]
+    fn set_server_creates_the_file_when_there_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("nested").join("desktop.toml");
+        Config::set_server(&p, "https://notes.example.org", None).unwrap();
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap(), "--root-dir", "/n/all"])).unwrap();
+        assert_eq!(cfg.server_url.as_deref(), Some("https://notes.example.org"));
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()), "the flag still supplies the folder");
+    }
+
+    /// What the standalone setup screen writes, read back as a standalone configuration.
+    #[test]
+    fn write_setup_omits_a_server_it_was_not_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("desktop.toml");
+        let req = lemmate_core::local::SetupRequest {
+            root_dir: "/n/all".into(),
+            server_url: None,
+            ca_cert: None,
+            email: None,
+            password: None,
+            register: false,
+            invite: None,
+        };
+        Config::write_setup(&p, &req).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("server_url"), "standalone config should not name a server: {text}");
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()));
+        assert_eq!(cfg.server_url, None);
+    }
+
+    #[test]
+    fn setup_is_needed_only_when_nothing_names_a_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let empty = tmp.path().join("none.toml");
         assert!(Config::needs_setup(&cli(&["--config", empty.to_str().unwrap()])).is_some());
@@ -285,6 +387,10 @@ mod tests {
 
         // Written before roots existed: still a complete configuration.
         let p = write(tmp.path(), "vault_dir = \"/n/one\"\nserver_url = \"https://s\"\n");
+        assert!(Config::needs_setup(&cli(&["--config", p.to_str().unwrap()])).is_none());
+
+        // A folder and no server is a standalone app, not an unfinished setup.
+        let p = write(tmp.path(), "root_dir = \"/n/all\"\n");
         assert!(Config::needs_setup(&cli(&["--config", p.to_str().unwrap()])).is_none());
     }
 }

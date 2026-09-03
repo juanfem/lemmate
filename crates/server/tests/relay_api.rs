@@ -20,15 +20,23 @@ async fn server() -> (SocketAddr, std::sync::Arc<lemmate_server::AppState>) {
 async fn relay(server: SocketAddr, dir: &std::path::Path) -> LocalHandle {
     let opts = SyncOptions {
         vault_dir: dir.to_path_buf(),
-        server_url: format!("http://{server}"),
+        server_url: Some(format!("http://{server}")),
         vault_id: None,
         once: false,
         ca_cert: None,
         token: None,
     };
-    start(opts, LocalOptions { bind: "127.0.0.1:0".parse().unwrap(), web_dir: None, vault_root: None })
-        .await
-        .unwrap()
+    start(
+        opts,
+        LocalOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            web_dir: None,
+            vault_root: None,
+            config_path: None,
+        },
+    )
+    .await
+    .unwrap()
 }
 
 async fn call(method: &'static str, url: String, body: Option<Value>) -> (u16, Value) {

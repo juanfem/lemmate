@@ -100,6 +100,33 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
 
 - Client ↔ server only. **No peer-to-peer.** Every device syncs through the server it is
   logged into. A vault lives on exactly one server.
+- **A server is optional [decided: 2026-09-03].** A desktop client with none configured runs
+  *standalone*: its vaults are folders on that machine, and nothing goes on the wire. This is
+  not a reduced mode — the local relay already answers everything the UI asks of a server
+  (search, backlinks, tags, trash, history, daily notes, import, export, attachments) from the
+  sidecar, because that is what makes the app work offline; standalone is that same client with
+  the connection never made. What it does not have is what a server is *for*: other people's
+  devices, sharing, public links and accounts. `lemmate serve --root DIR` is the same thing
+  headless, for a browser on the same machine.
+  A standalone app can be given a server later, from the app: *Connect a server…* signs in,
+  writes the configuration and restarts onto it, and every vault on the machine goes up as its
+  own vault — a vault id nobody owns is claimed by the account that syncs it, history and
+  attachments included.
+  The refusal that matters — a vault id somebody else owns — is not silent: the engine passes
+  the server's `Auth` frame on to the window, and holds it for a window that opens later.
+- **Vaults can be merged [decided: 2026-09-03].** Two vaults side by side is not always what was
+  wanted, so *Merge a vault into another…* folds one into the other: its notes land in a folder
+  of the destination, **keeping their ids**, their history and their attachments, and the vault
+  they came from stops existing — here, and on the server if it had one (`DELETE /vaults/:v`),
+  because an empty vault left there is pulled back down on the next launch.
+  This needs no CRDT surgery. Note ids are unique across vaults and every note carries its own
+  in front matter (§6.3), so a file that appears in another vault's folder is adopted *as that
+  note* — the same case as a file moved in by hand. The merge is therefore a local operation
+  between two engines behind one relay: survey, plan, copy, retire. A collision (`Plan.md` on
+  both sides) numbers the newcomer; an attachment whose name is taken by different bytes is
+  renamed and the notes that point at it are rewritten. The plan is shown before anything moves.
+  A vault that syncs with a server it cannot currently reach refuses to be merged away, because
+  the last step — deleting it there — would not happen.
 - Native clients (the desktop app, and `lemmate sync` behind it) are **offline-first**: full
   local copy, full local search, edits queue and merge on reconnect.
 - The web client is **online-first** for anything the server computes — search, backlinks,
@@ -289,6 +316,11 @@ a **root** directory and each vault is a folder below it, named after the vault,
 short id until it has a name. Which vaults those are comes from the server on each start; the
 folders already on disk open with or without an answer. The binding is the sidecar's
 `vault_id`, never the folder name, so folders may be renamed and moved.
+
+Standalone (§3.2) there is no answer to wait for: the folders under the root *are* the vaults,
+a first run creates one, and "New vault" makes another. Everything else on this page is the
+same — the sidecar is the same store, and the vault it holds is the same vault whether or not
+a server has ever seen it.
 
 Per vault, then, a local directory (the projection, §6.3) plus a sidecar:
 
@@ -577,6 +609,7 @@ GET    /invites                                list invites (admin)
 POST   /invites        {expires_days?}          mint a single-use invite (admin)
 DELETE /invites/:id                            revoke an unused invite (admin)
 GET    /vaults                                 list vaults
+DELETE /vaults/:v                              erase a vault (owner; SPEC §3.2 merge)
 GET    /vaults/:v/notes?path=&tag=&q=          list / search
 POST   /vaults/:v/notes        {path, content}  create
 GET    /vaults/:v/notes/:id                    metadata + content (markdown)
@@ -592,6 +625,27 @@ PUT    /vaults/:v/attachments/:hash
 GET    /vaults/:v/attachments/:hash
 ```
 
+The **local relay** answers all of the above from the sidecar (which is what makes a native
+client work offline, and a standalone one work at all), plus two of its own that no server has:
+
+```
+GET    /local/setup     {configured, mode: local|synced, server, can_connect, config_path}
+POST   /local/connect   {server_url, ca_cert?, email?, password?, register?, invite?}
+POST   /local/merge     {from, into, folder?, dry_run?}   → the plan, and what it did
+```
+
+`POST /local/connect` is the shell's, not the engine's: the relay carries it to the shell, which
+signs in, proves the server answers, writes the configuration and restarts onto it. It answers
+`202` once that has been arranged, `502` with the reason when it has not — a wrong password is
+worth saying in the dialog that asked — and `501` where there is no configuration file to write
+(`lemmate serve`, which is configured by flags).
+
+`POST /local/merge` needs both vaults on this relay, which is why it lives here and not on the
+server: only the relay holds two engines at once. `dry_run` returns the plan and changes
+nothing; without it the same plan is carried out and the source vault is retired. It refuses a
+source that syncs with an unreachable server (`409`), and a destination path that is somehow
+taken after all (`409`), before anything has moved.
+
 `PUT` content is never a blind overwrite: the server diffs against the current text and
 applies the result as CRDT edits, so API writes merge with concurrent editors.
 
@@ -601,7 +655,8 @@ applies the result as CRDT edits, so API writes merge with concurrent editors.
 `lemmate ls|cat|new|edit|mv|rm`, `lemmate search`, `lemmate daily [date]`, `lemmate export`,
 `lemmate import obsidian`, `lemmate passwd` (own, or `--email` to reset another as admin),
 `lemmate invite` (`--list`, `--revoke`), `lemmate sync` (native projection folder without the
-GUI). JSON output with `--json` for scripting.
+GUI), `lemmate serve` (a root of vaults on this machine with no server at all — the relay and
+the web client, headless; §3.2). JSON output with `--json` for scripting.
 
 ### 13.3 MCP
 
@@ -618,13 +673,14 @@ GUI). JSON output with `--json` for scripting.
 
 | Platform | Shell | Offline | Projection | Vaults | Notes |
 |---|---|---|---|---|---|
-| Linux / macOS / Windows | Tauri 2 | full | yes, watched | all, one folder each under a root | Primary target. |
-| Android / iOS | the web client, installed | whole vault (§6.4) | no | all | Home-screen install; no store app. |
+| Linux / macOS / Windows | Tauri 2 | full | yes, watched | all, one folder each under a root | Primary target. A server is optional (§3.2). |
+| Android / iOS | the web client, installed | whole vault (§6.4) | no | all | Home-screen install; no store app. Needs a server. |
 | Web | browser | cached docs, or the whole vault once installed | no | all | Served by the server. |
 
 The desktop shell runs one engine per vault behind one local relay, so the UI sees the same
 workspace it sees against a server: one socket, frames addressed by doc id, one vault list, and
-search across all of them.
+search across all of them. That is also why a standalone app is the same app: the relay is
+what the UI has been talking to all along.
 
 **No native mobile shell [decided: dropped 2026-09-03].** There was one — a Tauri 2 crate that
 reached an unsigned Android APK that assembled but had never run on a device, with iOS untried.
@@ -694,3 +750,5 @@ citations, `.qmd` awareness + quarto render, REST API, CLI, MCP, embeds/transclu
 | Vim keymap | Not for now. |
 | Obsidian plugins in use | File Tree Alternative, Self-hosted LiveSync — both covered by built-ins (§9, §7). |
 | Native mobile apps (2026-09-03) | Dropped; the installed web client is the phone client — §14. |
+| Does the app need a server? (2026-09-03) | No. The desktop app runs standalone with none configured — §3.2. |
+| Two vaults, one wanted (2026-09-03) | Merge folds one into the other, ids and history intact, and the source vault is erased — §3.2. |

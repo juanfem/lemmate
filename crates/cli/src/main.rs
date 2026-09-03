@@ -1,11 +1,12 @@
 //! `notes` — command-line client (SPEC §13.2, §13.3).
 //!
 //! Two families of commands: local ones built directly on `lemmate-core` (`index`, `search`,
-//! `import`, `export`, `sync`, `doctor`), and server-backed ones that speak the REST API
+//! `import`, `export`, `sync`, `serve`, `doctor`), and server-backed ones that speak the REST API
 //! (`vaults`, `ls`, `cat`, `new`, `edit`, `mv`, `rm`, `daily`, `find`, `backlinks`, `tags`) —
 //! plus `mcp`, which exposes the same API to agents over the Model Context Protocol.
 
 use std::io::{IsTerminal, Read};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,7 +18,8 @@ use lemmate_core::client::{self, SyncOptions};
 use lemmate_core::credentials;
 use lemmate_core::export;
 use lemmate_core::import::{self, ImportOptions};
-use lemmate_core::local::LocalOptions;
+use lemmate_core::local::{self, LocalOptions};
+use lemmate_core::vaults;
 use lemmate_core::{NoteId, Projection, Store, VaultId, markdown};
 
 #[derive(Parser)]
@@ -70,6 +72,21 @@ enum Cmd {
         /// Access token (default: the one saved by `lemmate login` for this server).
         #[arg(long, env = "LEMMATE_TOKEN")]
         token: Option<String>,
+    },
+    /// Serve a folder of vaults on this machine, with no server (SPEC §3.2).
+    ///
+    /// The same relay the desktop app runs — engines, projection, search and the web client —
+    /// only headless: point a browser at the address it prints. Nothing goes on the wire.
+    Serve {
+        /// Folder holding one subfolder per vault; created if missing, and a first run gets one.
+        #[arg(long, value_name = "DIR", env = "LEMMATE_ROOT_DIR")]
+        root: PathBuf,
+        /// Address to listen on (default: the folder's stable loopback port).
+        #[arg(long)]
+        bind: Option<SocketAddr>,
+        /// Built web client to serve at / (ui/dist).
+        #[arg(long, env = "LEMMATE_WEB_DIR")]
+        web_dir: Option<PathBuf>,
     },
     /// Sign in to a server and save the session token for `sync` and the desktop app.
     Login {
@@ -469,12 +486,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
             std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
             let token = token.or_else(|| credentials::load(&server));
-            let opts = SyncOptions { vault_dir: vault, server_url: server, vault_id, once, ca_cert, token };
+            let opts =
+                SyncOptions { vault_dir: vault, server_url: Some(server), vault_id, once, ca_cert, token };
             let rt = tokio::runtime::Runtime::new()?;
             let report = match serve {
                 Some(bind) => rt.block_on(async {
-                    let handle =
-                        client::start(opts, LocalOptions { bind, web_dir, vault_root: None }).await?;
+                    let handle = client::start(
+                        opts,
+                        LocalOptions { bind, web_dir, vault_root: None, config_path: None },
+                    )
+                    .await?;
                     println!("local relay: http://{}/#/v/{}", handle.addr, handle.vault_id);
                     handle.wait().await
                 })?,
@@ -483,6 +504,37 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if once {
                 println!("in sync: vault {} ({} notes)", report.vault_id, report.notes);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Serve { root, bind, web_dir } => {
+            std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+            for (from, to) in vaults::rehome(&root) {
+                println!("renamed {} -> {}", from.display(), to.display());
+            }
+            // No server to ask which vaults exist: the folders under the root are the answer,
+            // and `plan` makes one for a first run.
+            let opts: Vec<SyncOptions> = vaults::plan(&root, &[])
+                .into_iter()
+                .map(|f| SyncOptions {
+                    vault_dir: f.dir,
+                    server_url: None,
+                    vault_id: f.id,
+                    once: false,
+                    ca_cert: None,
+                    token: None,
+                })
+                .collect();
+            let bind =
+                bind.unwrap_or_else(|| SocketAddr::from((Ipv4Addr::LOCALHOST, local::stable_port(&root))));
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                // No configuration file to write a server into: `serve` is configured by
+                // flags, so the UI does not offer to connect one (SPEC §3.2).
+                let local = LocalOptions { bind, web_dir, vault_root: Some(root.clone()), config_path: None };
+                let handle = client::start_many(opts, local).await?;
+                println!("serving {} vault(s) on http://{}/", handle.vaults.len(), handle.addr);
+                handle.serve_forever().await
+            })?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Vaults { remote, json } => {

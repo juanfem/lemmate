@@ -273,7 +273,7 @@
       { label: 'Copy wikilink', run: () => void copy(`[[${displayName(path)}]]`) },
       { label: '', separator: true },
       { label: 'Bookmark', run: () => actions.onBookmarkNote?.(vault, id) },
-      { label: 'Share…', run: () => actions.onShareNote?.(id), disabled: !actions.onShareNote },
+      ...(actions.onShareNote ? [{ label: 'Share…', run: () => actions.onShareNote?.(id) }] : []),
       { label: '', separator: true },
       { label: 'Move to trash', danger: true, run: () => actions.onTrashNotes?.(vault, [id]) },
     ]

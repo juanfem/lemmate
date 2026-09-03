@@ -188,6 +188,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))
+        .route("/api/v1/vaults/{vault}", axum::routing::delete(delete_vault))
         .route("/api/v1/vaults/{vault}/notes", get(list_notes).post(create_note))
         .route("/api/v1/vaults/{vault}/import", axum::routing::post(import_vault))
         .route(
@@ -923,6 +924,29 @@ async fn list_vaults(
         }
     };
     Ok(Json(rows.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect()))
+}
+
+/// Erase a vault: its doc, its metadata, its members and its blobs (SPEC §3.2).
+///
+/// This exists for the end of a **merge**: the notes have already been re-parented into another
+/// vault by that vault's doc, and what is left here is an empty shell that would otherwise be
+/// pulled back down by every client on the next launch. Note *docs* are not deleted — the ids
+/// belong to the destination vault now — so a vault deleted while it still holds notes takes
+/// their listing with it, which is why only an owner may ask.
+async fn delete_vault(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Owner).await?;
+    // Drop the room first: a live one would keep answering for a vault that no longer exists,
+    // and would write its doc back out on the next update.
+    state.rooms.lock().await.remove(&DocId::Vault(vault).to_string());
+    let notes = state.store.lock().await.delete_vault(vault).map_err(internal)?;
+    state.attachments.remove_vault(vault).map_err(internal)?;
+    tracing::info!(%vault, user = %user.email, notes, "vault deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn backlinks(

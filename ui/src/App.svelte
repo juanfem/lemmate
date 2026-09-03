@@ -4,6 +4,8 @@
   import Login from './components/Login.svelte'
   import AccountDialog from './components/AccountDialog.svelte'
   import Setup from './components/Setup.svelte'
+  import ConnectServer from './components/ConnectServer.svelte'
+  import MergeVaults from './components/MergeVaults.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { Workspace } from './lib/workspace.svelte.ts'
   import { ulid } from './lib/ulid.ts'
@@ -30,12 +32,41 @@
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
   let setup = $state<{ config_path: string; suggested_root_dir: string } | null>(null)
   let setupStarting = $state(false)
+  /** A standalone app (SPEC §3.2): the relay behind this page has no server, so there is no
+   *  connection to be online with and nobody else's changes to wait for. */
+  let localOnly = $state(false)
+  /** Served by a local relay at all (standalone or syncing). Sharing, members and invites are
+   *  the server's to answer and the relay has no route for them, so they are not offered here;
+   *  the same account reaches them through the web client. */
+  let onRelay = $state(false)
+  /** A standalone shell that can write a server into its own configuration (SPEC §3.2) — the
+   *  desktop app, but not `lemmate serve`, which is configured by flags. */
+  let canConnect = $state(false)
+  let configPath = $state('')
+  let connectOpen = $state(false)
+  let mergeOpen = $state(false)
   if (!readPublicToken())
     fetch('/api/v1/local/setup')
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { configured?: boolean; config_path?: string; suggested_root_dir?: string } | null) => {
-        if (j && j.configured === false) setup = { config_path: j.config_path ?? '', suggested_root_dir: j.suggested_root_dir ?? '' }
-      })
+      .then(
+        (
+          j: {
+            configured?: boolean
+            mode?: string
+            server?: string | null
+            can_connect?: boolean
+            config_path?: string
+            suggested_root_dir?: string
+          } | null,
+        ) => {
+          if (j && j.configured === false) setup = { config_path: j.config_path ?? '', suggested_root_dir: j.suggested_root_dir ?? '' }
+          // Only a configured relay answers with a mode; a server has no such route.
+          onRelay = typeof j?.mode === 'string'
+          localOnly = j?.mode === 'local'
+          canConnect = j?.can_connect === true
+          configPath = j?.config_path ?? ''
+        },
+      )
       .catch(() => {})
 
   // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
@@ -155,7 +186,7 @@
       ws.refresh().then((vaults) => {
         if (!focusVault && vaults.length) focusVault = vaults[0]!.id
       })
-      api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
+      if (!onRelay) api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
     })
   })
   onDestroy(() => {
@@ -497,7 +528,10 @@
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
     { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
-    { id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) },
+    ...(onRelay ? [] : [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }]),
+    ...(localOnly && canConnect ? [{ id: 'connect', label: 'Connect a server…', run: () => (connectOpen = true) }] : []),
+    // Only a relay can merge vaults: it is the one thing that holds both engines (SPEC §3.2).
+    ...(onRelay && vaults.length > 1 ? [{ id: 'merge', label: 'Merge a vault into another…', run: () => (mergeOpen = true) }] : []),
     { id: 'export-html', label: 'Export note as HTML', run: () => exportActive('html') },
     { id: 'export-docx', label: 'Export note as DOCX', run: () => exportActive('docx') },
     { id: 'export-pdf', label: 'Export note as PDF', run: () => exportActive('pdf') },
@@ -759,7 +793,9 @@
   // whitespace in front of it, and this line is all conditional pieces.
   let statusLine = $derived(
     [
-      status + (status === 'online' && syncing ? ' · syncing…' : ''),
+      // "online" is about a server, and a standalone app has none: what the socket under this
+      // page reaches is the relay on this machine, so say so rather than claim connectivity.
+      (localOnly && status === 'online' ? 'local' : status) + (status === 'online' && syncing ? ' · syncing…' : ''),
       `${noteCount} ${noteCount === 1 ? 'note' : 'notes'}` +
         (!solo && manyVaults ? ` in ${vaults.length} vaults` : ''),
       presence.length ? `${presence.length} editing` : '',
@@ -829,7 +865,7 @@
             onTrashNotes: trashNotes,
             onOpenInTab: openInNewTab,
             onOpenInPane: openInNewPane,
-            onShareNote: (id) => (open(id), (shareOpen = true)),
+            onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
             onBookmarkNote: bookmarkNote,
             onMove: moveDropped,
           }}
@@ -909,7 +945,7 @@
           onClose={(id) => { focusedPane = i; close(id) }}
           onFocus={() => (focusedPane = i)}
           onBookmark={bookmarkActive}
-          onShare={() => (shareOpen = true)}
+          onShare={onRelay ? undefined : () => (shareOpen = true)}
           onRename={renameActive}
           onDelete={deleteActive}
           onOpen={(id) => { focusedPane = i; open(id) }}
@@ -934,6 +970,16 @@
   {/if}
   {#if palette}
     <CommandPalette {commands} onClose={() => (palette = false)} />
+  {/if}
+  {#if connectOpen}
+    <ConnectServer {configPath} onClose={() => (connectOpen = false)} />
+  {/if}
+  {#if mergeOpen}
+    <MergeVaults
+      vaults={vaults.map((v) => ({ id: v.id, label: v.label, notes: v.notes.length }))}
+      initialFrom={session?.id ?? null}
+      onClose={() => (mergeOpen = false)}
+    />
   {/if}
   {#if shareOpen && active && session}
     <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />

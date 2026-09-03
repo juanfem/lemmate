@@ -20,7 +20,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 | `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials + per-platform config paths (`paths.rs`), import/export, pandoc |
 | `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
-| `crates/desktop` | Tauri 2 shell: starts the relay for every vault the account can read — one engine and folder each, under `root_dir` — and opens one window on it |
+| `crates/desktop` | Tauri 2 shell: starts the relay for every vault the account can read — one engine and folder each, under `root_dir` — and opens one window on it. `server_url` is optional: with none it runs standalone (SPEC §3.2), and `SyncOptions::server_url: None` skips the connection and the transfer worker entirely (`client::run_standalone`). *Connect a server…* in the UI arrives here through `LocalHandle::connect` → `watch_for_connect` → login + `Config::set_server` + `AppHandle::restart` |
 | `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts` one vault, `workspace.svelte.ts` all of them on one socket, `api.ts`, `import.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
 | `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
 
@@ -35,6 +35,7 @@ cd ui && npm run check && npm test                     # svelte-check + tsc; cor
 LEMMATE_SERVER_BIN=<target>/debug/lemmate-server LEMMATE_CLI_BIN=<target>/debug/lemmate npm test   # live e2e too
 npm run build                                          # → ui/dist, served by `lemmate-server --web-dir ui/dist`
 lemmate-server --no-auth --data-dir ./data --web-dir ui/dist   # dev server (auth off = dev only)
+lemmate serve --root /path/to/notes --web-dir ui/dist          # standalone: no server at all
 node ui/scripts/cdp.mjs <url> <outdir> 'waitfor:…' 'click:…' 'eval:…' 'shot:name'   # headless-Chrome smoke runs
 ```
 
@@ -65,15 +66,32 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   one uploaded file, the server creates notes through the room docs, the relay writes them into
   the vault folder. The UI only batches the upload (`ui/src/lib/import.ts`).
 - `apply_update` reports "changed" using state vector *and* delete set — deletions are changes.
+- Standalone, an attachment's vault-doc entry is written by the engine itself (no upload can
+  write it), so the sidecar keeps an `attachments_local_only` marker and the first connected run
+  backfills every blob — without it the server holds entries whose bytes nobody has.
+- A server's `Auth` refusal is forwarded to local UIs *and remembered per doc*, so a window that
+  opens after the refusal is told too; a relay would otherwise hide it behind a healthy socket.
+- Merging vaults (`merge.rs`, `POST /api/v1/local/merge`) is *not* CRDT surgery: files are
+  written into the destination's folder and adopted by the `id:` in their front matter — the
+  same path `local_create` already takes for a file moved in by hand — then the source engine
+  retires (deletes its files + sidecar, `LocalState::forget`s itself, `DELETE /vaults/:v`
+  upstream once its socket is closed). `upsert_note` re-parents on conflict, which is what makes
+  the server follow a note into its new vault.
+- A relay outlives its engines: `LocalHandle::serve_forever` (not `wait`, which returns when the
+  *first* engine ends — a merged-away vault would take the whole relay down with it).
 - Commit messages: short imperative title, body explaining why. **No `Co-Authored-By: Claude` or
   `Claude-Session:` trailers** — Juan does not sign commits as Claude, and the history was
   rewritten on 2026-08-30 to remove the ones that were there.
 
 ## Environment (this machine)
 
-- `.cargo/config.toml` is gitignored and machine-local: target dir is `/mnt/data/tmp/cargo-target-notes`
-  (a quota-limited tmpfs; incremental off). The repo folder is Syncthing-synced — never let
-  `target/` or `node_modules/` land inside it.
+- `.cargo/config.toml` is gitignored and machine-local: target dir is `/mnt/data/cargo-target/notes`
+  on `/dev/sda1` (ext4, 1.7 TB free), incremental on. The repo folder is Syncthing-synced —
+  never let `target/` or `node_modules/` land inside it. **Do not put the target dir under
+  `/mnt/data/tmp`**: that is a symlink to `/tmp`, a 16 GB RAM tmpfs with a per-user quota, where
+  builds died as `Disk quota exceeded (os error 122)` — from `llvm-ar`, or a plain `rmeta` write
+  during an ordinary `cargo test` — long before `df` showed it full. That was the setup until
+  2026-09-03; anything blaming "the quota" predates the move.
 - `google-chrome-stable` is installed; there is no Chrome MCP/extension — use `ui/scripts/cdp.mjs`.
   `click:` does not focus inputs (use `eval:…focus()` before `type:`); reap stale Chrome with
   `pgrep -f "remote-debugging-por[t]"` patterns, never a `pkill -f` that can match your own shell.
@@ -85,10 +103,6 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   Android work, `--profile minimal` plus `rustup component add rustfmt clippy`). rustup was
   installed with `--no-modify-path`, so nothing shadows the system one unless you put
   `~/.cargo/bin` first — do that and `cargo fmt`/`cargo clippy` come from rustup instead.
-- The target-dir tmpfs is mounted `usrquota` with no quota tools installed, so filling it
-  surfaces only as `Disk quota exceeded (os error 122)` from whatever was writing — `llvm-ar`,
-  or a plain `rmeta` write during an ordinary `cargo test`. Reclaim with `cargo clean --profile
-  dev -p …` when host builds start failing for no apparent reason.
 - Registry sources live under `~/.cargo/registry/src/*/` — check crate APIs there; versions have
   moved past training data (yrs 0.27 with built-in `sync`, ulid 3 `Ulid::generate()`, ureq 3,
   axum 0.8, notify 8, similar 3, tauri 2).

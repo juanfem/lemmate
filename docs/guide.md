@@ -2,7 +2,9 @@
 
 Lemmate is a self-hosted, multi-user markdown notebook: you write pandoc-flavoured markdown
 with wikilinks, tags, maths and attachments, and a small Rust server keeps every device and
-collaborator in sync in real time. Editing is CRDT-based, so offline edits, edits from two
+collaborator in sync in real time. If you only ever write on one computer you can skip the
+server entirely and run the desktop app standalone (§1b) — the sync engine is on your machine
+either way. Editing is CRDT-based, so offline edits, edits from two
 laptops, and edits from another person merge without conflict markers. There is no plugin
 system and no query language — the extension points are the HTTP API, the CLI, and (soon) MCP.
 
@@ -16,7 +18,7 @@ Three clients, one engine:
 
 | Client | What it is | Offline |
 |---|---|---|
-| **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: one sync engine per vault runs on your machine, each owning its folder, and they serve the same web UI on loopback. | Yes — full local copy of every vault, local search, edits journalled and pushed on reconnect. |
+| **Desktop** (`lemmate-desktop`) | Tauri 2 window over a **local relay**: one sync engine per vault runs on your machine, each owning its folder, and they serve the same web UI on loopback. A server is optional (§1b). | Yes — full local copy of every vault, local search, edits journalled and pushed on reconnect. |
 | **Web** | The same Svelte UI served by `lemmate-server`, talking to it over WebSocket + REST. | Yes, with limits — notes and unsent edits live in IndexedDB; install it (§1d) and the whole vault comes too, including offline search. |
 | **CLI** (`lemmate`) | `lemmate sync` runs the same engine headlessly for a folder; plus indexing, search, import and export. | Yes, same engine. |
 
@@ -28,7 +30,11 @@ Nothing is packaged yet, so the binaries come from a build: [`install.md`](insta
 prerequisites and steps for Linux, macOS and Windows, and where each installed piece puts its
 files.
 
-### (a) Run a server
+### (a) Run a server — or don't
+
+You need one to reach your notes from more than one device, to share anything, or to use the
+web client and the phone. For one computer, skip to §1b and leave the server out: the desktop
+app runs standalone and nothing goes on the network.
 
 See [`deploy.md`](deploy.md) for Docker, a Caddy reverse proxy, fly.io, and backups. The short
 version:
@@ -54,13 +60,16 @@ Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on 
 asking for:
 
 - **Notes folder** — the folder your notes live in on this computer (created if missing);
-- **Server URL** — e.g. `https://notes.example.org`;
-- **Email / password**, with a "create this account" checkbox for the first account on a new
-  server — and, under it, a box to paste an invite link if someone sent you one. Leave email and
-  password empty for a `--no-auth` server.
+- **Sync with a server** — a tick box. Leave it clear and you are done: the app is standalone,
+  your notes stay in that folder, and nothing goes on the network. Tick it and it asks for:
+  - **Server URL** — e.g. `https://notes.example.org`;
+  - **Email / password**, with a "create this account" checkbox for the first account on a new
+    server — and, under it, a box to paste an invite link if someone sent you one. Leave email
+    and password empty for a `--no-auth` server.
 
-There is no vault to name. The app opens **every vault your account can read**, one subfolder of
-the notes folder each, so the tree looks exactly as it does in a browser:
+There is no vault to name. With a server the app opens **every vault your account can read**,
+one subfolder of the notes folder each, so the tree looks exactly as it does in a browser;
+standalone, the vaults are the subfolders that are there, and a first run makes one:
 
 ```
 ~/lemmate/
@@ -83,7 +92,42 @@ single vault folder instead of all of them, pass `--vault-dir` (with `--vault-id
 existing vault) — which is also what a `desktop.toml` written before this keeps doing.
 
 The window is the web client served by the embedded relay, so it keeps working with the server
-unreachable.
+unreachable — and, standalone, with no server to be unreachable.
+
+**Standalone in full.** Everything in this guide works with no server except what a server is
+for: your other devices, other people, sharing and public links, accounts, and the web client
+itself. Writing, the tree, tabs and panes, search across every vault, backlinks, tags, outline,
+bookmarks, trash, version history, daily notes and templates, attachments, Obsidian import and
+pandoc export are all answered by the relay on your machine, out of each vault's `.lemmate/`
+folder. The status line at the foot of the sidebar says `local` rather than `online`, and the
+sharing commands are not offered.
+
+**Changed your mind later?** Open the command palette (`Ctrl+Shift+P`) and run **Connect a
+server…**. Give it the URL and, if the server has accounts, an email and password — with the
+same "create this account" box and invite field as the setup screen, and a private-CA path if
+you use one. It signs in, checks the server answers, writes `desktop.toml` and restarts the app.
+
+Everything you already have goes up on that first sync: every vault becomes a vault on the
+server, with its notes, their history and their attachments, and each keeps its own identity. If
+something is wrong — a typo in the URL, the wrong password, a CA the app does not trust — the
+dialog says so and nothing is written. If the vault happens to have an id somebody else's
+account already owns, the server refuses it and the window shows the refusal.
+
+**Two vaults where you wanted one?** Run **Merge a vault into another…** from the palette. Pick
+the vault to empty, the vault to fill, and the folder inside it (its name by default; clear the
+box to merge at the root). It then shows you exactly what will happen — where each note lands,
+which names clashed and were numbered, which attachments come across — before anything moves.
+
+The notes keep their ids, their history and their images, so `[[links]]` and backlinks still
+resolve. The vault you emptied is then gone: its folder here, and the vault itself on the
+server, because an empty one left there would come back on the next launch. If that vault syncs
+with a server you cannot currently reach, the merge is refused rather than half-done.
+
+You can also run the standalone relay without the desktop window, which is handy for trying it:
+
+```sh
+lemmate serve --root ~/lemmate --web-dir ui/dist   # prints the loopback URL to open
+```
 
 ### (c) Sync a folder from the command line
 

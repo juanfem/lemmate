@@ -604,6 +604,9 @@ impl Store {
 
     // ---- Notes and derived metadata -------------------------------------------------------
 
+    /// Record where a note is. The vault is part of that: a note's home is whichever vault doc
+    /// names it, so a note that turns up in another vault's doc — which is what a merge does
+    /// (SPEC §3.2) — is re-parented here rather than left behind in the vault it came from.
     pub fn upsert_note(
         &mut self,
         id: NoteId,
@@ -613,7 +616,8 @@ impl Store {
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO notes (id, vault_id, path, title) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET path = excluded.path, title = excluded.title,
+             ON CONFLICT(id) DO UPDATE SET vault_id = excluded.vault_id, path = excluded.path,
+                 title = excluded.title,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), deleted_at = NULL",
             params![id.to_string(), vault_id.to_string(), path, title],
         )?;
@@ -1295,6 +1299,44 @@ impl Store {
         Ok(())
     }
 
+    /// Erase a vault: its notes and everything derived from them, its attachment rows, its own
+    /// doc, and who could read it.
+    ///
+    /// Used when a vault has been merged into another (SPEC §3.2) and must stop existing on the
+    /// server too — otherwise the next launch pulls the empty thing back down. The note *docs*
+    /// are deliberately untouched: their ids have moved to the destination vault, and deleting
+    /// them would delete the notes that were just saved. Blobs on disk are the caller's.
+    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let ids: Vec<String> = tx
+            .prepare("SELECT id FROM notes WHERE vault_id = ?1")?
+            .query_map(params![vault_id.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for id in &ids {
+            tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
+            tx.execute("DELETE FROM note_links WHERE note_id = ?1", params![id])?;
+            tx.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![id])?;
+            tx.execute("DELETE FROM note_shares WHERE note_id = ?1", params![id])?;
+            tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
+        }
+        tx.execute("DELETE FROM notes WHERE vault_id = ?1", params![vault_id.to_string()])?;
+        tx.execute("DELETE FROM attachments WHERE vault_id = ?1", params![vault_id.to_string()])?;
+        tx.execute("DELETE FROM memberships WHERE vault_id = ?1", params![vault_id.to_string()])?;
+        let doc = DocId::Vault(vault_id).to_string();
+        tx.execute("DELETE FROM doc_updates WHERE doc_id = ?1", params![doc])?;
+        tx.execute("DELETE FROM doc_snapshots WHERE doc_id = ?1", params![doc])?;
+        tx.execute("DELETE FROM projection WHERE doc_id = ?1", params![doc])?;
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
+    /// Remove a key, so `meta_get` reads `None` again — a flag that is *gone* rather than one
+    /// set to the empty string, which reads as present.
+    pub fn meta_clear(&mut self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn set_projected_text(&mut self, doc_id: DocId, path: &str, text: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO projection (doc_id, path, text) VALUES (?1, ?2, ?3)
@@ -1388,6 +1430,8 @@ mod tests {
         store.meta_set("vault_id", &vault.to_string()).unwrap();
         store.meta_set("vault_id", &vault.to_string()).unwrap();
         assert_eq!(store.meta_get("vault_id").unwrap().as_deref(), Some(vault.to_string().as_str()));
+        store.meta_clear("vault_id").unwrap();
+        assert_eq!(store.meta_get("vault_id").unwrap(), None, "a cleared key is gone, not empty");
     }
 
     #[test]
@@ -1520,6 +1564,33 @@ mod tests {
         assert!(refs.contains("y.png") && !refs.contains("x.png"));
         store.clear_note_attachments(b).unwrap();
         assert!(store.referenced_attachment_paths().unwrap().is_empty());
+    }
+
+    /// A vault merged into another stops existing — but the notes that moved must not go with
+    /// it, because their ids now belong to the destination.
+    #[test]
+    fn deleting_a_vault_takes_its_notes_and_members_but_not_the_note_docs() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (a, b) = (VaultId::new(), VaultId::new());
+        let (moved, stays) = (NoteId::new(), NoteId::new());
+        store.upsert_note(moved, a, "Plan.md", Some("Plan")).unwrap();
+        store.upsert_note(stays, b, "Other.md", Some("Other")).unwrap();
+        store.append_update(DocId::Note(moved), b"x", None).unwrap();
+        store.append_update(DocId::Vault(a), b"y", None).unwrap();
+        store.set_membership(a, "u1", Role::Owner).unwrap();
+        store.set_membership(b, "u1", Role::Owner).unwrap();
+
+        // The merge re-parented the note before the vault was erased.
+        store.upsert_note(moved, b, "Loose/Plan.md", Some("Plan")).unwrap();
+        assert_eq!(store.delete_vault(a).unwrap(), 0, "nothing was still in it");
+        assert_eq!(store.membership(a, "u1").unwrap(), None);
+        assert!(store.load_updates(DocId::Vault(a)).unwrap().is_empty());
+        assert_eq!(
+            store.load_updates(DocId::Note(moved)).unwrap().len(),
+            1,
+            "the note that moved keeps its doc"
+        );
+        assert_eq!(store.list_notes(b).unwrap().len(), 2);
     }
 
     #[test]
