@@ -2,27 +2,65 @@
   --ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --prose: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --mono: ui-monospace, 'JetBrains Mono', 'Fira Code', Menlo, monospace;
-  --bg: #ffffff;
-  --panel: #f6f6f7;
-  --fg: #1f2328;
-  --muted: #6b7280;
-  --border: #e2e4e8;
-  --hover: #ececef;
-  --accent: #2563eb;
-  --accent-bg: #2563eb1a;
-  --code-bg: #f0f1f3;
+  /* A warm near-white rather than pure #fff: the page is a sheet of paper the text sits on,
+     and #fff beside a serif face reads as a form field. */
+  --bg: #fdfcfb;
+  --panel: #f6f4f1;
+  /* The right panel is a shade lighter than the left: it is closer to the document, and the
+     two would otherwise clamp the editor between identical greys. */
+  --panel-2: #f8f6f4;
+  /* Behind the tab strip and the list headers — the chrome that is not a panel of its own. */
+  --chrome: #f2efeb;
+  --fg: #26221e;
+  /* Prose is a touch darker than UI text: at 17.5px serif on paper the UI grey reads thin. */
+  --prose-fg: #231f1b;
+  --muted: #8a857e;
+  /* Metadata that must stay legible but never compete: dates, counts, snippets. */
+  --faint: #a8a29a;
+  --border: #e4e0da;
+  /* Inside the document column, where a full-strength rule would cut the page in half. */
+  --border-soft: #eceae6;
+  --hover: #f2f0ed;
+  --accent: oklch(0.55 0.11 260);
+  --accent-fg: #fff;
+  /* Selection fill for a *row*. Not accent-at-low-alpha: over the warm panel that goes muddy,
+     so it is a mixed violet-grey of its own. */
+  --accent-bg: #e9e6f2;
+  --sel-fg: #221f2e;
+  --sel-muted: #7b7590;
+  --code-bg: #f2f0ed;
+  --tag-bg: #eeebe6;
+  --danger: #b3261e;
+  --danger-bg: #fbeae8;
+  --danger-border: #f0c8c4;
+  --ok: oklch(0.68 0.13 150);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17181b;
-    --panel: #1f2126;
-    --fg: #e6e7ea;
-    --muted: #9aa0a8;
-    --border: #2d3037;
-    --hover: #2a2d34;
-    --accent: #7aa2f7;
-    --accent-bg: #7aa2f726;
-    --code-bg: #24272e;
+    /* The same paper, unlit — warm-neutral rather than the blue-grey a generic dark theme
+       reaches for, so switching themes does not also switch the app's temperature. */
+    --bg: #1a1816;
+    --panel: #211e1b;
+    --panel-2: #1e1b18;
+    --chrome: #232019;
+    --fg: #e8e4de;
+    --prose-fg: #ece8e1;
+    --muted: #9a938a;
+    --faint: #7d766d;
+    --border: #322e2a;
+    --border-soft: #2a2724;
+    --hover: #2b2723;
+    --accent: oklch(0.72 0.11 260);
+    --accent-fg: #14131c;
+    --accent-bg: #2e2c3f;
+    --sel-fg: #e6e3f2;
+    --sel-muted: #a29bbb;
+    --code-bg: #26231f;
+    --tag-bg: #2b2723;
+    --danger: #f2b8b5;
+    --danger-bg: #33201e;
+    --danger-border: #5c302c;
+    --ok: oklch(0.62 0.13 150);
   }
 }
 * {
@@ -43,6 +81,7 @@ body {
   font-family: var(--ui);
   background: var(--bg);
   color: var(--fg);
+  -webkit-font-smoothing: antialiased;
   /* The panes scroll; the app itself never does, so nothing should rubber-band behind them. */
   overscroll-behavior-y: none;
   /* Turning the device sideways must not re-flow the UI font. */
