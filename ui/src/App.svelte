@@ -8,6 +8,7 @@
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
+  import { unnamedNote } from './lib/notename.ts'
   import { Workspace } from './lib/workspace.svelte.ts'
   import { ulid } from './lib/ulid.ts'
   import FilesPane from './components/FilesPane.svelte'
@@ -833,7 +834,7 @@
     }
   }
 
-  let activePath = $derived(session && active ? (session.pathOf(active) ?? (solo ? 'shared note' : '(deleted)')) : '')
+  let activePath = $derived(session && active ? (session.pathOf(active) ?? unnamedNote(session)) : '')
   /** What the narrow top bar names, where there is no tab strip wide enough to read. */
   let activeTitle = $derived(active && !isBlank(active) && activePath ? displayName(activePath) : 'Lemmate')
   let denied = $derived(solo ? solo.denied : (workspace?.denied ?? null))

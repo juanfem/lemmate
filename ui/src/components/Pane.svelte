@@ -32,6 +32,7 @@
   import Icon from './Icon.svelte'
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
   import type { OutlineItem } from '../lib/outline.ts'
+  import { unnamedNote } from '../lib/notename.ts'
 
   let {
     lookup,
@@ -109,15 +110,11 @@
 
   let isHistory = $derived(pane.kind === 'history')
 
-  /** Reactive path lookup: `session.notes` updates on rename, `pathOf` alone would not. */
   function pathOf(id: string): string | undefined {
-    const s = lookup(id)
-    return s?.notes.find((n) => n.id === id)?.path ?? s?.pathOf(id)
+    return lookup(id)?.pathOf(id)
   }
   let session = $derived(pane.active ? lookup(pane.active) : undefined)
-  let activePath = $derived(
-    pane.active ? (pathOf(pane.active) ?? (session?.noteOnly ? 'shared note' : '(deleted)')) : '',
-  )
+  let activePath = $derived(pane.active ? (pathOf(pane.active) ?? unnamedNote(session)) : '')
   // Pinned tabs sort first; the rest keep the order they were opened in.
   let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
 
@@ -171,7 +168,7 @@
         {:else if pinned.includes(id)}
           <span class="dot pinned" title="Pinned"></span>
         {/if}
-        <span class="label">{isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}{isHistory ? ' · history' : ''}</span>
+        <span class="label">{isBlank(id) ? 'New tab' : (displayName(pathOf(id) ?? '') || '…')}{isHistory ? ' · history' : ''}</span>
         {#if isHistory}
           <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
         {:else if !pinned.includes(id)}

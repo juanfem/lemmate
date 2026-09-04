@@ -73,6 +73,13 @@ export class VaultSession {
   name = $state('')
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
+  /**
+   * Whether there is a note list to be judged against yet. Until there is, an id that resolves
+   * to no path is *unknown*, not deleted: a cold start restores its tabs before either copy of
+   * the vault doc — the offline cache's or the server's — has arrived. A list with notes in it
+   * came from one of them; an empty one only counts once the server has confirmed it.
+   */
+  vaultLoaded = $derived(this.vaultSynced || this.notes.length > 0)
   /** Last permission denial from the server, for the shell to show. */
   denied: { docId: string; reason: string } | null = $state(null)
 
@@ -280,8 +287,13 @@ export class VaultSession {
     return this.name || `vault ${this.id.slice(-6)}`
   }
 
+  /**
+   * The `notes` array first, and only then the map behind it: `notes` is `$state` and the yjs
+   * map is not, so a `$derived` that asks the map alone is computed once — before the vault doc
+   * has arrived — and never again. That is how a restored tab ends up labelled "(deleted)".
+   */
   pathOf(id: string): string | undefined {
-    return this.notesMap.get(id)
+    return this.notes.find((n) => n.id === id)?.path ?? this.notesMap.get(id)
   }
 
   idOf(path: string): string | undefined {
