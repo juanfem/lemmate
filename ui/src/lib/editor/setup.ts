@@ -67,7 +67,25 @@ const theme = EditorView.theme({
   // The number keeps its natural width — `viii.` is wider than `8.` — and the marker colour
   // the highlighter gave the digits it replaces.
   '.cm-list-number': { color: 'var(--muted)' },
-  '.cm-task-checkbox': { marginRight: '0.4em', verticalAlign: 'middle' },
+  // Drawn rather than left to the browser: a default control takes its colours from the
+  // platform's colour scheme, and an unchecked one is then a dark box on our dark background —
+  // present, clickable, and all but invisible. These follow the theme's own tokens instead.
+  '.cm-task-checkbox': {
+    appearance: 'none',
+    width: '0.95em',
+    height: '0.95em',
+    margin: '0 0.4em 0 0',
+    verticalAlign: '-0.1em',
+    border: '1.5px solid var(--muted)',
+    borderRadius: '3px',
+    background: 'var(--bg)',
+    cursor: 'pointer',
+  },
+  '.cm-task-checkbox:hover': { borderColor: 'var(--accent)' },
+  '.cm-task-checkbox:checked': {
+    background: `var(--accent) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg>") center/0.8em no-repeat`,
+    borderColor: 'var(--accent)',
+  },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },
   '.cm-tooltip.cm-tooltip-autocomplete': { fontFamily: 'var(--ui)', fontSize: '0.85em', border: '1px solid var(--border)', background: 'var(--panel)', borderRadius: '6px' },
   '.cm-tooltip-autocomplete ul li[aria-selected]': { background: 'var(--accent-bg)', color: 'inherit' },
