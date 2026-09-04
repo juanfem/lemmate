@@ -60,6 +60,9 @@ const theme = EditorView.theme({
   '.cm-wikilink-src': { color: 'var(--accent)' },
   '.cm-math-block': { display: 'block', textAlign: 'center', padding: '0.5em 0' },
   '.cm-embed-image': { maxWidth: '100%', display: 'block', padding: '0.5em 0' },
+  // A fixed width for every shape, so the text after the marker lines up whatever the level's
+  // bullet is — and so the widget takes the same room the `-` it replaces did.
+  '.cm-list-bullet': { display: 'inline-block', width: '1ch', textAlign: 'center', color: 'var(--muted)' },
   '.cm-task-checkbox': { marginRight: '0.4em', verticalAlign: 'middle' },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },
   '.cm-tooltip.cm-tooltip-autocomplete': { fontFamily: 'var(--ui)', fontSize: '0.85em', border: '1px solid var(--border)', background: 'var(--panel)', borderRadius: '6px' },

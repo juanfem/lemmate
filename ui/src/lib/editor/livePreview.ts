@@ -112,6 +112,36 @@ class CheckboxWidget extends WidgetType {
   }
 }
 
+/**
+ * The bullet a `-`/`*`/`+` marker renders as, by nesting depth (1 = outermost). Editors give
+ * each level its own shape so the structure reads at a glance; the sequence is the CSS one,
+ * disc → circle → square, and cycles past three. A task item renders nothing: its checkbox
+ * is already the marker, and a bullet beside it is one marker too many. The empty widget still
+ * takes the marker's width, so a task lines up with its bullet siblings.
+ */
+export function listBullet(depth: number, task: boolean): string {
+  if (task) return ''
+  const shapes = ['\u2022', '\u25e6', '\u25aa']
+  return shapes[(Math.max(1, depth) - 1) % shapes.length]!
+}
+
+class BulletWidget extends WidgetType {
+  readonly bullet: string
+  constructor(bullet: string) {
+    super()
+    this.bullet = bullet
+  }
+  eq(other: BulletWidget) {
+    return other.bullet === this.bullet
+  }
+  toDOM() {
+    const el = document.createElement('span')
+    el.className = 'cm-list-bullet'
+    el.textContent = this.bullet
+    return el
+  }
+}
+
 const hide = Decoration.replace({})
 
 class CalloutTitle extends WidgetType {
@@ -303,6 +333,18 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             const raw = state.sliceDoc(node.from, node.to).trim()
             const tex = raw.replace(/^\$\$/u, '').replace(/\$\$$/u, '').trim()
             push(node.from, node.to, Decoration.replace({ widget: new MathWidget(tex, true), block: true }))
+            break
+          }
+          case 'ListMark': {
+            // Bullet lists only: an ordered list's `1.` is already the marker it renders as.
+            const item = n.parent
+            const list = item?.parent
+            if (!item || list?.name !== 'BulletList' || revealed(state, node.from, node.to)) break
+            let depth = 0
+            for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === 'BulletList') depth++
+            // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
+            const bullet = listBullet(depth, item.getChild('Task') !== null)
+            push(node.from, node.to, Decoration.replace({ widget: new BulletWidget(bullet) }))
             break
           }
           case 'TaskMarker': {
