@@ -32,14 +32,26 @@ const highlight = HighlightStyle.define([
 
 const theme = EditorView.theme({
   '&': { height: '100%', fontSize: '16px' },
-  '.cm-scroller': { fontFamily: 'var(--prose)', lineHeight: '1.6', padding: '1rem 0' },
-  // The side padding is a comfortable margin on a monitor and half the line length on a
-  // phone, so it shrinks with the viewport instead of staying a fixed 2rem.
-  '.cm-content': { maxWidth: '46rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2rem)', caretColor: 'var(--fg)' },
+  '.cm-scroller': { fontFamily: 'var(--prose)', lineHeight: '1.65', padding: '2.75rem 0' },
+  // A measure, not a text field: 680px is about 70 characters at this size, and centring it
+  // makes the pane read as a page rather than as an input that happens to start partway
+  // across. The side padding is a comfortable margin on a monitor and half the line length on
+  // a phone, so it shrinks with the viewport instead of staying a fixed 2rem.
+  '.cm-content': { maxWidth: '42.5rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '1.5px' },
+  // A full-width band is a lot of colour to spend on "the cursor is here". A short fade from
+  // the left margin says the same thing and stops competing with the text sitting on it.
+  '.cm-activeLine': {
+    background: 'linear-gradient(90deg, color-mix(in srgb, var(--accent) 11%, transparent), transparent 62%)',
+    borderRadius: '3px',
+  },
   '&.cm-focused': { outline: 'none' },
   '.cm-line': { padding: '0' },
-  '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--muted)' },
-  '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35 },
+  // Kept tight on purpose. The gutter is in the flow, so every pixel of it shifts the centred
+  // measure to the right of the pane's real centre; a fold arrow needs nowhere near the default
+  // width, and the narrower it is the closer the document sits to actually centred.
+  '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--faint)', minWidth: '0' },
+  '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35, padding: '0 0.3em' },
   '.cm-foldGutter:hover .cm-gutterElement': { opacity: 1 },
   '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
   // Space above a heading is *padding*, never margin: CodeMirror's height map measures each
@@ -53,8 +65,24 @@ const theme = EditorView.theme({
   '.cm-blockquote': { borderLeft: '3px solid var(--accent)', paddingLeft: '0.75em', color: 'var(--muted)' },
   // The gap below the properties is padding on an unstyled wrapper rather than a margin on the
   // box itself, for the same measuring reason as `.cm-heading` above.
-  '.cm-frontmatter': { paddingBottom: '1em' },
-  '.cm-frontmatter-box': { fontFamily: 'var(--ui)', fontSize: '0.8em', color: 'var(--muted)', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.3em 0.7em', cursor: 'text' },
+  '.cm-frontmatter': { paddingBottom: '1.4em' },
+  // A chip, not a box: live mode shows the document, and the storage format is a footnote you
+  // can open. Sized to its contents so it does not read as an empty input across the measure.
+  '.cm-frontmatter-box': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.45em',
+    fontFamily: 'var(--ui)',
+    fontSize: '0.7em',
+    color: 'var(--faint)',
+    background: 'var(--panel)',
+    border: '1px solid var(--border)',
+    borderRadius: '5px',
+    padding: '0.25em 0.6em',
+    cursor: 'pointer',
+  },
+  '.cm-frontmatter-box:hover': { color: 'var(--fg)', background: 'var(--hover)' },
+  '.cm-frontmatter-caret': { fontSize: '0.85em', opacity: '0.7' },
   '.cm-tag': { color: 'var(--accent)', background: 'var(--accent-bg)', borderRadius: '999px', padding: '0 0.4em' },
   '.cm-wikilink': { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer' },
   '.cm-wikilink:hover': { textDecoration: 'underline' },

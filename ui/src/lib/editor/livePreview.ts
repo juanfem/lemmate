@@ -219,7 +219,12 @@ class FrontMatterWidget extends WidgetType {
     wrap.className = 'cm-frontmatter'
     const box = document.createElement('div')
     box.className = 'cm-frontmatter-box'
-    box.textContent = this.summary || 'properties'
+    const label = document.createElement('span')
+    label.textContent = this.summary || 'properties'
+    const caret = document.createElement('span')
+    caret.className = 'cm-frontmatter-caret'
+    caret.textContent = '⌄'
+    box.append(label, caret)
     box.title = 'Front matter — click to edit'
     wrap.appendChild(box)
     return wrap
@@ -241,15 +246,20 @@ function frontMatterRange(state: EditorState): { from: number; to: number; body:
   return null
 }
 
+/**
+ * What the collapsed chip says: the property names, then how many there are — "id · 1
+ * property". Names rather than values, because the chip has to stay chip-sized; the values
+ * are one click away, and a long list truncates to the first few.
+ */
 function frontMatterSummary(body: string): string {
   const keys: string[] = []
   for (const line of body.split('\n')) {
-    const m = /^([A-Za-z_][\w-]*):\s*(.*)$/u.exec(line)
-    if (!m) continue
-    const v = m[2]!.trim()
-    keys.push(v && m[1] !== 'id' ? `${m[1]}: ${v.length > 40 ? v.slice(0, 40) + '…' : v}` : m[1]!)
+    const m = /^([A-Za-z_][\w-]*):/u.exec(line)
+    if (m) keys.push(m[1]!)
   }
-  return keys.join('   ·   ')
+  if (keys.length === 0) return ''
+  const shown = keys.length > 3 ? [...keys.slice(0, 3), '…'] : keys
+  return `${shown.join(' · ')} · ${keys.length} ${keys.length === 1 ? 'property' : 'properties'}`
 }
 
 /** Does any selection range touch the lines spanned by [from, to]? */
