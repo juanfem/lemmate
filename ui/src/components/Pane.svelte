@@ -48,6 +48,7 @@
     onRename,
     onDelete,
     onOpen,
+    onTag,
     onPresence,
     onMode,
     onNewTab,
@@ -76,6 +77,8 @@
     onRename: () => void
     onDelete: () => void
     onOpen: (id: string) => void
+    /** A tag chip on the page: show the sidebar's Tags pane, filtered to it. */
+    onTag: (tag: string) => void
     onPresence?: (names: string[]) => void
     onMode?: (mode: ViewMode) => void
     onNewTab?: () => void
@@ -246,6 +249,7 @@
             {trail}
             onHeadings={(h) => (headings = h)}
             onHere={(p) => (here = p)}
+            {onTag}
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}
             mode={pane.mode}

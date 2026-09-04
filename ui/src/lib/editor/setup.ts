@@ -161,12 +161,16 @@ const theme = EditorView.theme({
   },
   '.cm-page-tags': { display: 'flex', flexWrap: 'wrap', gap: '0.375rem' },
   '.cm-page-tag': {
+    fontFamily: 'inherit',
     fontSize: '0.72rem',
     color: 'var(--fg)',
     background: 'var(--tag-bg)',
+    border: '0',
     borderRadius: '20px',
     padding: '0.1875rem 0.625rem',
+    cursor: 'pointer',
   },
+  '.cm-page-tag:hover': { color: 'var(--accent)' },
   '.cm-page-none': { margin: '0', fontSize: '0.75rem', lineHeight: '1.45', color: 'var(--faint)' },
   '.cm-page-backlink': {
     display: 'flex',

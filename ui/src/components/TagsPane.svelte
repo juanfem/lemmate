@@ -2,19 +2,43 @@
   import { api, type NoteSummary } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
 
-  let { vault, version, onOpen }: { vault: string; version: number; onOpen: (id: string) => void } = $props()
+  let {
+    vault,
+    version,
+    onOpen,
+    selected = $bindable(null),
+  }: {
+    vault: string
+    version: number
+    onOpen: (id: string) => void
+    /** Which tag is being listed. Owned by the shell, because a tag chip at the foot of a note
+     *  picks one too, and the choice has to outlive this pane being swapped for another. */
+    selected?: string | null
+  } = $props()
   let tags: { tag: string; count: number }[] = $state([])
-  let selected: string | null = $state(null)
   let notes: NoteSummary[] = $state([])
 
   $effect(() => {
     version // reload whenever the vault changes
     api.tags(vault).then((t) => (tags = t)).catch(() => (tags = []))
   })
-  async function pick(tag: string) {
-    selected = selected === tag ? null : tag
-    notes = selected ? await api.tagged(vault, selected).catch(() => []) : []
-  }
+  $effect(() => {
+    const tag = selected
+    const v = vault
+    if (!tag) {
+      notes = []
+      return
+    }
+    let live = true
+    api
+      .tagged(v, tag)
+      .then((n) => live && (notes = n))
+      .catch(() => live && (notes = []))
+    return () => {
+      live = false
+    }
+  })
+  const pick = (tag: string) => (selected = selected === tag ? null : tag)
 </script>
 
 <div class="tags">
@@ -22,7 +46,7 @@
     {#each tags as t (t.tag)}
       <button class="chip" class:on={t.tag === selected} onclick={() => pick(t.tag)}>#{t.tag} <span>{t.count}</span></button>
     {/each}
-    {#if tags.length === 0}<p class="empty">No tags yet. Type <code>#tag</code> in a note.</p>{/if}
+    {#if tags.length === 0}<p class="empty">No tags yet. Write <code>#tag</code> in a note, or list <code>tags:</code> in its front matter.</p>{/if}
   </div>
   {#if selected}
     <ul>

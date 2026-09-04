@@ -19,6 +19,7 @@
     onOpen,
     onHeadings,
     onHere,
+    onTag,
     onPresence,
     onStats,
     trail = [],
@@ -31,6 +32,8 @@
     onHeadings?: (items: OutlineItem[]) => void
     /** Where the reader is: the document position at the top of the viewport. */
     onHere?: (pos: number) => void
+    /** A tag chip at the foot of the page was clicked: show what else carries it. */
+    onTag: (tag: string) => void
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
@@ -53,7 +56,7 @@
   let tags: string[] = $state([])
   let backlinks: Backlink[] = $state([])
   $effect(() => renderPageHead(head, trail))
-  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen }))
+  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen, onTag }))
   // Backlinks are a round trip, so they are fetched once per note rather than per keystroke;
   // a link written elsewhere shows up the next time this note is opened.
   $effect(() => {

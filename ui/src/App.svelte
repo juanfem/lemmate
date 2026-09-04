@@ -227,6 +227,16 @@
   let layoutRestored = $state(false)
 
   let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' | 'trash' = $state('files')
+  /** The tag the Tags pane is listing. Here rather than in the pane: a tag chip at the foot of
+   *  a note picks one too, and the pane is unmounted whenever another tab is showing. */
+  let tagFilter: string | null = $state(null)
+  /** A tag chip on a note's page: show what else carries it, in the sidebar where tags live. */
+  function filterByTag(tag: string) {
+    tagFilter = tag
+    sidebar = 'tags'
+    // On a phone the sidebar is a drawer, and the answer is inside it.
+    if (narrow.current) drawer = true
+  }
   /** The palette, or null when closed; the string is what it opens with — `>` for commands. */
   let palette = $state<string | null>(null)
   let revealFolder: ((vault: string, folder: string) => void) | undefined = $state()
@@ -937,7 +947,7 @@
       {:else if sidebar === 'search'}
         <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
       {:else if sidebar === 'tags'}
-        {#if session}<TagsPane vault={session.id} version={tagsVersion} onOpen={open} />{/if}
+        {#if session}<TagsPane vault={session.id} version={tagsVersion} bind:selected={tagFilter} onOpen={open} />{/if}
       {:else if sidebar === 'trash'}
         {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
       {:else}
@@ -1028,6 +1038,7 @@
           onShare={onRelay ? undefined : () => (shareOpen = true)}
           onRename={renameActive}
           onDelete={deleteActive}
+          onTag={(t) => { focusedPane = i; filterByTag(t) }}
           onOpen={(id) => { focusedPane = i; open(id) }}
           onPresence={(names) => (presenceByPane[p.id] = names)}
           onMode={(m) => { focusedPane = i; p.mode = m }}

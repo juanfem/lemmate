@@ -392,7 +392,8 @@ the note you are reading is on the note's own page rather than in a panel beside
   header switches between **Recent** and **Name** order. Where the server or relay cannot
   answer with a listing, rows show no date and the order falls back to the alphabet.
 - **Tags** shows every tag with a count; clicking one lists its notes, including nested tags
-  under it (`#projects` matches `#projects/alpha`).
+  under it (`#projects` matches `#projects/alpha`). A tag chip at the foot of a note picks one
+  here too, and the choice survives switching to another tab and back.
 - **Starred** are bookmarks. They live in the vault doc, so they follow you to every device;
   `Ctrl+Shift+B` toggles one for the current note.
 - **Your own name** sits at the very bottom, above the status line, and opens the account menu
@@ -411,7 +412,8 @@ lives there and underneath it rather than in a column of its own:
   margin (roughly the width of two panes on a laptop).
 - **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
   the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
-  declares — lower-cased, as they appear in the Tags pane and in search. Backlinks match links
+  declares — lower-cased, as they appear in the Tags pane and in search. Click one to list
+  every note that carries it, in the sidebar's Tags tab. Backlinks match links
   whose target is the note's full path, its path without extension, or its basename. Unlinked
   mentions, outgoing links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).

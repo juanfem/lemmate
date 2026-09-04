@@ -84,7 +84,13 @@ export function renderPageHead(el: HTMLElement, trail: string[]) {
  */
 export function renderPageFoot(
   el: HTMLElement,
-  data: { tags: string[]; backlinks: Backlink[]; onOpen: (id: string) => void },
+  data: {
+    tags: string[]
+    backlinks: Backlink[]
+    onOpen: (id: string) => void
+    /** Show every note carrying this tag. */
+    onTag: (tag: string) => void
+  },
 ) {
   el.replaceChildren()
 
@@ -104,9 +110,13 @@ export function renderPageFoot(
     row.className = 'cm-page-tags'
     // The names arrive normalised, without the `#` an inline tag is written with. Both kinds
     // are drawn the same way: where a note declared its tags is not what the shelf is about.
+    // A tag on a note is a question — what else is filed under this — so each chip asks it.
     for (const t of data.tags) {
-      const chip = row.appendChild(document.createElement('span'))
+      const chip = row.appendChild(document.createElement('button'))
       chip.className = 'cm-page-tag'
+      chip.type = 'button'
+      chip.title = `Show notes tagged #${t}`
+      chip.addEventListener('click', () => data.onTag(t))
       chip.textContent = `#${t}`
     }
   }
