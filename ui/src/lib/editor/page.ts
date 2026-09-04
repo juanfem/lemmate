@@ -90,35 +90,46 @@ export function renderPageFoot(
     onOpen: (id: string) => void
     /** Show every note carrying this tag. */
     onTag: (tag: string) => void
+    /** Put another tag on this note. Absent where nothing can ask for its name. */
+    onAddTag?: () => void
   },
 ) {
   el.replaceChildren()
 
   const tags = shelf(el, 'Tags')
+  const row = tags.appendChild(document.createElement('div'))
+  row.className = 'cm-page-tags'
+  // The names arrive normalised, without the `#` an inline tag is written with. Both kinds are
+  // drawn the same way: where a note declared its tags is not what the shelf is about. A tag on
+  // a note is a question — what else is filed under this — so each chip asks it.
+  for (const t of data.tags) {
+    const chip = row.appendChild(document.createElement('button'))
+    chip.className = 'cm-page-tag'
+    chip.type = 'button'
+    chip.title = `Show notes tagged #${t}`
+    chip.addEventListener('click', () => data.onTag(t))
+    chip.textContent = `#${t}`
+  }
+  if (data.onAddTag) {
+    const add = row.appendChild(document.createElement('button'))
+    add.className = 'cm-page-tag cm-page-tag-add'
+    add.type = 'button'
+    add.title = 'Add a tag to this note'
+    add.setAttribute('aria-label', 'Add a tag')
+    // On an empty shelf a lone `+` has nothing beside it to be a plus *of*, so it says so.
+    add.textContent = data.tags.length ? '+' : '+ Add a tag'
+    add.addEventListener('click', () => data.onAddTag?.())
+  }
   if (data.tags.length === 0) {
     const none = tags.appendChild(document.createElement('p'))
     none.className = 'cm-page-none'
-    none.append('Write ')
+    none.append('Or write ')
     const code = none.appendChild(document.createElement('code'))
     code.textContent = '#a-tag'
     none.append(' in the note, or list ')
     const fm = none.appendChild(document.createElement('code'))
     fm.textContent = 'tags:'
     none.append(' in its front matter.')
-  } else {
-    const row = tags.appendChild(document.createElement('div'))
-    row.className = 'cm-page-tags'
-    // The names arrive normalised, without the `#` an inline tag is written with. Both kinds
-    // are drawn the same way: where a note declared its tags is not what the shelf is about.
-    // A tag on a note is a question — what else is filed under this — so each chip asks it.
-    for (const t of data.tags) {
-      const chip = row.appendChild(document.createElement('button'))
-      chip.className = 'cm-page-tag'
-      chip.type = 'button'
-      chip.title = `Show notes tagged #${t}`
-      chip.addEventListener('click', () => data.onTag(t))
-      chip.textContent = `#${t}`
-    }
   }
 
   const links = shelf(el, data.backlinks.length ? `Backlinks · ${data.backlinks.length}` : 'Backlinks')

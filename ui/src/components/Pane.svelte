@@ -92,7 +92,11 @@
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
     onSeq?: (seq: number) => void
-    onAsk?: (title: string, initial: string) => Promise<string | null>
+    onAsk?: (
+      title: string,
+      initial: string,
+      opts?: { placeholder?: string; suggestions?: string[] },
+    ) => Promise<string | null>
     jumpTo?: (pos: number) => void
   } = $props()
 
@@ -250,6 +254,7 @@
             onHeadings={(h) => (headings = h)}
             onHere={(p) => (here = p)}
             {onTag}
+            {onAsk}
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}
             mode={pane.mode}

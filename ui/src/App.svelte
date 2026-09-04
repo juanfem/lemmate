@@ -419,6 +419,7 @@
     body?: string
     initial?: string
     placeholder?: string
+    suggestions?: string[]
     confirmLabel?: string
     danger?: boolean
   }
@@ -1049,7 +1050,7 @@
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
           onSeq={(seq) => { focusedPane = i; p.seq = seq }}
-          onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })}
+          onAsk={(title, initial, opts) => ask({ kind: 'prompt', title, initial, ...opts })}
         />
       {/each}
     </section>
@@ -1111,6 +1112,7 @@
     kind={modal.kind}
     initial={modal.initial}
     placeholder={modal.placeholder}
+    suggestions={modal.suggestions}
     confirmLabel={modal.confirmLabel}
     danger={modal.danger}
     onSubmit={(value) => closeModal(value)}

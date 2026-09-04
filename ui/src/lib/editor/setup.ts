@@ -171,7 +171,18 @@ const theme = EditorView.theme({
     cursor: 'pointer',
   },
   '.cm-page-tag:hover': { color: 'var(--accent)' },
+  // An empty outline rather than a filled chip: it is a place to put a tag, not a tag.
+  '.cm-page-tag-add': {
+    color: 'var(--muted)',
+    background: 'none',
+    border: '1px dashed var(--border)',
+    padding: 'calc(0.1875rem - 1px) calc(0.625rem - 1px)',
+  },
+  '.cm-page-tag-add:hover': { color: 'var(--accent)', borderColor: 'var(--accent)' },
   '.cm-page-none': { margin: '0', fontSize: '0.75rem', lineHeight: '1.45', color: 'var(--faint)' },
+  // The hint under an empty shelf is about the row above it, not crowding it. Padding, not a
+  // margin: a vertical margin inside `.cm-content` desynchronises the height map (theme.test).
+  '.cm-page-tags + .cm-page-none': { paddingTop: '0.5rem' },
   '.cm-page-backlink': {
     display: 'flex',
     flexDirection: 'column',

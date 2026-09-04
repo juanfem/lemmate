@@ -413,7 +413,13 @@ lives there and underneath it rather than in a column of its own:
 - **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
   the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
   declares — lower-cased, as they appear in the Tags pane and in search. Click one to list
-  every note that carries it, in the sidebar's Tags tab. Backlinks match links
+  every note that carries it, in the sidebar's Tags tab. **+** adds one, completing from the
+  tags the vault already uses: it is written into the note's `tags:` front matter, joining the
+  list in whichever style the note already writes it (`[a, b]`, one `- item` per line, or
+  `a, b`), and a note with no front matter gets one. Spaces become hyphens and the name is
+  lower-cased, so what you get is what the index would have found. Taking a tag *off* is an
+  ordinary edit: delete it from the front matter, or delete the `#word` from the text.
+  Backlinks match links
   whose target is the note's full path, its path without extension, or its basename. Unlinked
   mentions, outgoing links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).

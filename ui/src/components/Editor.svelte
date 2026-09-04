@@ -12,6 +12,7 @@
   import type { OutlineItem } from '../lib/outline.ts'
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
   import { embedUrlFor } from '../lib/attachments.ts'
+  import { addTagToFrontMatter, cleanTag } from '../lib/tagedit.ts'
 
   let {
     session,
@@ -20,6 +21,7 @@
     onHeadings,
     onHere,
     onTag,
+    onAsk,
     onPresence,
     onStats,
     trail = [],
@@ -34,6 +36,12 @@
     onHere?: (pos: number) => void
     /** A tag chip at the foot of the page was clicked: show what else carries it. */
     onTag: (tag: string) => void
+    /** The shell's prompt dialog, for naming a new tag. */
+    onAsk?: (
+      title: string,
+      initial: string,
+      opts?: { placeholder?: string; suggestions?: string[] },
+    ) => Promise<string | null>
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
@@ -56,7 +64,7 @@
   let tags: string[] = $state([])
   let backlinks: Backlink[] = $state([])
   $effect(() => renderPageHead(head, trail))
-  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen, onTag }))
+  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen, onTag, onAddTag: onAsk && addTag }))
   // Backlinks are a round trip, so they are fetched once per note rather than per keystroke;
   // a link written elsewhere shows up the next time this note is opened.
   $effect(() => {
@@ -74,6 +82,30 @@
       live = false
     }
   })
+
+  /**
+   * Put another tag on this note. It goes in the front matter rather than into the prose: a tag
+   * the reader adds is a declaration *about* the note, and the front matter is the one place it
+   * can be taken off again without hunting through the text for a `#word`.
+   */
+  async function addTag() {
+    const v = view
+    if (!v || !onAsk) return
+    // The vault's own tags, minus the ones this note already has: completing to a tag that is
+    // already on the page is the one suggestion that cannot be useful.
+    const known = await api
+      .tags(session.id)
+      .then((t) => t.map((x) => x.tag).filter((t) => !tags.includes(t)))
+      .catch(() => [])
+    const typed = await onAsk('Add a tag', '', { placeholder: 'name', suggestions: known })
+    if (typed === null) return
+    const tag = cleanTag(typed)
+    // Already carried — inline or declared — so there is nothing to write.
+    if (!tag || tags.includes(tag)) return
+    const edit = addTagToFrontMatter(v.state.doc.toString(), tag)
+    if (edit) v.dispatch({ changes: edit })
+    v.focus()
+  }
 
   const embedUrl = (target: string) => embedUrlFor(session, session.pathOf(noteId) ?? '', target)
 

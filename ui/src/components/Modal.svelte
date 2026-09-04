@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** Each open prompt needs its own `<datalist>` id for the input to point at. */
+  let lists = 0
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte'
 
@@ -7,6 +12,7 @@
     kind,
     initial = '',
     placeholder = '',
+    suggestions = [],
     confirmLabel = 'OK',
     danger = false,
     onSubmit,
@@ -18,11 +24,15 @@
     kind: 'prompt' | 'confirm'
     initial?: string
     placeholder?: string
+    /** Values to complete from. Offered, never enforced — the field still takes anything. */
+    suggestions?: string[]
     confirmLabel?: string
     danger?: boolean
     onSubmit: (value: string) => void
     onCancel: () => void
   } = $props()
+
+  const listId = `modal-suggest-${(lists += 1)}`
 
   // `initial` seeds the field once; later edits live in `value`.
   let value = $state(untrack(() => initial))
@@ -62,7 +72,12 @@
     <h2>{title}</h2>
     {#if body}<p class="body">{body}</p>{/if}
     {#if kind === 'prompt'}
-      <input bind:this={input} bind:value {placeholder} />
+      <input bind:this={input} bind:value {placeholder} list={suggestions.length ? listId : undefined} />
+      {#if suggestions.length}
+        <datalist id={listId}>
+          {#each suggestions as s (s)}<option value={s}></option>{/each}
+        </datalist>
+      {/if}
     {/if}
     <div class="actions">
       <button onclick={onCancel}>Cancel</button>
