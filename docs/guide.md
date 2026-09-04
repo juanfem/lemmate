@@ -260,7 +260,9 @@ Live preview hides markup and draws the result in place; the markup comes back o
 cursor or selection touches. Rendered **in the editor**: headings, emphasis/strong/strikeout,
 inline code, links, images, wikilinks and image embeds, `$…$` and `$$…$$` via KaTeX, `#tags`,
 task checkboxes, blockquotes, fenced code blocks, callout blocks, and front matter (folded to a
-one-line property summary — click it to edit).
+one-line property summary — click it to edit). List markers follow the level they are on: `•`,
+`◦` and `▪` down a bullet list, and `1.`, `a.`, `i.` down an ordered one (whatever digits and
+delimiter the file holds). A task line shows its checkbox and no bullet.
 
 Recognised by the indexer and handled by pandoc **on export only**, with no editor decoration
 today: footnotes, citations, definition lists, superscript/subscript, bracketed spans, header

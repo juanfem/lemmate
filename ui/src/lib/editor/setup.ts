@@ -63,6 +63,9 @@ const theme = EditorView.theme({
   // A fixed width for every shape, so the text after the marker lines up whatever the level's
   // bullet is — and so the widget takes the same room the `-` it replaces did.
   '.cm-list-bullet': { display: 'inline-block', width: '1ch', textAlign: 'center', color: 'var(--muted)' },
+  // The number keeps its natural width — `viii.` is wider than `8.` — and the marker colour
+  // the highlighter gave the digits it replaces.
+  '.cm-list-number': { color: 'var(--muted)' },
   '.cm-task-checkbox': { marginRight: '0.4em', verticalAlign: 'middle' },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },
   '.cm-tooltip.cm-tooltip-autocomplete': { fontFamily: 'var(--ui)', fontSize: '0.85em', border: '1px solid var(--border)', background: 'var(--panel)', borderRadius: '6px' },

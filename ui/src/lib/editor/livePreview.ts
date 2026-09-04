@@ -125,19 +125,58 @@ export function listBullet(depth: number, task: boolean): string {
   return shapes[(Math.max(1, depth) - 1) % shapes.length]!
 }
 
-class BulletWidget extends WidgetType {
-  readonly bullet: string
-  constructor(bullet: string) {
-    super()
-    this.bullet = bullet
+const ALPHA = 'abcdefghijklmnopqrstuvwxyz'
+const ROMAN: [number, string][] = [
+  [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
+  [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
+]
+
+/** `1 → a … 26 → z, 27 → aa`: the spreadsheet numbering CSS calls lower-alpha. */
+function alpha(n: number): string {
+  let out = ''
+  for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) out = ALPHA[(k - 1) % 26]! + out
+  return out
+}
+
+function roman(n: number): string {
+  let out = ''
+  let left = n
+  for (const [value, sign] of ROMAN) {
+    while (left >= value) {
+      out += sign
+      left -= value
+    }
   }
-  eq(other: BulletWidget) {
-    return other.bullet === this.bullet
+  return out
+}
+
+/**
+ * How an ordered item's number is written, by nesting depth (1 = outermost) — the convention
+ * a document uses, `1.` → `a.` → `i.`, cycling past three. `null` leaves the source alone,
+ * which is every top-level item (its digits already are the marker) and anything outside the
+ * range the alphabet and the Roman numerals cover.
+ */
+export function listNumber(depth: number, n: number): string | null {
+  const style = (Math.max(1, depth) - 1) % 3
+  if (style === 0 || n < 1 || n > 3999) return null
+  return style === 1 ? alpha(n) : roman(n)
+}
+
+class MarkerWidget extends WidgetType {
+  readonly text: string
+  readonly cls: string
+  constructor(text: string, cls: string) {
+    super()
+    this.text = text
+    this.cls = cls
+  }
+  eq(other: MarkerWidget) {
+    return other.text === this.text && other.cls === this.cls
   }
   toDOM() {
     const el = document.createElement('span')
-    el.className = 'cm-list-bullet'
-    el.textContent = this.bullet
+    el.className = this.cls
+    el.textContent = this.text
     return el
   }
 }
@@ -336,15 +375,22 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             break
           }
           case 'ListMark': {
-            // Bullet lists only: an ordered list's `1.` is already the marker it renders as.
             const item = n.parent
             const list = item?.parent
-            if (!item || list?.name !== 'BulletList' || revealed(state, node.from, node.to)) break
+            if (!item || !list || revealed(state, node.from, node.to)) break
             let depth = 0
-            for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === 'BulletList') depth++
-            // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
-            const bullet = listBullet(depth, item.getChild('Task') !== null)
-            push(node.from, node.to, Decoration.replace({ widget: new BulletWidget(bullet) }))
+            for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === list.name) depth++
+            if (list.name === 'BulletList') {
+              // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
+              const bullet = listBullet(depth, item.getChild('Task') !== null)
+              push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(bullet, 'cm-list-bullet') }))
+            } else if (list.name === 'OrderedList') {
+              // `12.` or `12)` — the delimiter the author wrote is kept, only the number changes.
+              const m = /^(\d+)([.)])$/u.exec(state.sliceDoc(node.from, node.to))
+              const label = m ? listNumber(depth, Number(m[1])) : null
+              if (label === null) break
+              push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(label + m![2]!, 'cm-list-number') }))
+            }
             break
           }
           case 'TaskMarker': {

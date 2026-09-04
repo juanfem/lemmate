@@ -446,7 +446,11 @@ public links (§11.2) already prove the CodeMirror one reads well without a curs
 Live-preview decorations (hidden markup, rendered widget, revealed when the cursor enters
 the range): headings, emphasis, inline code, links/wikilinks, images, maths, tables,
 callouts, footnote refs, checkboxes, tags, citations, front matter (folded to a property
-panel), horizontal rules, code blocks with language highlighting.
+panel), horizontal rules, code blocks with language highlighting, and list markers — a bullet
+list's `-` renders as a shape chosen by nesting depth (disc, circle, square, cycling) and an
+ordered list's number as decimal, then lower-alpha, then lower-roman, so the level of a nested
+item reads without counting the indentation. A task item's bullet is dropped: the checkbox is
+its marker.
 
 Editing features:
 - Autocomplete: `[[` notes and headings, `#` tags, `@` citations, `:::` callout kinds,
