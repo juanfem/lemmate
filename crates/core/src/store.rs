@@ -607,6 +607,11 @@ impl Store {
     /// Record where a note is. The vault is part of that: a note's home is whichever vault doc
     /// names it, so a note that turns up in another vault's doc — which is what a merge does
     /// (SPEC §3.2) — is re-parented here rather than left behind in the vault it came from.
+    ///
+    /// Re-recording a note that already says exactly this leaves `updated_at` alone. The server
+    /// re-derives *every* entry of a vault whenever the vault doc changes (`derive_metadata`),
+    /// so a stamp on each upsert made one note's rename look like the whole vault had just been
+    /// edited — every row in the file list showing the same minute.
     pub fn upsert_note(
         &mut self,
         id: NoteId,
@@ -618,7 +623,12 @@ impl Store {
             "INSERT INTO notes (id, vault_id, path, title) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET vault_id = excluded.vault_id, path = excluded.path,
                  title = excluded.title,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), deleted_at = NULL",
+                 updated_at = CASE
+                     WHEN notes.vault_id IS excluded.vault_id AND notes.path IS excluded.path
+                          AND notes.title IS excluded.title AND notes.deleted_at IS NULL
+                     THEN notes.updated_at
+                     ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END,
+                 deleted_at = NULL",
             params![id.to_string(), vault_id.to_string(), path, title],
         )?;
         Ok(())
@@ -1641,6 +1651,33 @@ mod tests {
         store.index_note(id, &markdown::index("# n\n\nrewritten\n").unwrap()).unwrap();
         let second = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
         assert!(second > first, "a body-only change must move updated_at: {first} -> {second}");
+    }
+
+    /// The mirror image: re-recording a row that already says exactly this must *not* move the
+    /// stamp. The server re-derives every entry of a vault on every vault-doc change, so a
+    /// stamp here would date the whole vault to whenever one note in it was last renamed.
+    #[test]
+    fn re_recording_an_unchanged_note_leaves_the_stamp_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let vault = VaultId::new();
+        let id = NoteId::new();
+        store.upsert_note(id, vault, "n.md", Some("n")).unwrap();
+        let first = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.upsert_note(id, vault, "n.md", Some("n")).unwrap();
+        assert_eq!(store.list_notes(vault).unwrap()[0].updated_at, Some(first.clone()), "a no-op upsert");
+
+        // A real move still stamps it, and so does coming back out of the trash.
+        store.upsert_note(id, vault, "moved/n.md", Some("n")).unwrap();
+        let moved = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+        assert!(moved > first, "a rename must move updated_at: {first} -> {moved}");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.trash_note(id).unwrap();
+        store.upsert_note(id, vault, "moved/n.md", Some("n")).unwrap();
+        let back = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+        assert!(back > moved, "an undelete must move updated_at: {moved} -> {back}");
     }
 
     #[test]

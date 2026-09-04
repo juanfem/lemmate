@@ -95,14 +95,19 @@ export function renderPageFoot(
     none.append('Write ')
     const code = none.appendChild(document.createElement('code'))
     code.textContent = '#a-tag'
-    none.append(' in the note to tag it.')
+    none.append(' in the note, or list ')
+    const fm = none.appendChild(document.createElement('code'))
+    fm.textContent = 'tags:'
+    none.append(' in its front matter.')
   } else {
     const row = tags.appendChild(document.createElement('div'))
     row.className = 'cm-page-tags'
+    // The names arrive normalised, without the `#` an inline tag is written with. Both kinds
+    // are drawn the same way: where a note declared its tags is not what the shelf is about.
     for (const t of data.tags) {
       const chip = row.appendChild(document.createElement('span'))
       chip.className = 'cm-page-tag'
-      chip.textContent = t
+      chip.textContent = `#${t}`
     }
   }
 

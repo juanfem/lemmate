@@ -3,6 +3,7 @@
   import { api, authState, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
   import AccountDialog from './components/AccountDialog.svelte'
+  import ContextMenu, { type MenuState } from './components/ContextMenu.svelte'
   import Setup from './components/Setup.svelte'
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
@@ -150,6 +151,8 @@
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
   let accountOpen = $state(false)
+  /** The account menu at the foot of the sidebar. */
+  let accountMenu = $state<MenuState | null>(null)
   let importInto = $state<string | null | undefined>(undefined)
 
   // The single-note view stands alone: one session, one pane, its own socket.
@@ -953,6 +956,34 @@
           <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
         </div>
       {/if}
+      <!-- Who you are, and the way back out. Both were commands and nothing else, and a session
+           you can only end by knowing what to type is a session you cannot end. Absent with the
+           relay and with `--no-auth`, where `me` is the local user and there is nothing to leave. -->
+      {#if me && me.id !== 'local'}
+        <button
+          class="account"
+          title={me.email}
+          aria-haspopup="menu"
+          onclick={(e) => {
+            // Anchored to the button, not to the pointer: this one is reached from the keyboard
+            // too, and a menu that lands in the corner of the window because the click carried
+            // no coordinates is not a menu about this row.
+            const r = e.currentTarget.getBoundingClientRect()
+            accountMenu = {
+              x: r.left,
+              y: r.top,
+              items: [
+                { label: 'Account, password and invites…', run: () => (accountOpen = true) },
+                { separator: true, label: '' },
+                { label: 'Sign out', run: signOut, danger: true },
+              ],
+            }
+          }}
+        >
+          <span class="who">{me.display_name}</span>
+          <span class="chev" aria-hidden="true">⌄</span>
+        </button>
+      {/if}
       <footer class="status" class:offline={status !== 'online'}>
         <span class="dot"></span>
         {statusLine}
@@ -1055,6 +1086,10 @@
 
 {#if accountOpen && me}
   <AccountDialog {me} onClose={() => (accountOpen = false)} />
+{/if}
+
+{#if accountMenu}
+  <ContextMenu menu={accountMenu} onClose={() => (accountMenu = null)} />
 {/if}
 
 {#if modal}
@@ -1188,6 +1223,38 @@
     color: #991b1b;
     padding: 0.4rem 0.6rem;
     border-top: 1px solid #fca5a5;
+  }
+  /* One quiet row, the weight of the status line under it: the account is where you leave
+     from, not something the sidebar is about. */
+  .account {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    font: inherit;
+    font-size: 0.75rem;
+    text-align: left;
+    color: var(--muted);
+    background: none;
+    border: 0;
+    border-top: 1px solid var(--border);
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+  }
+  .account:hover {
+    background: var(--hover);
+    color: var(--fg);
+  }
+  .account .who {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .account .chev {
+    flex: none;
+    font-size: 0.7rem;
   }
   .status {
     font-size: 0.75rem;

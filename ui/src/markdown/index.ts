@@ -12,15 +12,11 @@ import { math } from 'micromark-extension-math'
 import { mathFromMarkdown } from 'mdast-util-math'
 import { frontmatter } from 'micromark-extension-frontmatter'
 import { frontmatterFromMarkdown } from 'mdast-util-frontmatter'
-import { parse as parseYaml } from 'yaml'
 import type { Nodes, Root } from 'mdast'
+import { parseFrontMatter, pushTag, type FrontMatter } from './frontmatter.ts'
 
-export interface FrontMatter {
-  title: string | null
-  tags: string[]
-  aliases: string[]
-  id: string | null
-}
+export type { FrontMatter }
+export { frontMatter, pushTag } from './frontmatter.ts'
 
 export interface WikiLink {
   target: string
@@ -128,42 +124,6 @@ function walk(node: Nodes, ix: NoteIndex, plain: string[]): void {
   if ('children' in node) for (const child of node.children) walk(child as Nodes, ix, plain)
 }
 
-const EMPTY_FM: FrontMatter = { title: null, tags: [], aliases: [], id: null }
-
-/** Mirrors serde's strictness: any field of the wrong shape voids the whole front matter. */
-function parseFrontMatter(src: string): FrontMatter {
-  let doc: unknown
-  try {
-    doc = parseYaml(src)
-  } catch {
-    return { ...EMPTY_FM }
-  }
-  if (doc === null || doc === undefined || typeof doc !== 'object' || Array.isArray(doc)) return { ...EMPTY_FM }
-  const o = doc as Record<string, unknown>
-  try {
-    return { title: optString(o.title), tags: oneOrMany(o.tags), aliases: oneOrMany(o.aliases), id: optString(o.id) }
-  } catch {
-    return { ...EMPTY_FM }
-  }
-}
-
-function optString(v: unknown): string | null {
-  if (v === null || v === undefined) return null
-  if (typeof v === 'string') return v
-  throw new TypeError('expected string')
-}
-
-function oneOrMany(v: unknown): string[] {
-  if (v === null || v === undefined) return []
-  if (typeof v === 'string')
-    return v
-      .split(',')
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0)
-  if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v as string[]
-  throw new TypeError('expected string or list of strings')
-}
-
 function collectLinks(nodes: Nodes[], ix: NoteIndex): void {
   for (const n of nodes) {
     if (n.type === 'link' || n.type === 'image') ix.links.push(n.url)
@@ -252,9 +212,4 @@ function parseWikilink(inner: string, embed: boolean): WikiLink {
   if (headingRaw) link.heading = headingRaw
   if (labelRaw) link.label = labelRaw
   return link
-}
-
-function pushTag(tags: string[], tag: string): void {
-  const t = tag.trim().replace(/^\/+/u, '').replace(/\/+$/u, '').toLowerCase()
-  if (t.length > 0 && !tags.includes(t)) tags.push(t)
 }

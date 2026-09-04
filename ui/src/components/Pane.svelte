@@ -101,6 +101,11 @@
    * at. A note that uses `#` for several sections still lists every one of them.
    */
   let index = $derived(headings[0]?.level === 1 ? headings.slice(1) : headings)
+  /** Where the reader is in the note, as the editor last reported it. */
+  let here = $state(0)
+  /** The section the top of the viewport is inside: the last heading at or before it. Before
+   *  the first one — in the title, or the lines under it — nothing is current, which is true. */
+  let current = $derived(index.reduce((best, h, i) => (h.pos <= here ? i : best), -1))
 
   let isHistory = $derived(pane.kind === 'history')
 
@@ -225,8 +230,14 @@
              margin at all — at which point ⌘K and the headings themselves are how you move. -->
         {#if index.length}
           <nav class="margin" aria-label="Outline">
-            {#each index as h (h.pos)}
-              <button class="entry" class:deep={h.level > 1} onclick={() => jumpTo?.(h.pos)} title={h.text}>{h.text}</button>
+            {#each index as h, i (h.pos)}
+              <button
+                class="entry"
+                class:deep={h.level > 1}
+                class:current={i === current}
+                aria-current={i === current ? 'true' : undefined}
+                onclick={() => jumpTo?.(h.pos)}
+                title={h.text}>{h.text}</button>
             {/each}
           </nav>
         {/if}
@@ -237,6 +248,7 @@
             {onOpen}
             {trail}
             onHeadings={(h) => (headings = h)}
+            onHere={(p) => (here = p)}
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}
             mode={pane.mode}
@@ -469,8 +481,11 @@
     flex-direction: column;
     align-items: flex-end;
     gap: 0.15rem;
-    padding: 4.15rem 1.75rem 1rem 0.75rem;
+    padding: 4.15rem 1.2rem 1rem 0.75rem;
     overflow: auto;
+    /* CodeMirror's editor is positioned too and comes later in the document, so without a layer
+       of its own the index would be painted over and every entry would be unclickable. */
+    z-index: 1;
     /* The column is mostly empty paper; a click in it should reach the editor underneath. */
     pointer-events: none;
   }
@@ -482,9 +497,12 @@
     line-height: 1.5;
     text-align: right;
     border: 0;
+    /* The rule the current entry lights up, held open by every entry so the column never
+       shifts sideways as you scroll. */
+    border-right: 2px solid transparent;
     background: none;
     color: var(--muted);
-    padding: 0.1rem 0;
+    padding: 0.1rem 0.55rem 0.1rem 0;
     cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
@@ -493,6 +511,12 @@
   .margin .entry.deep {
     font-size: 0.68rem;
     color: var(--faint);
+  }
+  /* Where the reader is. Marked in the margin rather than by weight alone: at this size a bold
+     word is a smudge, and a rule beside the text reads as a position in the note. */
+  .margin .entry.current {
+    color: var(--fg);
+    border-right-color: var(--accent);
   }
   .margin .entry:hover {
     color: var(--accent);

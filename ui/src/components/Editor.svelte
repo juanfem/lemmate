@@ -18,6 +18,7 @@
     noteId,
     onOpen,
     onHeadings,
+    onHere,
     onPresence,
     onStats,
     trail = [],
@@ -28,6 +29,8 @@
     noteId: string
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
+    /** Where the reader is: the document position at the top of the viewport. */
+    onHere?: (pos: number) => void
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
@@ -96,6 +99,26 @@
     if (refs.length) view.dispatch({ changes: { from: at, insert: refs.join('\n') }, selection: { anchor: at + refs.join('\n').length } })
   }
 
+  /**
+   * A note's tags are the ones the index would find: the inline `#tags` the syntax tree just
+   * gave us, then whatever `tags:` its front matter declares — which is where most notes
+   * actually keep them, and which the tree does not see at all. Normalised (and ordered)
+   * through the indexer's own `pushTag`, so the shelf agrees with the tag pane and search.
+   *
+   * The front-matter parser arrives lazily: it is a whole YAML parser, and the tag shelf is
+   * the only thing in the main bundle that wants one.
+   */
+  let tagSeq = 0
+  async function readTags(doc: string, inline: string[]) {
+    const seq = ++tagSeq
+    const { frontMatter, pushTag } = await import('../markdown/frontmatter.ts')
+    if (seq !== tagSeq) return
+    const list: string[] = []
+    for (const t of inline) pushTag(list, t)
+    for (const t of frontMatter(doc).tags) pushTag(list, t)
+    tags = list
+  }
+
   let headingTimer: ReturnType<typeof setTimeout> | undefined
   /** Outline and counts share one debounce: both walk the whole document, and both are read
    *  by chrome outside the editor that has no reason to update mid-keystroke. */
@@ -103,11 +126,11 @@
     clearTimeout(headingTimer)
     headingTimer = setTimeout(() => {
       const items: OutlineItem[] = []
-      const found = new Set<string>()
+      const inline: string[] = []
       syntaxTree(v.state).iterate({
         enter(node) {
           if (node.name === 'NoteTag') {
-            found.add(v.state.sliceDoc(node.from, node.to).trim())
+            inline.push(v.state.sliceDoc(node.from, node.to).trim().replace(/^#/u, ''))
             return
           }
           const m = /^ATXHeading(\d)$/u.exec(node.name)
@@ -117,13 +140,29 @@
         },
       })
       onHeadings?.(items)
-      tags = [...found]
-      const text = v.state.doc.toString().trim()
+      const doc = v.state.doc.toString()
+      void readTags(doc, inline)
+      const text = doc.trim()
       onStats?.({ lines: v.state.doc.lines, words: text ? text.split(/\s+/u).length : 0 })
     }, 150)
   }
+  let hereFrame = 0
+  /** Which section the reader is in, for the margin index. Coalesced into a frame: a scroll
+   *  fires far more often than the answer to that question changes. */
+  function reportHere() {
+    if (hereFrame) return
+    hereFrame = requestAnimationFrame(() => {
+      hereFrame = 0
+      if (!view) return
+      const box = view.scrollDOM.getBoundingClientRect()
+      // Down the middle of the scroller, just below its top edge: the first line still on screen.
+      onHere?.(view.posAtCoords({ x: box.left + box.width / 2, y: box.top + 8 }, false))
+    })
+  }
   const headingWatcher = EditorView.updateListener.of((u) => {
     if (u.docChanged) reportHeadings(u.view)
+    // Headings move when the text does, and when a fold or a widget resizes around them.
+    if (u.docChanged || u.geometryChanged) reportHere()
   })
 
   const fileHandlers = EditorView.domEventHandlers({
@@ -173,6 +212,8 @@
     })
     view.focus()
     reportHeadings(view)
+    view.scrollDOM.addEventListener('scroll', reportHere, { passive: true })
+    reportHere()
     // If the doc was still empty (not yet synced), move the cursor past the front matter once
     // the content lands, so it opens folded rather than revealed by a cursor stuck at 0.
     const ytext = acquired.doc.getText('content')
@@ -215,6 +256,7 @@
   }
 
   onDestroy(() => {
+    cancelAnimationFrame(hereFrame)
     view?.destroy()
     release?.()
   })

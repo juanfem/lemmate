@@ -395,6 +395,8 @@ the note you are reading is on the note's own page rather than in a panel beside
   under it (`#projects` matches `#projects/alpha`).
 - **Starred** are bookmarks. They live in the vault doc, so they follow you to every device;
   `Ctrl+Shift+B` toggles one for the current note.
+- **Your own name** sits at the very bottom, above the status line, and opens the account menu
+  — settings, and the way out (§4).
 - **Tags, version history and trash** are per vault, so they show the vault of the note you
   are on. Tabs and bookmarks are not: a pane can hold notes from two vaults side by side, and
   the bookmarks list shows all of them.
@@ -404,11 +406,14 @@ lives there and underneath it rather than in a column of its own:
 
 - **The folder trail** sits above the first line. The note's name is the heading below it.
 - **The outline** is an index in the left margin: the note's headings, right-aligned against
-  the text, click to jump. It skips the note's own title, and it is not drawn in a pane too
-  narrow to have a margin (roughly the width of two panes on a laptop).
-- **Tags and backlinks** are two shelves at the foot of the page, after the note. Backlinks
-  match links whose target is the note's full path, its path without extension, or its
-  basename. Unlinked mentions, outgoing links and context snippets are not built.
+  the text, click to jump. The section you are reading is marked with a rule beside it as you
+  scroll. It skips the note's own title, and it is not drawn in a pane too narrow to have a
+  margin (roughly the width of two panes on a laptop).
+- **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
+  the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
+  declares — lower-cased, as they appear in the Tags pane and in search. Backlinks match links
+  whose target is the note's full path, its path without extension, or its basename. Unlinked
+  mentions, outgoing links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).
 
 **Daily notes.** `Ctrl+Shift+D` opens (or creates) `Daily/YYYY-MM-DD.md` for today. The path
@@ -489,9 +494,14 @@ lemmate invite --server … --list                                  # unused / e
 lemmate invite --server … --revoke ID                             # unused ones only
 ```
 
-In the browser the same thing is under **Account, password and invites…** — in the command
-palette (Ctrl+Shift+P), or as a link on the vault-picker screen. The link is a credential and is
-not tied to an email address, so send it the way you would send a password.
+In the browser the same thing is under **Account, password and invites…**, in the menu your own
+name opens at the foot of the sidebar — the command palette (Ctrl+Shift+P) has it too. The link
+is a credential and is not tied to an email address, so send it the way you would send a
+password.
+
+**Signing out.** Same menu, at the bottom. It ends this session only; other devices stay signed
+in. The row is not drawn on a standalone vault or a server started with `--no-auth`, where
+there is no account to leave.
 
 **Changing a password.** Yours needs the current one; an admin can reset anyone's without it,
 which is the only recovery path — a self-hosted server has no mail and there is no reset-by-email

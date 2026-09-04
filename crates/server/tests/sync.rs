@@ -323,3 +323,70 @@ async fn export_uses_pandoc_or_says_so() {
         assert_eq!(status, 501, "no pandoc reachable, so the server must say so rather than fail");
     }
 }
+
+/// One note's rename must not date the whole vault. `derive_metadata` re-records *every* entry
+/// of a vault whenever the vault doc moves, so a stamp on each of those upserts made a single
+/// rename — or a single new note — look like every note in the vault had just been edited: the
+/// whole file list showing one and the same minute down the column.
+#[tokio::test]
+async fn one_note_changing_does_not_restamp_the_whole_vault() {
+    let (addr, _state) = start().await;
+    let vault = VaultId::new();
+    let base = format!("http://{addr}/api/v1/vaults/{vault}");
+
+    let mut ids = Vec::new();
+    for name in ["one", "two", "three"] {
+        let base = base.clone();
+        let created: serde_json::Value = tokio::task::spawn_blocking(move || {
+            let mut r = ureq::post(format!("{base}/notes"))
+                .header("content-type", "application/json")
+                .send(format!(r##"{{"path":"{name}","content":"# {name}\n"}}"##).as_bytes())
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 201);
+            serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap()
+        })
+        .await
+        .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_owned());
+        // Far enough apart that the millisecond stamps differ if anything moves them.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let stamps = async || -> std::collections::HashMap<String, String> {
+        let base = base.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut r = ureq::get(format!("{base}/notes")).call().unwrap();
+            let rows: Vec<serde_json::Value> =
+                serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+            rows.into_iter()
+                .map(|n| (n["id"].as_str().unwrap().to_owned(), n["updated_at"].as_str().unwrap().to_owned()))
+                .collect()
+        })
+        .await
+        .unwrap()
+    };
+    let before = stamps().await;
+    assert_eq!(before.len(), 3);
+    // Creating "three" already re-recorded "one" and "two". Their stamps must still differ.
+    assert_ne!(before[&ids[0]], before[&ids[2]], "creating a note dated the ones beside it");
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let renamed = ids[0].clone();
+    let base2 = base.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        ureq::patch(format!("{base2}/notes/{renamed}"))
+            .header("content-type", "application/json")
+            .send(r##"{"path":"Archive/one.md"}"##.as_bytes())
+            .unwrap()
+            .status()
+            .as_u16()
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 204);
+
+    let after = stamps().await;
+    assert!(after[&ids[0]] > before[&ids[0]], "the renamed note is the one that changed");
+    assert_eq!(after[&ids[1]], before[&ids[1]], "its neighbour did not");
+    assert_eq!(after[&ids[2]], before[&ids[2]], "nor did the other one");
+}
