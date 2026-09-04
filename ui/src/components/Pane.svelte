@@ -1,7 +1,7 @@
 <script lang="ts" module>
   import type { ViewMode } from '../lib/editor/setup.ts'
 
-  /** One editing pane: its own tab strip, note header, editor and backlinks (SPEC §9). */
+  /** One editing pane: its own tab strip, note header and editor (SPEC §9). */
   export interface PaneState {
     id: number
     tabs: string[]
@@ -21,7 +21,6 @@
 </script>
 
 <script lang="ts">
-  import { api, type NoteSummary } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
   import Editor from './Editor.svelte'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
@@ -45,8 +44,11 @@
     onOpen,
     onHeadings,
     onPresence,
+    onTags,
     onMode,
     onNewTab,
+    panelOpen = false,
+    onTogglePanel,
     jumpTo = $bindable(),
   }: {
     /** Which vault a tab belongs to; tabs in one pane may come from different vaults. */
@@ -67,14 +69,18 @@
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
+    onTags?: (tags: string[]) => void
     onMode?: (mode: ViewMode) => void
     onNewTab?: () => void
+    /** The note panel is one per window, not one per pane, so only the focused pane offers
+     *  the switch — three panes would otherwise draw three toggles for the same panel. */
+    panelOpen?: boolean
+    onTogglePanel?: () => void
     jumpTo?: (pos: number) => void
   } = $props()
 
   let host: HTMLElement
   let presence: string[] = $state([])
-  let backlinks: NoteSummary[] = $state([])
 
   /** Reactive path lookup: `session.notes` updates on rename, `pathOf` alone would not. */
   function pathOf(id: string): string | undefined {
@@ -110,23 +116,6 @@
     { label: '', separator: true },
     { label: 'Move to trash', danger: true, run: onDelete },
   ])
-
-  $effect(() => {
-    const id = pane.active
-    const s = session
-    if (!id || !s) {
-      backlinks = []
-      return
-    }
-    let live = true
-    api
-      .backlinks(s.id, id)
-      .then((b) => live && (backlinks = b))
-      .catch(() => live && (backlinks = []))
-    return () => {
-      live = false
-    }
-  })
 
   // A declarative onmousedown would trip svelte a11y on a non-interactive element; this
   // catches clicks anywhere in the pane (the editor included) without a role.
@@ -175,6 +164,9 @@
         </span>
         <button class="star" onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
         <button class="more" onclick={(e) => (menu = menuAt(e, moreItems))} title="Rename, share, delete" aria-label="More actions">···</button>
+        {#if focused && onTogglePanel}
+          <button class="panel-toggle" class:on={panelOpen} onclick={onTogglePanel} aria-pressed={panelOpen} title="Outline, links and history (Ctrl+Shift+R)" aria-label="Toggle the note panel">◫</button>
+        {/if}
       </div>
       <div class="editor-wrap">
         <Editor
@@ -184,18 +176,11 @@
           onHeadings={(h) => onHeadings?.(h)}
           onPresence={(p) => { presence = p; onPresence?.(p) }}
           onStats={(s) => (stats = s)}
+          onTags={(t) => onTags?.(t)}
           mode={pane.mode}
           bind:jumpTo
         />
       </div>
-      {#if backlinks.length}
-        <div class="backlinks">
-          <strong>Linked from</strong>
-          {#each backlinks as b (b.id)}
-            <button onclick={() => onOpen(b.id)}>{b.title ?? displayName(b.path)}</button>
-          {/each}
-        </div>
-      {/if}
       <div class="note-foot">
         <span>{stats.lines} {stats.lines === 1 ? 'line' : 'lines'}</span>
         <span>{stats.words} {stats.words === 1 ? 'word' : 'words'}</span>
@@ -217,8 +202,8 @@
 <style>
   .pane {
     display: grid;
-    /* tabs · header · editor · backlinks · footer */
-    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+    /* tabs · header · editor · footer */
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
     min-width: 0;
     min-height: 0;
     flex: 1 1 0;
@@ -364,8 +349,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .note-head button,
-  .backlinks button {
+  .note-head button {
     font: inherit;
     font-size: 0.8rem;
     border: 0;
@@ -381,6 +365,9 @@
   }
   .note-head .more {
     letter-spacing: 0.06em;
+  }
+  .note-head .panel-toggle.on {
+    color: var(--accent);
   }
   .spacer {
     flex: 1;
@@ -428,18 +415,6 @@
   .editor-wrap {
     min-height: 0;
   }
-  .backlinks {
-    border-top: 1px solid var(--border);
-    padding: 0.4rem 1rem;
-    font-size: 0.85rem;
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-  .backlinks button {
-    color: var(--accent);
-  }
   .placeholder {
     display: grid;
     place-items: center;
@@ -457,9 +432,6 @@
     .note-foot {
       padding-left: 0.6rem;
       padding-right: 0.6rem;
-    }
-    .backlinks {
-      padding: 0.4rem 0.6rem;
     }
     .tab .label {
       max-width: 8rem;

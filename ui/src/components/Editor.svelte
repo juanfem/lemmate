@@ -18,6 +18,7 @@
     onHeadings,
     onPresence,
     onStats,
+    onTags,
     mode = 'live',
     jumpTo = $bindable(),
   }: {
@@ -28,6 +29,8 @@
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
+    /** The `#tags` written in this note, in document order, deduplicated. */
+    onTags?: (tags: string[]) => void
     /** SPEC §8: live preview, plain source, or rendered and read-only. */
     mode?: ViewMode
     jumpTo?: (pos: number) => void
@@ -82,8 +85,13 @@
     clearTimeout(headingTimer)
     headingTimer = setTimeout(() => {
       const items: OutlineItem[] = []
+      const tags = new Set<string>()
       syntaxTree(v.state).iterate({
         enter(node) {
+          if (node.name === 'NoteTag') {
+            tags.add(v.state.sliceDoc(node.from, node.to).trim())
+            return
+          }
           const m = /^ATXHeading(\d)$/u.exec(node.name)
           if (!m) return
           const text = v.state.sliceDoc(node.from, node.to).replace(/^#+\s*/u, '').trim()
@@ -91,6 +99,7 @@
         },
       })
       onHeadings?.(items)
+      onTags?.([...tags])
       const text = v.state.doc.toString().trim()
       onStats?.({ lines: v.state.doc.lines, words: text ? text.split(/\s+/u).length : 0 })
     }, 150)

@@ -19,9 +19,9 @@
   import QuickSwitcher from './components/QuickSwitcher.svelte'
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
-  import OutlinePane, { type OutlineItem } from './components/OutlinePane.svelte'
+  import type { OutlineItem } from './components/OutlinePane.svelte'
+  import NotePanel, { type PanelTab } from './components/NotePanel.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
-  import HistoryPane from './components/HistoryPane.svelte'
   import TrashPane from './components/TrashPane.svelte'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
@@ -223,10 +223,39 @@
   let pinned: string[] = $state([])
   let headingsByPane: Record<number, OutlineItem[]> = $state({})
   let presenceByPane: Record<number, string[]> = $state({})
+  let tagsByPane: Record<number, string[]> = $state({})
   let jumpers: Record<number, ((pos: number) => void) | undefined> = $state({})
   let layoutRestored = $state(false)
 
-  let sidebar: 'files' | 'search' | 'tags' | 'outline' | 'bookmarks' | 'history' | 'trash' = $state('files')
+  let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' | 'trash' = $state('files')
+  // ---- the note panel: outline, links and history, to the right of the note they describe
+  let panelOpen = $state(stored('lemmate.panel.open', true))
+  let panelTab = $state(stored<PanelTab>('lemmate.panel.tab', 'outline'))
+  function stored<T>(key: string, fallback: T): T {
+    try {
+      const raw = localStorage.getItem(key)
+      return raw === null ? fallback : (JSON.parse(raw) as T)
+    } catch {
+      return fallback
+    }
+  }
+  function remember(key: string, value: unknown) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value))
+    } catch {
+      /* private mode: the panel just forgets */
+    }
+  }
+  function togglePanel() {
+    panelOpen = !panelOpen
+    remember('lemmate.panel.open', panelOpen)
+  }
+  function setPanelTab(tab: PanelTab) {
+    panelTab = tab
+    panelOpen = true
+    remember('lemmate.panel.tab', tab)
+    remember('lemmate.panel.open', true)
+  }
   let switcher = $state(false)
   let palette = $state(false)
   let tagsVersion = $state(0)
@@ -279,6 +308,7 @@
   let active = $derived(focused.active)
   let headings = $derived(headingsByPane[focused.id] ?? [])
   let presence = $derived(presenceByPane[focused.id] ?? [])
+  let noteTags = $derived(tagsByPane[focused.id] ?? [])
 
   /** The session behind a note id, whichever vault holds it. */
   function sessionOf(noteId: string | null | undefined): VaultSession | undefined {
@@ -519,9 +549,11 @@
     { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (sidebar = 'search') },
     { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
-    { id: 'outline', label: 'Show outline', run: () => (sidebar = 'outline') },
+    { id: 'outline', label: 'Show outline', run: () => setPanelTab('outline') },
+    { id: 'links', label: 'Show backlinks and tags', run: () => setPanelTab('links') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
-    { id: 'history', label: 'Show version history', run: () => (sidebar = 'history') },
+    { id: 'history', label: 'Show version history', run: () => setPanelTab('history') },
+    { id: 'panel', label: panelOpen ? 'Hide the note panel' : 'Show the note panel', shortcut: 'Ctrl+Shift+R', run: togglePanel },
     { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
     { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
@@ -779,6 +811,9 @@
     } else if ((e.key === 'b' || e.key === 'B') && e.shiftKey) {
       bookmarkActive()
       e.preventDefault()
+    } else if ((e.key === 'r' || e.key === 'R') && e.shiftKey) {
+      togglePanel()
+      e.preventDefault()
     }
   }
 
@@ -818,7 +853,7 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout" class:narrow={narrow.current} style:--side="{sideWidth}px">
+  <div class="layout" class:narrow={narrow.current} class:with-panel={panelOpen && !narrow.current} style:--side="{sideWidth}px">
     <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
          two shortcuts (new note, commands) that have no keyboard to be reached from. -->
     <header class="topbar">
@@ -838,9 +873,7 @@
         <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')} title="Files">Files</button>
         <button class:on={sidebar === 'search'} onclick={() => (sidebar = 'search')} title="Search (Ctrl+Shift+F)">Search</button>
         <button class:on={sidebar === 'tags'} onclick={() => (sidebar = 'tags')} title="Tags">Tags</button>
-        <button class:on={sidebar === 'outline'} onclick={() => (sidebar = 'outline')} title="Outline">Outline</button>
         <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
-        <button class:on={sidebar === 'history'} onclick={() => (sidebar = 'history')} title="Version history">⏱</button>
         <span class="spacer"></span>
         <button class="quick" title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
         <button class="quick" title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
@@ -882,12 +915,8 @@
         <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
       {:else if sidebar === 'tags'}
         {#if session}<TagsPane vault={session.id} version={tagsVersion} onOpen={open} />{/if}
-      {:else if sidebar === 'outline'}
-        <OutlinePane items={headings} onJump={(pos) => jumpers[focused.id]?.(pos)} />
       {:else if sidebar === 'trash'}
         {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
-      {:else if sidebar === 'history'}
-        {#if session}<HistoryPane {session} noteId={active} onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })} />{/if}
       {:else}
         <nav class="bookmarks-pane">
           {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
@@ -951,12 +980,29 @@
           onOpen={(id) => { focusedPane = i; open(id) }}
           onHeadings={(h) => (headingsByPane[p.id] = h)}
           onPresence={(names) => (presenceByPane[p.id] = names)}
+          onTags={(t) => (tagsByPane[p.id] = t)}
+          panelOpen={panelOpen}
+          onTogglePanel={togglePanel}
           onMode={(m) => { focusedPane = i; p.mode = m }}
           onNewTab={() => { focusedPane = i; newTab() }}
           bind:jumpTo={jumpers[p.id]}
         />
       {/each}
     </section>
+    {#if panelOpen && !narrow.current}
+      <NotePanel
+        tab={panelTab}
+        session={sessionOf(active) ?? session}
+        noteId={active && !isBlank(active) ? active : null}
+        {headings}
+        tags={noteTags}
+        onTab={setPanelTab}
+        onJump={(pos) => jumpers[focused.id]?.(pos)}
+        onOpen={open}
+        onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })}
+        onClose={togglePanel}
+      />
+    {/if}
   </div>
   {#if switcher && workspace}
     <QuickSwitcher
@@ -1029,6 +1075,15 @@
     grid-template-columns: min(var(--side, 17rem), 60vw) auto 1fr;
     grid-template-areas: 'side split main';
     height: 100%;
+  }
+  /* The note panel is a column of the shell, not of a pane: it describes whichever note has
+     the focus, so three panes share one panel rather than growing one each. */
+  .layout.with-panel {
+    grid-template-columns: min(var(--side, 17rem), 60vw) auto 1fr min(15.75rem, 30vw);
+    grid-template-areas: 'side split main panel';
+  }
+  .layout :global(.panel) {
+    grid-area: panel;
   }
   aside {
     grid-area: side;
