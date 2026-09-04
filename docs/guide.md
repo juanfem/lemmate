@@ -193,9 +193,10 @@ menu you would otherwise right-click for — rename, move, share, copy path, tra
 also how you move things: dragging notes between folders is a mouse gesture the browser does
 not offer on touch, so use *Rename / move…* instead.
 
-The note header measures the **pane**, not the window, so it adapts in a split on a big screen
-too: as a pane narrows, share, rename and delete fold into a **⋯** menu, and narrower still the
-path takes a line of its own. The view-mode switch and the bookmark star never move.
+The pane's chrome measures the **pane**, not the window, so it adapts in a split on a big
+screen too. As a pane narrows the outline leaves the margin — there is no margin left to put it
+in — and narrower still the view switch, the star and the clock fold into the **⋯** menu, which
+lists everything they do. Splitting and closing the pane stay on the strip at every width.
 
 ---
 
@@ -382,8 +383,8 @@ through them — picks one:
 The mode belongs to the **pane**, not the note: split with `Ctrl+\` and you can read a note in
 one pane while editing its source in the other. It is saved with the layout, per device.
 
-**Two side panels.** The left one is about *finding* a note, the right one is about the note
-you have open. They answer different questions, so neither costs you the other.
+**One sidebar, and the note itself.** The sidebar is about *finding* a note. Everything *about*
+the note you are reading is on the note's own page rather than in a panel beside it.
 
 **Left sidebar**: Files, Tags, Starred. Searching is not a tab here — that is the palette.
 
@@ -398,14 +399,17 @@ you have open. They answer different questions, so neither costs you the other.
   are on. Tabs and bookmarks are not: a pane can hold notes from two vaults side by side, and
   the bookmarks list shows all of them.
 
-**Right note panel** (`Ctrl+Shift+R`, or the ◫ in the note header) follows whichever note has
-the focus — one panel, however many panes are open:
+**On the page.** A note's measure leaves an empty column on either side, and its own chrome
+lives there and underneath it rather than in a column of its own:
 
-- **Outline** lists the note's headings; click to jump.
-- **Links** shows backlinks and the note's tags. Backlinks match links whose target is the
-  note's full path, its path without extension, or its basename. Unlinked mentions, outgoing
-  links and context snippets are not built.
-- **History** is the version history for the note.
+- **The folder trail** sits above the first line. The note's name is the heading below it.
+- **The outline** is an index in the left margin: the note's headings, right-aligned against
+  the text, click to jump. It skips the note's own title, and it is not drawn in a pane too
+  narrow to have a margin (roughly the width of two panes on a laptop).
+- **Tags and backlinks** are two shelves at the foot of the page, after the note. Backlinks
+  match links whose target is the note's full path, its path without extension, or its
+  basename. Unlinked mentions, outgoing links and context snippets are not built.
+- **History** is not here at all: it opens in a pane of its own (below).
 
 **Daily notes.** `Ctrl+Shift+D` opens (or creates) `Daily/YYYY-MM-DD.md` for today. The path
 and format are fixed at present — the per-vault configuration, prev/next-day navigation and
@@ -441,16 +445,21 @@ Two tabs are never displaced: a **pinned** one, and one already showing that not
 switch to it). To open something alongside what you have, use the **＋** on the tab strip for
 an empty tab, or right-click a note for *Open in a new tab* / *Open in a new pane*.
 
-**Tabs and panes.** Each pane has its own tab strip and editor. `Ctrl+\` splits
-right (up to three panes); `Ctrl+Alt+←/→` moves focus. Pinned tabs sort first and ignore
+**Tabs and panes.** Each pane has its own tab strip and editor. Split right with the ◫ at the
+right of the strip or `Ctrl+\` (up to three panes — at the limit the control stays and says
+so); the ⨯ beside it closes a pane, and `Ctrl+Alt+←/→` moves focus. Pinned tabs sort first and ignore
 `Ctrl+W` (unpin from the palette to close them). `Ctrl+Shift+T` reopens the last closed tab —
 the last twenty are remembered. The layout, pins and collapsed folders are stored per vault in
 the browser's local storage, so they are per device, and tabs pointing at notes that no longer
 exist are dropped once the vault has synced.
 
-**Version history** (⏱ pane) lists snapshots for the open note — automatic ones (taken every
-500 updates or 10 minutes) plus any you name with *Save version…*. Click one to preview it,
-then *Restore*: restoring is applied as one more edit, so nothing in the history is lost.
+**Version history** opens in a pane of its own — the clock on the tab strip, `Ctrl+Shift+R`, or
+*Show version history* in the palette. It splits right where there is room and reuses the last
+pane where there is not, and asking again goes back to the pane already showing it. Its page is
+the log: snapshots for the note — automatic ones (taken every 500 updates or 10 minutes) plus
+any you name with *Save version…*. Click one and the page becomes that version, rendered the
+way the note is, with the lines it no longer shares with the note marked down its left edge.
+*Restore* is applied as one more edit, so nothing in the history is lost.
 Snapshots are kept forever; the raw update log behind them is pruned after `--retain-days`
 (90 by default).
 
@@ -538,7 +547,7 @@ your account.
 | `Ctrl+N` | Same palette (type a path, Enter creates) |
 | `Ctrl+Shift+P` | The palette, narrowed to commands |
 | `Ctrl+Shift+F` | The palette (it covers full text) |
-| `Ctrl+Shift+R` | Show / hide the note panel |
+| `Ctrl+Shift+R` | Show version history in a pane |
 | `Ctrl+Shift+D` | Today's daily note |
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
 | `Ctrl+E` | Cycle this pane's view: live → source → reading |

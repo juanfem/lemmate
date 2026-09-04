@@ -130,6 +130,82 @@ const theme = EditorView.theme({
   '&.cm-mode-reading .cm-content': { caretColor: 'transparent' },
   '&.cm-mode-reading .cm-activeLine': { background: 'transparent' },
   '&.cm-mode-reading .cm-gutters': { display: 'none' },
+
+  // ---- the page's own furniture (lib/editor/page.ts)
+  //
+  // Vertical rhythm here is padding, never margin, for the same reason as `.cm-heading`: the
+  // height map measures each block with getBoundingClientRect(), which excludes margins, and a
+  // margin on a block widget desynchronises the map from the DOM.
+  '.cm-page-head': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.35rem',
+    flexWrap: 'wrap',
+    fontFamily: 'var(--ui)',
+    fontSize: '0.72rem',
+    lineHeight: '1.4',
+    color: 'var(--faint)',
+    paddingBottom: '0.35rem',
+  },
+  '.cm-page-sep': { color: 'var(--border)' },
+  '.cm-page-foot': { fontFamily: 'var(--ui)', paddingTop: '2.5rem' },
+  '.cm-page-shelf': { borderTop: '1px solid var(--border-soft)', padding: '0.9rem 0 1.1rem' },
+  '.cm-page-shelf:last-child': { paddingBottom: '0' },
+  '.cm-page-shelf-title': {
+    margin: '0 0 0.5rem',
+    fontSize: '0.65rem',
+    fontWeight: '700',
+    letterSpacing: '0.09em',
+    textTransform: 'uppercase',
+    color: 'var(--muted)',
+  },
+  '.cm-page-tags': { display: 'flex', flexWrap: 'wrap', gap: '0.375rem' },
+  '.cm-page-tag': {
+    fontSize: '0.72rem',
+    color: 'var(--fg)',
+    background: 'var(--tag-bg)',
+    borderRadius: '20px',
+    padding: '0.1875rem 0.625rem',
+  },
+  '.cm-page-none': { margin: '0', fontSize: '0.75rem', lineHeight: '1.45', color: 'var(--faint)' },
+  '.cm-page-backlink': {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.125rem',
+    width: 'calc(100% + 1rem)',
+    margin: '0 -0.5rem',
+    padding: '0.375rem 0.5rem',
+    border: '0',
+    borderRadius: '6px',
+    background: 'none',
+    color: 'inherit',
+    font: 'inherit',
+    textAlign: 'left',
+    cursor: 'pointer',
+  },
+  '.cm-page-backlink:hover': { background: 'var(--hover)' },
+  '.cm-page-backlink-name': {
+    maxWidth: '100%',
+    fontSize: '0.78rem',
+    fontWeight: '500',
+    color: 'var(--fg)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  '.cm-page-backlink-where': {
+    maxWidth: '100%',
+    fontSize: '0.6875rem',
+    color: 'var(--faint)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  // A line of an old version that is not in the note as it stands now.
+  '.cm-changed': {
+    boxShadow: 'inset 2px 0 0 var(--accent)',
+    background: 'color-mix(in srgb, var(--accent-bg) 45%, transparent)',
+  },
 })
 
 /**

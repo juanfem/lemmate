@@ -9,7 +9,9 @@
   import { displayName } from '../lib/vault.svelte.ts'
 
   import { syntaxTree } from '@codemirror/language'
-  import type { OutlineItem } from './OutlinePane.svelte'
+  import type { OutlineItem } from '../lib/outline.ts'
+  import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
+  import { embedUrlFor } from '../lib/attachments.ts'
 
   let {
     session,
@@ -18,7 +20,7 @@
     onHeadings,
     onPresence,
     onStats,
-    onTags,
+    trail = [],
     mode = 'live',
     jumpTo = $bindable(),
   }: {
@@ -29,8 +31,8 @@
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
-    /** The `#tags` written in this note, in document order, deduplicated. */
-    onTags?: (tags: string[]) => void
+    /** Where the note lives, folder by folder — drawn on the page above its first line. */
+    trail?: string[]
     /** SPEC §8: live preview, plain source, or rendered and read-only. */
     mode?: ViewMode
     jumpTo?: (pos: number) => void
@@ -40,18 +42,34 @@
   let view: EditorView | undefined
   let release: (() => void) | undefined
 
-  function embedUrl(target: string): string | undefined {
-    const t = target.trim()
-    const path = session.pathOf(noteId) ?? ''
-    const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''
-    const name = t.split('/').pop() ?? t
-    for (const candidate of [dir + t, t, `attachments/${name}`]) {
-      const hash = session.attachments[candidate]
-      if (hash) return api.attachmentUrl(session.id, hash)
+  // The page's own furniture: the folder trail above the first line, the tags and backlinks
+  // below the last one. Both are nodes we own and CodeMirror merely hosts (lib/editor/page.ts),
+  // so they scroll with the note and share its measure without living in the document.
+  const head = furnitureHost('cm-page-head')
+  const foot = furnitureHost('cm-page-foot')
+  let tags: string[] = $state([])
+  let backlinks: Backlink[] = $state([])
+  $effect(() => renderPageHead(head, trail))
+  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen }))
+  // Backlinks are a round trip, so they are fetched once per note rather than per keystroke;
+  // a link written elsewhere shows up the next time this note is opened.
+  $effect(() => {
+    const id = noteId
+    const vault = session.id
+    let live = true
+    backlinks = []
+    api
+      .backlinks(vault, id)
+      .then((rows) => live && (backlinks = rows.map((b) => ({ id: b.id, label: b.title ?? displayName(b.path), path: b.path }))))
+      .catch(() => {
+        /* no server, or a vault that does not keep an index: the shelf just says nothing */
+      })
+    return () => {
+      live = false
     }
-    const byName = Object.entries(session.attachments).find(([p]) => p.split('/').pop() === name)
-    return byName ? api.attachmentUrl(session.id, byName[1]) : undefined
-  }
+  })
+
+  const embedUrl = (target: string) => embedUrlFor(session, session.pathOf(noteId) ?? '', target)
 
   function openLink(target: string) {
     const hit = session.resolveLink(target)
@@ -85,11 +103,11 @@
     clearTimeout(headingTimer)
     headingTimer = setTimeout(() => {
       const items: OutlineItem[] = []
-      const tags = new Set<string>()
+      const found = new Set<string>()
       syntaxTree(v.state).iterate({
         enter(node) {
           if (node.name === 'NoteTag') {
-            tags.add(v.state.sliceDoc(node.from, node.to).trim())
+            found.add(v.state.sliceDoc(node.from, node.to).trim())
             return
           }
           const m = /^ATXHeading(\d)$/u.exec(node.name)
@@ -99,7 +117,7 @@
         },
       })
       onHeadings?.(items)
-      onTags?.([...tags])
+      tags = [...found]
       const text = v.state.doc.toString().trim()
       onStats?.({ lines: v.state.doc.lines, words: text ? text.split(/\s+/u).length : 0 })
     }, 150)
@@ -147,7 +165,7 @@
       openLink,
       embedUrl,
       mode,
-      extra: [fileHandlers, headingWatcher],
+      extra: [fileHandlers, headingWatcher, pageFurniture(head, foot)],
       complete: {
         notes: () => session.notes.map((n) => n.path),
         tags: async () => (await api.tags(session.id).catch(() => [])).map((t) => t.tag),

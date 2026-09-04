@@ -19,8 +19,6 @@
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
-  import type { OutlineItem } from './components/OutlinePane.svelte'
-  import NotePanel, { type PanelTab } from './components/NotePanel.svelte'
   import Palette, { type Command } from './components/Palette.svelte'
   import TrashPane from './components/TrashPane.svelte'
   import ShareDialog from './components/ShareDialog.svelte'
@@ -221,41 +219,10 @@
   /** Recently closed note ids, most recent last (Ctrl+Shift+T reopens). */
   let closed: string[] = $state([])
   let pinned: string[] = $state([])
-  let headingsByPane: Record<number, OutlineItem[]> = $state({})
   let presenceByPane: Record<number, string[]> = $state({})
-  let tagsByPane: Record<number, string[]> = $state({})
-  let jumpers: Record<number, ((pos: number) => void) | undefined> = $state({})
   let layoutRestored = $state(false)
 
   let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' | 'trash' = $state('files')
-  // ---- the note panel: outline, links and history, to the right of the note they describe
-  let panelOpen = $state(stored('lemmate.panel.open', true))
-  let panelTab = $state(stored<PanelTab>('lemmate.panel.tab', 'outline'))
-  function stored<T>(key: string, fallback: T): T {
-    try {
-      const raw = localStorage.getItem(key)
-      return raw === null ? fallback : (JSON.parse(raw) as T)
-    } catch {
-      return fallback
-    }
-  }
-  function remember(key: string, value: unknown) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value))
-    } catch {
-      /* private mode: the panel just forgets */
-    }
-  }
-  function togglePanel() {
-    panelOpen = !panelOpen
-    remember('lemmate.panel.open', panelOpen)
-  }
-  function setPanelTab(tab: PanelTab) {
-    panelTab = tab
-    panelOpen = true
-    remember('lemmate.panel.tab', tab)
-    remember('lemmate.panel.open', true)
-  }
   /** The palette, or null when closed; the string is what it opens with — `>` for commands. */
   let palette = $state<string | null>(null)
   let revealFolder: ((vault: string, folder: string) => void) | undefined = $state()
@@ -294,7 +261,7 @@
   }
 
   function blankPane(): PaneState {
-    return { id: ++paneSeq, tabs: [], active: null, mode: 'live' }
+    return { id: ++paneSeq, tabs: [], active: null, mode: 'live', kind: 'note' }
   }
   /** Ctrl+E steps live → source → reading → live in the focused pane. */
   function cycleMode() {
@@ -307,9 +274,7 @@
   let focused = $derived(panes[Math.min(focusedPane, panes.length - 1)] ?? panes[0]!)
   /** The focused pane's note: everything outside the panes (commands, sidebar) acts on it. */
   let active = $derived(focused.active)
-  let headings = $derived(headingsByPane[focused.id] ?? [])
   let presence = $derived(presenceByPane[focused.id] ?? [])
-  let noteTags = $derived(tagsByPane[focused.id] ?? [])
 
   /** The session behind a note id, whichever vault holds it. */
   function sessionOf(noteId: string | null | undefined): VaultSession | undefined {
@@ -361,7 +326,7 @@
 
   // ---- layout persistence, per device, across every vault
   interface StoredLayout {
-    panes?: { tabs?: string[]; active?: string | null; mode?: string }[]
+    panes?: { tabs?: string[]; active?: string | null; mode?: string; kind?: string; seq?: number }[]
     focused?: number
   }
   const MODES: ViewMode[] = ['live', 'source', 'reading']
@@ -375,7 +340,9 @@
         .slice(0, MAX_PANES)
         .map((p) => {
           const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string')
-          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null), mode: asMode(p.mode) }
+          const kind = p.kind === 'history' ? 'history' : 'note'
+          const seq = kind === 'history' && typeof p.seq === 'number' ? p.seq : 0
+          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null), mode: asMode(p.mode), kind, seq } as PaneState
         })
       if (list.length) return { panes: list, focused: Math.min(Math.max(data?.focused ?? 0, 0), list.length - 1) }
     } catch {
@@ -395,7 +362,7 @@
   $effect(() => {
     if (solo || !workspace) return
     const data = JSON.stringify({
-      panes: panes.map((p) => ({ tabs: p.tabs.filter((t) => !isBlank(t)), active: p.active, mode: p.mode })),
+      panes: panes.map((p) => ({ tabs: p.tabs.filter((t) => !isBlank(t)), active: p.active, mode: p.mode, kind: p.kind, seq: p.seq })),
       focused: focusedPane,
     })
     try {
@@ -463,7 +430,14 @@
    * showing the note. `openInNewTab` is the deliberate opposite, from the ＋ button and the
    * right-click menu.
    */
+  /** Move the focus off a history pane before opening a note into it. */
+  function noteFocus() {
+    if (focused.kind !== 'history') return
+    const i = panes.findIndex((p) => p.kind !== 'history')
+    if (i >= 0) focusedPane = i
+  }
   function open(id: string) {
+    noteFocus()
     const p = focused
     if (!p.tabs.includes(id)) {
       const at = p.active ? p.tabs.indexOf(p.active) : -1
@@ -478,12 +452,14 @@
   }
   /** Open a note in a tab of its own, leaving whatever is already open where it is. */
   function openInNewTab(id: string) {
+    noteFocus()
     const p = focused
     if (!p.tabs.includes(id)) p.tabs = [...p.tabs, id]
     landOn(id)
   }
   /** A fresh empty tab, waiting for the next note you click (the ＋ on the tab strip). */
   function newTab() {
+    noteFocus()
     const p = focused
     p.tabs = [...p.tabs, `blank:${++blankSeq}`]
     p.active = p.tabs[p.tabs.length - 1]!
@@ -494,7 +470,6 @@
     palette = null
     // On a phone the drawer is covering the note you just picked.
     drawer = false
-    headingsByPane[p.id] = []
     closed = closed.filter((c) => c !== id)
     const vault = workspace?.vaultOfNote(id)
     if (vault) focusVault = vault
@@ -515,13 +490,36 @@
     if (!isBlank(id)) closed = [...closed.filter((c) => c !== id), id].slice(-20)
     if (p.tabs.length === 0 && panes.length > 1) closePane(panes.indexOf(p))
   }
-  function splitRight() {
-    if (solo || narrow.current || panes.length >= MAX_PANES) return
-    const id = focused.active
+  function splitRight(at = focusedPane) {
+    const p = panes[at]
+    if (solo || narrow.current || panes.length >= MAX_PANES || !p) return
+    const id = p.active
     if (!id) return
-    const i = panes.indexOf(focused)
-    panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id, mode: focused.mode }, ...panes.slice(i + 1)]
-    focusedPane = i + 1
+    panes = [...panes.slice(0, at + 1), { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind: 'note' }, ...panes.slice(at + 1)]
+    focusedPane = at + 1
+  }
+  /**
+   * A note's history, in a pane beside it (SPEC §9). It splits where there is room and reuses
+   * the last pane where there is not — the same rule `openInNewPane` follows — and a second
+   * press goes back to the pane already showing it rather than opening another.
+   */
+  function openHistory(at = focusedPane) {
+    const p = panes[at]
+    const id = p?.active
+    if (!p || !id || isBlank(id) || solo) return
+    const seen = panes.findIndex((q) => q.kind === 'history' && q.active === id)
+    if (seen >= 0) {
+      focusedPane = seen
+      return
+    }
+    const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind: 'history', seq: 0 }
+    if (panes.length < MAX_PANES) {
+      panes = [...panes.slice(0, at + 1), entry, ...panes.slice(at + 1)]
+      focusedPane = at + 1
+    } else {
+      panes = [...panes.slice(0, -1), entry]
+      focusedPane = panes.length - 1
+    }
   }
   function closePane(i = focusedPane) {
     if (panes.length <= 1) return
@@ -569,11 +567,8 @@
     { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (palette = '') },
     { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
-    { id: 'outline', label: 'Show outline', run: () => setPanelTab('outline') },
-    { id: 'links', label: 'Show backlinks and tags', run: () => setPanelTab('links') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
-    { id: 'history', label: 'Show version history', run: () => setPanelTab('history') },
-    { id: 'panel', label: panelOpen ? 'Hide the note panel' : 'Show the note panel', shortcut: 'Ctrl+Shift+R', run: togglePanel },
+    { id: 'history', label: 'Show version history', shortcut: 'Ctrl+Shift+R', run: () => openHistory() },
     { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
     { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
@@ -830,7 +825,7 @@
       bookmarkActive()
       e.preventDefault()
     } else if ((e.key === 'r' || e.key === 'R') && e.shiftKey) {
-      togglePanel()
+      openHistory()
       e.preventDefault()
     }
   }
@@ -871,7 +866,7 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout" class:narrow={narrow.current} class:with-panel={panelOpen && !narrow.current} style:--side="{sideWidth}px">
+  <div class="layout" class:narrow={narrow.current} style:--side="{sideWidth}px">
     <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
          two shortcuts (new note, commands) that have no keyboard to be reached from. -->
     <header class="topbar">
@@ -1002,31 +997,19 @@
           onRename={renameActive}
           onDelete={deleteActive}
           onOpen={(id) => { focusedPane = i; open(id) }}
-          onHeadings={(h) => (headingsByPane[p.id] = h)}
           onPresence={(names) => (presenceByPane[p.id] = names)}
-          onTags={(t) => (tagsByPane[p.id] = t)}
-          panelOpen={panelOpen}
-          onTogglePanel={togglePanel}
           onMode={(m) => { focusedPane = i; p.mode = m }}
           onNewTab={() => { focusedPane = i; newTab() }}
-          bind:jumpTo={jumpers[p.id]}
+          onSplit={solo || narrow.current ? undefined : () => splitRight(i)}
+          splitFull={panes.length >= MAX_PANES}
+          onClosePane={panes.length > 1 ? () => closePane(i) : undefined}
+          onHistory={solo ? undefined : () => openHistory(i)}
+          historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
+          onSeq={(seq) => { focusedPane = i; p.seq = seq }}
+          onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })}
         />
       {/each}
     </section>
-    {#if panelOpen && !narrow.current}
-      <NotePanel
-        tab={panelTab}
-        session={sessionOf(active) ?? session}
-        noteId={active && !isBlank(active) ? active : null}
-        {headings}
-        tags={noteTags}
-        onTab={setPanelTab}
-        onJump={(pos) => jumpers[focused.id]?.(pos)}
-        onOpen={open}
-        onAsk={(title, initial) => ask({ kind: 'prompt', title, initial })}
-        onClose={togglePanel}
-      />
-    {/if}
   </div>
   {#if palette !== null && workspace}
     <!-- Keyed on the seed so Ctrl+Shift+P over an already-open palette re-opens it on
@@ -1105,15 +1088,6 @@
     grid-template-columns: min(var(--side, 17rem), 60vw) auto 1fr;
     grid-template-areas: 'side split main';
     height: 100%;
-  }
-  /* The note panel is a column of the shell, not of a pane: it describes whichever note has
-     the focus, so three panes share one panel rather than growing one each. */
-  .layout.with-panel {
-    grid-template-columns: min(var(--side, 17rem), 60vw) auto 1fr min(15.75rem, 30vw);
-    grid-template-areas: 'side split main panel';
-  }
-  .layout :global(.panel) {
-    grid-area: panel;
   }
   aside {
     grid-area: side;

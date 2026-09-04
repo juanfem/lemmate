@@ -1,13 +1,17 @@
 <script lang="ts" module>
   import type { ViewMode } from '../lib/editor/setup.ts'
 
-  /** One editing pane: its own tab strip, note header and editor (SPEC §9). */
+  /** One editing pane: its own tab strip, page and footer (SPEC §9). */
   export interface PaneState {
     id: number
     tabs: string[]
     active: string | null
     /** SPEC §8 view mode, per pane — a source pane can sit beside a reading one. */
     mode: ViewMode
+    /** A history pane shows a note's versions instead of its text; absent means the note. */
+    kind?: 'note' | 'history'
+    /** Which version a history pane is showing; 0, or absent, is the log itself. */
+    seq?: number
   }
 
   /**
@@ -23,10 +27,11 @@
 <script lang="ts">
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
   import Editor from './Editor.svelte'
+  import HistoryPage from './HistoryPage.svelte'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
   import Icon from './Icon.svelte'
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
-  import type { OutlineItem } from './OutlinePane.svelte'
+  import type { OutlineItem } from '../lib/outline.ts'
 
   let {
     lookup,
@@ -42,18 +47,21 @@
     onRename,
     onDelete,
     onOpen,
-    onHeadings,
     onPresence,
-    onTags,
     onMode,
     onNewTab,
-    panelOpen = false,
-    onTogglePanel,
+    onSplit,
+    splitFull = false,
+    onClosePane,
+    onHistory,
+    historyOpen = false,
+    onSeq,
+    onAsk,
     jumpTo = $bindable(),
   }: {
     /** Which vault a tab belongs to; tabs in one pane may come from different vaults. */
     lookup: (noteId: string) => VaultSession | undefined
-    /** Vault label for the note header, empty when there is only one vault to speak of. */
+    /** Vault label for the folder trail, empty when there is only one vault to speak of. */
     vaultLabel?: (noteId: string) => string
     pane: PaneState
     focused: boolean
@@ -67,20 +75,34 @@
     onRename: () => void
     onDelete: () => void
     onOpen: (id: string) => void
-    onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
-    onTags?: (tags: string[]) => void
     onMode?: (mode: ViewMode) => void
     onNewTab?: () => void
-    /** The note panel is one per window, not one per pane, so only the focused pane offers
-     *  the switch — three panes would otherwise draw three toggles for the same panel. */
-    panelOpen?: boolean
-    onTogglePanel?: () => void
+    /** Splitting right, on the strip rather than only on Ctrl+\ and in the palette. */
+    onSplit?: () => void
+    /** Three panes is the limit: the control stays and says so rather than disappearing. */
+    splitFull?: boolean
+    /** Absent in the last pane — there is nothing to close back to. */
+    onClosePane?: () => void
+    onHistory?: () => void
+    /** Whether this note's history already has a pane, so the clock can say so. */
+    historyOpen?: boolean
+    onSeq?: (seq: number) => void
+    onAsk?: (title: string, initial: string) => Promise<string | null>
     jumpTo?: (pos: number) => void
   } = $props()
 
   let host: HTMLElement
   let presence: string[] = $state([])
+  let headings: OutlineItem[] = $state([])
+  /**
+   * The index skips the note's own title. A margin index answers "where am I in this note",
+   * and the title is not somewhere you can be — it is the line the reader is already looking
+   * at. A note that uses `#` for several sections still lists every one of them.
+   */
+  let index = $derived(headings[0]?.level === 1 ? headings.slice(1) : headings)
+
+  let isHistory = $derived(pane.kind === 'history')
 
   /** Reactive path lookup: `session.notes` updates on rename, `pathOf` alone would not. */
   function pathOf(id: string): string | undefined {
@@ -94,23 +116,24 @@
   // Pinned tabs sort first; the rest keep the order they were opened in.
   let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
 
-  /** The path as a trail — folders, then the note. The note is what you are looking at, so it
-   *  is the only part drawn at full strength; the folders are context. */
-  let crumbs = $derived.by(() => {
-    const parts = activePath.split('/').filter(Boolean)
-    const name = parts.pop() ?? ''
-    return { folders: parts, name: displayName(name) }
+  /** Where the note lives — vault, then folders. Its name is the heading below, not here. */
+  let trail = $derived.by(() => {
+    if (!pane.active) return []
+    const label = vaultLabel?.(pane.active)
+    return [...(label ? [label] : []), ...activePath.split('/').slice(0, -1).filter(Boolean)]
   })
   /** Quarto notes are still markdown, but saying so is the point of the label. */
   let format = $derived(activePath.endsWith('.qmd') ? 'Quarto' : 'Markdown')
   let stats: { lines: number; words: number } = $state({ lines: 0, words: 0 })
 
-  // Rename, share and delete all live in `⋯`, at every width. Delete especially: a destructive
-  // action should not sit one pixel from a view toggle wearing the same plain-text clothes as
-  // the thing beside it. What stays on the bar is what you reach for while reading — the mode
-  // switch and the bookmark.
+  // What the strip folds away on a narrow pane lives here too, so nothing becomes unreachable
+  // by making the window smaller. Delete stays at the bottom, behind a separator: a destructive
+  // action should not sit one pixel from a view toggle wearing the same clothes.
   let menu: MenuState | null = $state(null)
+  let bookmarked = $derived(!!session?.isBookmarked('note', activePath))
   let moreItems = $derived([
+    ...(onHistory ? [{ label: 'Version history', run: onHistory }] : []),
+    { label: bookmarked ? 'Remove bookmark' : 'Bookmark this note', run: onBookmark },
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
     { label: 'Rename / move…', run: onRename },
     { label: '', separator: true },
@@ -128,62 +151,105 @@
 </script>
 
 <section class="pane" class:focused bind:this={host} onfocusin={onFocus}>
+  <!-- One row of chrome, not two: the tabs say which note, and everything you do *to* the note
+       you are looking at sits at the other end of the same strip. Where the note lives moved on
+       to the page itself (lib/editor/page.ts), which is what freed the second row. -->
   <div class="tabs">
     {#each tabs as id (id)}
       <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} title={pathOf(id)}>
-        <!-- One dot, two meanings, never at once: on the active tab it marks where you are, and
-             on the others it marks a pin. A pinned tab is also the one without a `×`, so an
-             active pinned tab still says so. -->
-        {#if id === pane.active}<span class="dot"></span>{:else if pinned.includes(id)}<span class="dot pinned" title="Pinned"></span>{/if}
-        <span class="label">{isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}</span>
-        {#if !pinned.includes(id)}
+        {#if isHistory}
+          <Icon name="history" size={13} />
+        {:else if id === pane.active}
+          <!-- One dot, two meanings, never at once: on the active tab it marks where you are,
+               and on the others it marks a pin. A pinned tab is also the one without a `×`. -->
+          <span class="dot"></span>
+        {:else if pinned.includes(id)}
+          <span class="dot pinned" title="Pinned"></span>
+        {/if}
+        <span class="label">{isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}{isHistory ? ' · history' : ''}</span>
+        {#if isHistory}
+          <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
+        {:else if !pinned.includes(id)}
           <span class="x" role="button" tabindex="-1" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
         {/if}
       </button>
     {/each}
-    {#if onNewTab}
+    {#if onNewTab && !isHistory}
       <button class="newtab" onclick={onNewTab} title="New tab (Ctrl+T)" aria-label="New tab"><Icon name="plus" size={13} /></button>
     {/if}
-  </div>
-  {#if pane.active && session && !isBlank(pane.active)}
-    {#key pane.active}
-      <div class="note-head">
-        <nav class="crumbs" title={activePath}>
-          {#if vaultLabel?.(pane.active)}<span class="vault">{vaultLabel(pane.active)}</span><span class="sep">/</span>{/if}
-          {#each crumbs.folders as f (f)}<span class="folder">{f}</span><span class="sep">/</span>{/each}
-          <span class="name">{crumbs.name}</span>
-        </nav>
-        {#if presence.length}
-          <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
-        {/if}
-        <span class="spacer"></span>
-        <span class="modes" role="group" aria-label="View mode">
+    <span class="spacer"></span>
+    <div class="cluster">
+      {#if !isHistory && pane.active && session && !isBlank(pane.active)}
+        <span class="modes fold" role="group" aria-label="View mode">
           {#each VIEW_MODES as m (m.id)}
             <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
           {/each}
         </span>
-        <button class="star" onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
-        <button class="more" onclick={(e) => (menu = menuAt(e, moreItems))} title="Rename, share, delete" aria-label="More actions">···</button>
-        {#if focused && onTogglePanel}
-          <button class="panel-toggle" class:on={panelOpen} onclick={onTogglePanel} aria-pressed={panelOpen} title="Outline, links and history (Ctrl+Shift+R)" aria-label="Toggle the note panel">◫</button>
+        <button class="icon fold" class:on={bookmarked} onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)" aria-label="Bookmark" aria-pressed={bookmarked}>
+          <Icon name="star" size={15} filled={bookmarked} />
+        </button>
+        {#if onHistory}
+          <button class="icon fold" class:on={historyOpen} onclick={onHistory} title="Version history" aria-label="Version history" aria-pressed={historyOpen}>
+            <Icon name="history" size={15} />
+          </button>
         {/if}
-      </div>
-      <div class="editor-wrap">
-        <Editor
-          {session}
-          noteId={pane.active}
-          {onOpen}
-          onHeadings={(h) => onHeadings?.(h)}
-          onPresence={(p) => { presence = p; onPresence?.(p) }}
-          onStats={(s) => (stats = s)}
-          onTags={(t) => onTags?.(t)}
-          mode={pane.mode}
-          bind:jumpTo
-        />
+      {/if}
+      {#if onSplit && !isHistory}
+        <button class="icon" onclick={onSplit} disabled={splitFull} title={splitFull ? 'Three panes is the limit' : 'Split right (Ctrl+\\)'} aria-label="Split right">
+          <Icon name="splitright" size={15} />
+        </button>
+      {/if}
+      {#if onClosePane && !isHistory}
+        <button class="icon" onclick={onClosePane} title="Close pane" aria-label="Close pane"><Icon name="closepane" size={15} /></button>
+      {/if}
+      {#if !isHistory}
+        <button class="icon more" onclick={(e) => (menu = menuAt(e, moreItems))} title="History, bookmark, rename, delete" aria-label="More actions">···</button>
+      {/if}
+    </div>
+  </div>
+
+  {#if isHistory && pane.active && session && onSeq && onAsk}
+    {#key pane.active}
+      <HistoryPage {session} noteId={pane.active} seq={pane.seq ?? 0} {onSeq} {onAsk} />
+    {/key}
+    <div class="note-foot">
+      <span>{displayName(activePath)}</span>
+      <span class="spacer"></span>
+      <span>version history</span>
+    </div>
+  {:else if pane.active && session && !isBlank(pane.active)}
+    {#key pane.active}
+      <div class="page">
+        <!-- The outline in the margin the measure already leaves empty. It is an index, not a
+             panel: no header, no chrome, and gone the moment the pane is too narrow to hold a
+             margin at all — at which point ⌘K and the headings themselves are how you move. -->
+        {#if index.length}
+          <nav class="margin" aria-label="Outline">
+            {#each index as h (h.pos)}
+              <button class="entry" class:deep={h.level > 1} onclick={() => jumpTo?.(h.pos)} title={h.text}>{h.text}</button>
+            {/each}
+          </nav>
+        {/if}
+        <div class="editor-wrap">
+          <Editor
+            {session}
+            noteId={pane.active}
+            {onOpen}
+            {trail}
+            onHeadings={(h) => (headings = h)}
+            onPresence={(p) => { presence = p; onPresence?.(p) }}
+            onStats={(s) => (stats = s)}
+            mode={pane.mode}
+            bind:jumpTo
+          />
+        </div>
       </div>
       <div class="note-foot">
         <span>{stats.lines} {stats.lines === 1 ? 'line' : 'lines'}</span>
         <span>{stats.words} {stats.words === 1 ? 'word' : 'words'}</span>
+        {#if presence.length}
+          <span class="presence" title={presence.join(', ')}>with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
+        {/if}
         <span class="spacer"></span>
         <span>{format}</span>
       </div>
@@ -202,13 +268,13 @@
 <style>
   .pane {
     display: grid;
-    /* tabs · header · editor · footer */
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    /* tabs · page · footer */
+    grid-template-rows: auto minmax(0, 1fr) auto;
     min-width: 0;
     min-height: 0;
     flex: 1 1 0;
     border-top: 2px solid transparent;
-    /* The header has to fit *this pane*, not the window: two panes side by side on a wide
+    /* The chrome has to fit *this pane*, not the window: two panes side by side on a wide
        monitor are each narrower than a phone, so the window is the wrong thing to ask.
        `flex: 1 1 0` with `min-width: 0` gives the width from the flex line rather than from
        the contents, which is what inline-size containment requires. */
@@ -220,7 +286,9 @@
   }
   /* Tabs sit *on* the chrome and the active one lifts out of it into the document, so the
      strip and the page below read as one surface with a notch cut in it rather than two
-     stacked bars. That is what `flex-end` plus the negative margin buy. */
+     stacked bars. That is what `flex-end` plus the negative margin buy. The strip is `--panel`
+     rather than `--chrome` so the groove of the mode switch, which is `--chrome`, still reads
+     as a groove when it sits on it. */
   .tabs {
     display: flex;
     align-items: flex-end;
@@ -228,7 +296,7 @@
     padding: 0 0.5rem;
     overflow-x: auto;
     border-bottom: 1px solid var(--border);
-    background: var(--chrome);
+    background: var(--panel);
   }
   .tab {
     display: flex;
@@ -305,87 +373,73 @@
     color: var(--fg);
     background: var(--hover);
   }
-
-  /* The second and last chrome row: where you are, how you are looking at it, and everything
-     else behind `···`. The file path used to have a row of its own above this one. */
-  .note-head {
+  .spacer {
+    flex: 1;
+    min-width: 0.5rem;
+  }
+  /* The other end of the strip: how you are looking at the note, and what you do to it. It
+     sticks so a strip full of tabs scrolls *under* it rather than pushing it off the edge. */
+  .cluster {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0 1rem;
-    height: 2.5rem;
-    font-size: 0.75rem;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border-soft);
-    /* A pane is as narrow as a third of the window; when the controls stop fitting they take
-       a second row instead of being squeezed until their labels clip. */
-    flex-wrap: wrap;
-  }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .crumbs .vault {
-    text-transform: uppercase;
-    font-size: 0.9em;
-    letter-spacing: 0.05em;
-  }
-  .crumbs .folder,
-  .crumbs .vault {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .crumbs .sep {
-    color: var(--border);
+    gap: 0.15rem;
     flex: none;
+    align-self: center;
+    position: sticky;
+    right: 0;
+    padding-left: 0.4rem;
+    background: var(--panel);
   }
-  .crumbs .name {
-    color: var(--fg);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .note-head button {
+  .cluster .icon {
+    display: grid;
+    place-items: center;
     font: inherit;
     font-size: 0.8rem;
     border: 0;
     background: none;
     color: var(--faint);
-    padding: 0.2rem 0.45rem;
+    padding: 0.25rem;
     border-radius: 4px;
     cursor: pointer;
   }
-  .note-head button:hover {
+  .cluster .icon:hover:not(:disabled) {
     color: var(--fg);
     background: var(--hover);
   }
-  .note-head .more {
-    letter-spacing: 0.06em;
+  .cluster .icon:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
-  .note-head .panel-toggle.on {
+  .cluster .icon.on {
     color: var(--accent);
+    background: var(--accent-bg);
   }
-  .spacer {
-    flex: 1;
+  .cluster .more {
+    letter-spacing: 0.06em;
+    padding: 0.25rem 0.35rem;
   }
   /* One segmented control, so the three modes read as a choice rather than three buttons. */
   .modes {
     display: inline-flex;
-    /* Never shrink: a clipped “Reading” is worse than a wrapped row. */
     flex: none;
     gap: 2px;
     background: var(--chrome);
     border-radius: 6px;
     padding: 2px;
+    margin-right: 0.2rem;
   }
   .modes button {
+    font: inherit;
+    border: 0;
+    background: none;
+    color: var(--muted);
     border-radius: 4px;
     padding: 0.15rem 0.6rem;
     font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .modes button:hover:not(.on) {
+    color: var(--fg);
   }
   /* A raised chip rather than a tinted one: the same "lifted out of the groove" language the
      active tab uses, so both say "selected" the same way. */
@@ -394,6 +448,54 @@
     color: var(--fg);
     font-weight: 600;
     box-shadow: 0 1px 1.5px rgb(0 0 0 / 0.07);
+  }
+
+  /* The page: the editor, and the margin index laid over the empty column beside its measure. */
+  .page {
+    position: relative;
+    min-height: 0;
+    display: grid;
+  }
+  .editor-wrap {
+    min-height: 0;
+  }
+  /* Half the pane minus half the measure (42.5rem in `setup.ts`) is exactly the empty column
+     the centred text leaves behind, which is where a marginal index belongs. */
+  .margin {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: calc(50% - 21.25rem);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
+    padding: 4.15rem 1.75rem 1rem 0.75rem;
+    overflow: auto;
+    /* The column is mostly empty paper; a click in it should reach the editor underneath. */
+    pointer-events: none;
+  }
+  .margin .entry {
+    pointer-events: auto;
+    max-width: 100%;
+    font: inherit;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    text-align: right;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    padding: 0.1rem 0;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .margin .entry.deep {
+    font-size: 0.68rem;
+    color: var(--faint);
+  }
+  .margin .entry:hover {
+    color: var(--accent);
   }
 
   /* Counts and format, in the quietest type in the app — it is reference, not chrome you act
@@ -412,9 +514,6 @@
   .presence {
     color: var(--accent);
   }
-  .editor-wrap {
-    min-height: 0;
-  }
   .placeholder {
     display: grid;
     place-items: center;
@@ -424,11 +523,14 @@
   }
 
   /* ---- a narrow pane.
-
-     The actions no longer fold at a breakpoint — they live in `···` at every width — so all
-     that is left to give back is the padding. */
+     First the padding goes, then the margin index (there is no margin left to put it in), and
+     then the controls that have a home in `⋯` anyway. */
+  @container pane (max-width: 940px) {
+    .margin {
+      display: none;
+    }
+  }
   @container pane (max-width: 560px) {
-    .note-head,
     .note-foot {
       padding-left: 0.6rem;
       padding-right: 0.6rem;
@@ -437,18 +539,13 @@
       max-width: 8rem;
     }
   }
-
-  /* Then, on a pane no wider than a phone, the row splits in two — the title is the main thing
-     telling you where you are, and it should not be sharing its line with a segmented control.
-     The spacer already sits exactly where the break belongs, so it becomes the break. */
-  @container pane (max-width: 420px) {
-    .spacer {
-      flex-basis: 100%;
-      height: 0;
+  @container pane (max-width: 520px) {
+    .cluster .fold {
+      display: none;
     }
   }
 
-  /* ---- touch: a finger needs somewhere to land */
+  /* ---- touch: no hover to reveal anything, and a finger is not a pixel */
   @media (pointer: coarse) {
     .tabs {
       /* Flicking the strip must not drag the note behind it. */
@@ -465,8 +562,8 @@
     .tab .x {
       padding: 0 0.3rem;
     }
-    .note-head button {
-      padding: 0.4rem 0.6rem;
+    .cluster .icon {
+      padding: 0.45rem;
     }
     .modes button {
       padding: 0.35rem 0.6rem;
