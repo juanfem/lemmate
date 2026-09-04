@@ -417,8 +417,21 @@ lives there and underneath it rather than in a column of its own:
   tags the vault already uses: it is written into the note's `tags:` front matter, joining the
   list in whichever style the note already writes it (`[a, b]`, one `- item` per line, or
   `a, b`), and a note with no front matter gets one. Spaces become hyphens and the name is
-  lower-cased, so what you get is what the index would have found. Taking a tag *off* is an
-  ordinary edit: delete it from the front matter, or delete the `#word` from the text.
+  lower-cased, so what you get is what the index would have found.
+
+  **Right-click a chip** (press and hold on a phone) for the rest:
+
+  | | |
+  |---|---|
+  | *Remove from this note* | Takes it off this note alone — out of the front matter, and out of the sentence, which closes up behind it. |
+  | *Rename … everywhere* | Renames it in every note that carries it. Nested tags follow their parent: renaming `#projects` makes `#projects/alpha` into `#newname/alpha`. |
+  | *Delete … everywhere* | Takes it off every note that carries it. Nested tags are left where they are — `#projects/alpha` is its own tag. The notes themselves are untouched. |
+
+  Both *everywhere* commands say how many notes they are about before they run, and neither
+  touches a `#word` inside a code span or a fenced block: the indexers do not read those as
+  tags, so nothing that rewrites tags may rewrite them. There is no undo — a rename back is the
+  way back.
+
   Backlinks match links
   whose target is the note's full path, its path without extension, or its basename. Unlinked
   mentions, outgoing links and context snippets are not built.

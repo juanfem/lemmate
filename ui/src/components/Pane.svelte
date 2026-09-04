@@ -49,6 +49,7 @@
     onDelete,
     onOpen,
     onTag,
+    onTagMenu,
     onPresence,
     onMode,
     onNewTab,
@@ -79,6 +80,8 @@
     onOpen: (id: string) => void
     /** A tag chip on the page: show the sidebar's Tags pane, filtered to it. */
     onTag: (tag: string) => void
+    /** Right-click on a chip: rename it, or take it off. */
+    onTagMenu?: (tag: string, noteId: string, e: MouseEvent) => void
     onPresence?: (names: string[]) => void
     onMode?: (mode: ViewMode) => void
     onNewTab?: () => void
@@ -254,6 +257,7 @@
             onHeadings={(h) => (headings = h)}
             onHere={(p) => (here = p)}
             {onTag}
+            {onTagMenu}
             {onAsk}
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}

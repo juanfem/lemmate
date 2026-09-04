@@ -4,6 +4,7 @@
 // of the document they describe, instead of being a panel that happens to be next to it.
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
 import { StateField, type EditorState } from '@codemirror/state'
+import { longpress } from '../longpress.ts'
 
 /**
  * A widget that renders a node the *caller* owns and keeps updating. `eq` compares identity so
@@ -92,6 +93,8 @@ export function renderPageFoot(
     onTag: (tag: string) => void
     /** Put another tag on this note. Absent where nothing can ask for its name. */
     onAddTag?: () => void
+    /** Right-click, or a long press: what else can be done to this tag. */
+    onTagMenu?: (tag: string, e: MouseEvent) => void
   },
 ) {
   el.replaceChildren()
@@ -108,6 +111,12 @@ export function renderPageFoot(
     chip.type = 'button'
     chip.title = `Show notes tagged #${t}`
     chip.addEventListener('click', () => data.onTag(t))
+    if (data.onTagMenu) {
+      chip.addEventListener('contextmenu', (e) => (e.preventDefault(), data.onTagMenu?.(t, e)))
+      // The same menu on a phone, where there is no right button. `longpress` dispatches the
+      // `contextmenu` above, so there is only ever one handler to keep in step.
+      longpress(chip)
+    }
     chip.textContent = `#${t}`
   }
   if (data.onAddTag) {

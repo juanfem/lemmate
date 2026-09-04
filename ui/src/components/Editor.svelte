@@ -21,6 +21,7 @@
     onHeadings,
     onHere,
     onTag,
+    onTagMenu,
     onAsk,
     onPresence,
     onStats,
@@ -36,6 +37,8 @@
     onHere?: (pos: number) => void
     /** A tag chip at the foot of the page was clicked: show what else carries it. */
     onTag: (tag: string) => void
+    /** Right-click (or long press) on a chip, for the menu the shell builds. */
+    onTagMenu?: (tag: string, noteId: string, e: MouseEvent) => void
     /** The shell's prompt dialog, for naming a new tag. */
     onAsk?: (
       title: string,
@@ -64,7 +67,16 @@
   let tags: string[] = $state([])
   let backlinks: Backlink[] = $state([])
   $effect(() => renderPageHead(head, trail))
-  $effect(() => renderPageFoot(foot, { tags, backlinks, onOpen, onTag, onAddTag: onAsk && addTag }))
+  $effect(() =>
+    renderPageFoot(foot, {
+      tags,
+      backlinks,
+      onOpen,
+      onTag,
+      onAddTag: onAsk && addTag,
+      onTagMenu: onTagMenu && ((tag, e) => onTagMenu(tag, noteId, e)),
+    }),
+  )
   // Backlinks are a round trip, so they are fetched once per note rather than per keystroke;
   // a link written elsewhere shows up the next time this note is opened.
   $effect(() => {

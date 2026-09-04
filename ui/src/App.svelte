@@ -3,7 +3,8 @@
   import { api, authState, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
   import AccountDialog from './components/AccountDialog.svelte'
-  import ContextMenu, { type MenuState } from './components/ContextMenu.svelte'
+  import ContextMenu, { menuAt, type MenuState } from './components/ContextMenu.svelte'
+  import { cleanTag, removeTagFromText, renameTagInText } from './lib/tagedit.ts'
   import Setup from './components/Setup.svelte'
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
@@ -152,8 +153,8 @@
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
   let accountOpen = $state(false)
-  /** The account menu at the foot of the sidebar. */
-  let accountMenu = $state<MenuState | null>(null)
+  /** Whichever right-click / drop-down menu is open: the account's, or a tag chip's. */
+  let menu = $state<MenuState | null>(null)
   let importInto = $state<string | null | undefined>(undefined)
 
   // The single-note view stands alone: one session, one pane, its own socket.
@@ -236,6 +237,70 @@
     sidebar = 'tags'
     // On a phone the sidebar is a drawer, and the answer is inside it.
     if (narrow.current) drawer = true
+  }
+
+  /**
+   * The menu a tag chip opens. Every label says its own scope, because two of these three reach
+   * every note in the vault and one reaches only the note under the pointer — and a mass edit
+   * that reads as a local one is the way to lose an afternoon's filing.
+   */
+  function tagMenu(tag: string, noteId: string, e: MouseEvent) {
+    menu = menuAt(e, [
+      { label: `Show notes tagged #${tag}`, run: () => filterByTag(tag) },
+      { separator: true, label: '' },
+      { label: 'Remove from this note', run: () => void removeTagHere(tag, noteId) },
+      { label: `Rename #${tag} everywhere…`, run: () => void renameTag(tag, noteId) },
+      { label: `Delete #${tag} everywhere…`, danger: true, run: () => void deleteTag(tag, noteId) },
+    ])
+  }
+
+  /** Off this note only — the everyday case, and the one a `+` puts back. */
+  async function removeTagHere(tag: string, noteId: string) {
+    const s = sessionOf(noteId)
+    if (!s) return
+    await s.rewriteNotes([noteId], (text) => removeTagFromText(text, tag))
+    tagsVersion++
+  }
+
+  /** Every note the vault says carries it — which is what "rename a tag" can only mean. */
+  async function taggedNotes(vault: string, tag: string): Promise<string[]> {
+    return (await api.tagged(vault, tag).catch(() => [])).map((n) => n.id)
+  }
+
+  async function renameTag(tag: string, noteId: string) {
+    const s = sessionOf(noteId)
+    if (!s) return
+    const ids = await taggedNotes(s.id, tag)
+    const typed = await ask({
+      kind: 'prompt',
+      title: `Rename #${tag}`,
+      body: `In ${ids.length} ${ids.length === 1 ? 'note' : 'notes'}, in their text as well as their front matter. Nested tags follow: #${tag}/something becomes the new name's.`,
+      initial: tag,
+      confirmLabel: 'Rename',
+    })
+    const next = typed === null ? '' : cleanTag(typed)
+    if (!next || next === tag) return
+    const changed = await s.rewriteNotes(ids, (text) => renameTagInText(text, tag, next))
+    tagsVersion++
+    if (tagFilter === tag) tagFilter = next
+    if (changed === 0) await ask({ kind: 'confirm', title: `Nothing carried #${tag}.`, confirmLabel: 'OK' })
+  }
+
+  async function deleteTag(tag: string, noteId: string) {
+    const s = sessionOf(noteId)
+    if (!s) return
+    const ids = await taggedNotes(s.id, tag)
+    const ok = await ask({
+      kind: 'confirm',
+      title: `Delete #${tag} everywhere?`,
+      body: `It comes off ${ids.length} ${ids.length === 1 ? 'note' : 'notes'}, out of their text as well as their front matter. Nested tags like #${tag}/something are left where they are. The notes themselves are not touched.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (ok === null) return
+    await s.rewriteNotes(ids, (text) => removeTagFromText(text, tag))
+    tagsVersion++
+    if (tagFilter === tag) tagFilter = null
   }
   /** The palette, or null when closed; the string is what it opens with — `>` for commands. */
   let palette = $state<string | null>(null)
@@ -981,7 +1046,7 @@
             // too, and a menu that lands in the corner of the window because the click carried
             // no coordinates is not a menu about this row.
             const r = e.currentTarget.getBoundingClientRect()
-            accountMenu = {
+            menu = {
               x: r.left,
               y: r.top,
               items: [
@@ -1040,6 +1105,7 @@
           onRename={renameActive}
           onDelete={deleteActive}
           onTag={(t) => { focusedPane = i; filterByTag(t) }}
+          onTagMenu={(t, id, e) => { focusedPane = i; tagMenu(t, id, e) }}
           onOpen={(id) => { focusedPane = i; open(id) }}
           onPresence={(names) => (presenceByPane[p.id] = names)}
           onMode={(m) => { focusedPane = i; p.mode = m }}
@@ -1101,8 +1167,8 @@
   <AccountDialog {me} onClose={() => (accountOpen = false)} />
 {/if}
 
-{#if accountMenu}
-  <ContextMenu menu={accountMenu} onClose={() => (accountMenu = null)} />
+{#if menu}
+  <ContextMenu {menu} onClose={() => (menu = null)} />
 {/if}
 
 {#if modal}

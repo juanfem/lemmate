@@ -391,6 +391,45 @@ export class VaultSession {
   }
 
   /**
+   * Rewrite a set of notes in one pass — what a tag renamed or deleted across the vault is.
+   * `edit` returns null for a note that turns out to have nothing to change, which is the usual
+   * answer for at least some of the notes a tag search hands back. Returns how many changed.
+   */
+  async rewriteNotes(ids: string[], edit: (text: string) => string | null): Promise<number> {
+    let changed = 0
+    for (const id of ids) {
+      const { doc, release } = this.acquire(id)
+      try {
+        await this.whenLoaded(id, doc)
+        const text = doc.getText('content')
+        const before = text.toString()
+        const next = edit(before)
+        if (next === null || next === before) continue
+        // Replace only the span that actually differs. A whole-document delete-and-insert puts
+        // the entire note through the update log and drops everyone else's cursor to the top,
+        // for an edit that is usually a handful of characters.
+        let head = 0
+        while (head < before.length && head < next.length && before[head] === next[head]) head++
+        let tail = 0
+        while (
+          tail < before.length - head &&
+          tail < next.length - head &&
+          before[before.length - 1 - tail] === next[next.length - 1 - tail]
+        )
+          tail++
+        doc.transact(() => {
+          text.delete(head, before.length - head - tail)
+          text.insert(head, next.slice(head, next.length - tail))
+        })
+        changed++
+      } finally {
+        release()
+      }
+    }
+    return changed
+  }
+
+  /**
    * Resolve once a note doc has content to read: either the socket says it is synced, or the
    * first update lands. The timeout is the offline case — an empty doc is still an answer.
    */
