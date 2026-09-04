@@ -24,7 +24,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::error::{Error, Result};
 use crate::ids::{DocId, NoteId, VaultId};
@@ -479,9 +478,7 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/attachments/{hash}", get(attachment).put(put_attachment))
         .layer(axum::extract::DefaultBodyLimit::max(crate::attachments::MAX_ATTACHMENT_BYTES as usize));
     let router = match &opts.web_dir {
-        Some(dir) => {
-            router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html"))))
-        }
+        Some(dir) => router.fallback_service(crate::web::client(dir)),
         None => router,
     };
     let app = router.with_state(state);
@@ -1061,9 +1058,7 @@ pub async fn serve_setup(
         .route("/api/v1/auth/me", get(|| async { StatusCode::NOT_FOUND }))
         .route("/api/v1/vaults", get(|| async { axum::Json(Vec::<()>::new()) }));
     let router = match web_dir {
-        Some(dir) => {
-            router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
-        }
+        Some(dir) => router.fallback_service(crate::web::client(&dir)),
         None => router,
     };
     let app = router.with_state(state);

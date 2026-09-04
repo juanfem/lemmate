@@ -21,7 +21,6 @@ use lemmate_core::sync::{Frame, Message, SyncMessage};
 use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use yrs::StateVector;
@@ -210,9 +209,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize));
     let router = match web_dir {
         // Single-page app: unknown paths fall back to index.html so `#/v/<id>` links work.
-        Some(dir) => {
-            router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
-        }
+        Some(dir) => router.fallback_service(lemmate_core::web::client(&dir)),
         None => router,
     };
     router.layer(TraceLayer::new_for_http()).with_state(state)

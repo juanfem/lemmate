@@ -32,6 +32,7 @@ pub mod tls;
 pub mod vault_doc;
 pub mod vaults;
 pub mod watcher;
+pub mod web;
 
 pub use doc::NoteDoc;
 pub use error::{Error, Result};
