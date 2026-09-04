@@ -39,12 +39,16 @@
     activeVault,
     onOpen,
     actions = {},
+    revealFolder = $bindable(),
   }: {
     vaults: VaultNode[]
     activeId: string | null
     activeVault?: string | null
     onOpen: (id: string) => void
     actions?: TreeActions
+    /** Bound out for the palette: picking a folder there has to reach the selection in here,
+     *  which outlives a switch between the two layouts and so cannot live in either view. */
+    revealFolder?: (vault: string, folder: string) => void
   } = $props()
 
   type Mode = 'tree' | 'split'
@@ -136,6 +140,15 @@
     // The folder pane scrolls on its own: in split mode the note row is in the list below.
     if (mode === 'split') host?.querySelector(`[data-folder="${folderKey(vault.id, folder) || vault.id}"]`)?.scrollIntoView({ block: 'nearest' })
     host?.querySelector(`[data-note="${id}"]`)?.scrollIntoView({ block: 'nearest' })
+  }
+
+  revealFolder = (vault: string, folder: string) => {
+    setMode('split')
+    select(vault, folder)
+    for (const a of ancestors(folder)) collapsed[folderKey(vault, a)] = false
+    collapsed[vault] = false
+    save('lemmate.tree.collapsed', collapsed)
+    void tick().then(() => host?.querySelector(`[data-folder="${folderKey(vault, folder) || vault}"]`)?.scrollIntoView({ block: 'nearest' }))
   }
 
   // Land on something sensible: the vault the shell is pointing at, and never a vault that

@@ -16,12 +16,12 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import QuickSwitcher from './components/QuickSwitcher.svelte'
+
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
   import type { OutlineItem } from './components/OutlinePane.svelte'
   import NotePanel, { type PanelTab } from './components/NotePanel.svelte'
-  import CommandPalette, { type Command } from './components/CommandPalette.svelte'
+  import Palette, { type Command } from './components/Palette.svelte'
   import TrashPane from './components/TrashPane.svelte'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
@@ -203,7 +203,7 @@
     const session = ws.add(ulid())
     if (name) session.setName(name)
     focusVault = session.id
-    switcher = true
+    palette = ''
   }
   async function renameVault(vault: string) {
     const session = workspace?.get(vault)
@@ -256,8 +256,9 @@
     remember('lemmate.panel.tab', tab)
     remember('lemmate.panel.open', true)
   }
-  let switcher = $state(false)
-  let palette = $state(false)
+  /** The palette, or null when closed; the string is what it opens with — `>` for commands. */
+  let palette = $state<string | null>(null)
+  let revealFolder: ((vault: string, folder: string) => void) | undefined = $state()
   let tagsVersion = $state(0)
 
   // ---- narrow shell: a phone has room for the sidebar or a note, not both
@@ -320,6 +321,26 @@
   let vaults: VaultNode[] = $derived(
     (workspace?.sessions ?? []).map((s) => ({ id: s.id, label: s.label, notes: s.notes })),
   )
+  /** Every folder in every vault, for the palette. Folders are path prefixes (SPEC §9), so
+   *  they are derived from the notes rather than stored anywhere. */
+  let folders = $derived.by(() => {
+    const out: { vault: string; folder: string }[] = []
+    for (const v of vaults) {
+      const seen = new Set<string>()
+      for (const n of v.notes) {
+        const parts = n.path.split('/').slice(0, -1)
+        for (let i = 1; i <= parts.length; i++) {
+          const folder = parts.slice(0, i).join('/')
+          if (!seen.has(folder)) {
+            seen.add(folder)
+            out.push({ vault: v.id, folder })
+          }
+        }
+      }
+    }
+    return out
+  })
+
   /** Vault labels are noise until there is more than one vault to tell apart. */
   let manyVaults = $derived((workspace?.sessions.length ?? 0) > 1)
   function vaultLabel(vault: string | null | undefined): string {
@@ -470,8 +491,7 @@
   function landOn(id: string) {
     const p = focused
     p.active = id
-    switcher = false
-    palette = false
+    palette = null
     // On a phone the drawer is covering the note you just picked.
     drawer = false
     headingsByPane[p.id] = []
@@ -544,9 +564,9 @@
     }
   }
   let commands: Command[] = $derived([
-    { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (switcher = true) },
+    { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (palette = '') },
     { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
-    { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (sidebar = 'search') },
+    { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (palette = '') },
     { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
     { id: 'outline', label: 'Show outline', run: () => setPanelTab('outline') },
@@ -779,12 +799,11 @@
     } else if (e.key === '\\') {
       splitRight()
       e.preventDefault()
-    } else if ((e.key === 'o' || e.key === 'p') && !e.shiftKey) {
-      switcher = !switcher
-      palette = false
+    } else if ((e.key === 'o' || e.key === 'p' || e.key === 'k') && !e.shiftKey) {
+      palette = palette === null ? '' : null
       e.preventDefault()
     } else if (e.key === 'n' && !e.shiftKey) {
-      switcher = true
+      palette = ''
       e.preventDefault()
     } else if (e.key === 'e' && !e.shiftKey) {
       cycleMode()
@@ -801,12 +820,11 @@
     } else if (e.key === 'd' && e.shiftKey) {
       daily()
       e.preventDefault()
-    } else if (e.key === 'f' && e.shiftKey) {
-      sidebar = 'search'
+    } else if ((e.key === 'f' || e.key === 'F') && e.shiftKey) {
+      palette = ''
       e.preventDefault()
     } else if ((e.key === 'p' || e.key === 'P') && e.shiftKey) {
-      palette = !palette
-      switcher = false
+      palette = palette === '>' ? null : '>'
       e.preventDefault()
     } else if ((e.key === 'b' || e.key === 'B') && e.shiftKey) {
       bookmarkActive()
@@ -860,8 +878,8 @@
       <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
       <span class="here" title={activePath}>{activeTitle}</span>
       <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
-      <button class="icon" onclick={() => (switcher = true)} aria-label="Open or create a note">＋</button>
-      <button class="icon" onclick={() => (palette = true)} aria-label="Command palette">⌘</button>
+      <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands">＋</button>
+      <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
     </header>
     {#if narrow.current && drawer}
       <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
@@ -875,13 +893,14 @@
         <button class:on={sidebar === 'tags'} onclick={() => (sidebar = 'tags')} title="Tags">Tags</button>
         <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
         <span class="spacer"></span>
-        <button class="quick" title="New note (Ctrl+N)" onclick={() => (switcher = true)}>＋</button>
-        <button class="quick" title="Command palette (Ctrl+Shift+P)" onclick={() => (palette = true)}>⌘</button>
+        <button class="quick" title="Search and commands (Ctrl+K)" onclick={() => (palette = '')}>＋</button>
+        <button class="quick" title="Commands (Ctrl+Shift+P)" onclick={() => (palette = '>')}>⌘</button>
       </div>
       {#if solo}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
       {:else if sidebar === 'files'}
         <FilesPane
+          bind:revealFolder
           {vaults}
           activeId={active}
           activeVault={session?.id ?? null}
@@ -1004,18 +1023,24 @@
       />
     {/if}
   </div>
-  {#if switcher && workspace}
-    <QuickSwitcher
-      notes={workspace.notes}
-      label={vaultLabel}
-      createVault={session?.id ?? null}
-      onOpen={open}
-      onCreate={(path) => create(path)}
-      onClose={() => (switcher = false)}
-    />
-  {/if}
-  {#if palette}
-    <CommandPalette {commands} onClose={() => (palette = false)} />
+  {#if palette !== null && workspace}
+    <!-- Keyed on the seed so Ctrl+Shift+P over an already-open palette re-opens it on
+         commands rather than leaving the box as the user last typed it. -->
+    {#key palette}
+      <Palette
+        notes={workspace.notes}
+        {folders}
+        {commands}
+        label={vaultLabel}
+        createVault={session?.id ?? null}
+        initial={palette}
+        onOpen={open}
+        onOpenInPane={openInNewPane}
+        onCreate={(path) => create(path)}
+        onFolder={(vault, folder) => { focusVault = vault; sidebar = 'files'; drawer = false; revealFolder?.(vault, folder) }}
+        onClose={() => (palette = null)}
+      />
+    {/key}
   {/if}
   {#if connectOpen}
     <ConnectServer {configPath} onClose={() => (connectOpen = false)} />
