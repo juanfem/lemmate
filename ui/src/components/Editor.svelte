@@ -2,6 +2,8 @@
   import { onDestroy, onMount } from 'svelte'
   import { EditorView } from '@codemirror/view'
   import { createEditor, setViewMode, type ViewMode } from '../lib/editor/setup.ts'
+  import { listIndent } from '../lib/editor/lists.ts'
+  import Icon from './Icon.svelte'
   import type { VaultSession } from '../lib/vault.svelte.ts'
   import { api } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
@@ -168,17 +170,68 @@
     if (view) setViewMode(view, m, { openLink, embedUrl })
   })
 
+  /** A press on the bar must not take the focus off the text it is about to indent. */
+  const keepFocus = (e: PointerEvent) => e.preventDefault()
+
+  /** The touch bar's buttons: the same commands Tab and Shift+Tab run. */
+  function indent(dir: 1 | -1) {
+    if (!view) return
+    listIndent(dir)(view)
+    view.focus()
+  }
+
   onDestroy(() => {
     view?.destroy()
     release?.()
   })
 </script>
 
-<div class="editor" bind:this={host}></div>
+<div class="frame">
+  <!-- A phone keyboard has no Tab, and nesting a list item is the one edit that needs one. The
+       bar sits above the editor rather than over the keyboard, so it stays reachable while
+       typing. The press is cancelled on `pointerdown` so the editor keeps the focus and the
+       selection the command is about to act on, while the click still arrives — which is also
+       what makes the buttons work from the keyboard. -->
+  <div class="touchbar">
+    <button onpointerdown={keepFocus} onclick={() => indent(-1)} title="Outdent (Shift+Tab)" aria-label="Outdent"><Icon name="outdent" size={16} /></button>
+    <button onpointerdown={keepFocus} onclick={() => indent(1)} title="Indent (Tab)" aria-label="Indent"><Icon name="indent" size={16} /></button>
+  </div>
+  <div class="editor" bind:this={host}></div>
+</div>
 
 <style>
-  .editor {
+  .frame {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .editor {
+    flex: 1;
+    min-height: 0;
     overflow: auto;
+  }
+  /* Pointer, not width: a tablet in landscape is wide and still has no Tab key, and a narrow
+     window on a laptop has one. */
+  .touchbar {
+    display: none;
+  }
+  @media (pointer: coarse) {
+    .touchbar {
+      display: flex;
+      gap: 0.3rem;
+      padding: 0.3rem 0.5rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .touchbar button {
+      display: flex;
+      align-items: center;
+      padding: 0.45rem 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: inherit;
+    }
   }
 </style>

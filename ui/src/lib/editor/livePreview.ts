@@ -151,15 +151,16 @@ function roman(n: number): string {
 }
 
 /**
- * How an ordered item's number is written, by nesting depth (1 = outermost) — the convention
- * a document uses, `1.` → `a.` → `i.`, cycling past three. `null` leaves the source alone,
- * which is every top-level item (its digits already are the marker) and anything outside the
- * range the alphabet and the Roman numerals cover.
+ * How an ordered item's number is written, by nesting depth (1 = outermost) — the convention a
+ * document uses: decimal, then lower-alpha, then lower-roman, cycling past three. `null` for a
+ * number the numerals cannot spell, which keeps the digits the file holds.
  */
 export function listNumber(depth: number, n: number): string | null {
+  if (n < 1) return null
   const style = (Math.max(1, depth) - 1) % 3
-  if (style === 0 || n < 1 || n > 3999) return null
-  return style === 1 ? alpha(n) : roman(n)
+  if (style === 0) return String(n)
+  if (style === 1) return alpha(n)
+  return n > 3999 ? null : roman(n)
 }
 
 class MarkerWidget extends WidgetType {
@@ -375,21 +376,37 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             break
           }
           case 'ListMark': {
+            // Bullets only; an ordered list is numbered as a whole, under `OrderedList` below.
             const item = n.parent
             const list = item?.parent
-            if (!item || !list || revealed(state, node.from, node.to)) break
+            if (!item || list?.name !== 'BulletList' || revealed(state, node.from, node.to)) break
             let depth = 0
-            for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === list.name) depth++
-            if (list.name === 'BulletList') {
-              // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
-              const bullet = listBullet(depth, item.getChild('Task') !== null)
-              push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(bullet, 'cm-list-bullet') }))
-            } else if (list.name === 'OrderedList') {
-              // `12.` or `12)` — the delimiter the author wrote is kept, only the number changes.
-              const m = /^(\d+)([.)])$/u.exec(state.sliceDoc(node.from, node.to))
-              const label = m ? listNumber(depth, Number(m[1])) : null
-              if (label === null) break
-              push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(label + m![2]!, 'cm-list-number') }))
+            for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === 'BulletList') depth++
+            // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
+            const bullet = listBullet(depth, item.getChild('Task') !== null)
+            push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(bullet, 'cm-list-bullet') }))
+            break
+          }
+          case 'OrderedList': {
+            // Numbered together, because an item's number is its *position*: markdown counts
+            // from the first item's number and ignores the digits after it, which is what lets
+            // `1.` on every line work — and what makes an item's number right again the moment
+            // it is indented away, with nothing rewritten in the file.
+            let depth = 0
+            for (let p: SyntaxNode | null = n; p; p = p.parent) if (p.name === 'OrderedList') depth++
+            let start: number | null = null
+            let index = 0
+            for (const li of n.getChildren('ListItem')) {
+              const mark = li.getChild('ListMark')
+              if (!mark) continue
+              const m = /^(\d+)([.)])$/u.exec(state.sliceDoc(mark.from, mark.to))
+              if (!m) continue
+              start ??= Number(m[1])
+              const label = listNumber(depth, start + index++)
+              if (label === null || revealed(state, mark.from, mark.to)) continue
+              const text = label + m[2]!
+              if (text === m[0]) continue // already what the file says: nothing to draw
+              push(mark.from, mark.to, Decoration.replace({ widget: new MarkerWidget(text, 'cm-list-number') }))
             }
             break
           }

@@ -261,8 +261,10 @@ cursor or selection touches. Rendered **in the editor**: headings, emphasis/stro
 inline code, links, images, wikilinks and image embeds, `$…$` and `$$…$$` via KaTeX, `#tags`,
 task checkboxes, blockquotes, fenced code blocks, callout blocks, and front matter (folded to a
 one-line property summary — click it to edit). List markers follow the level they are on: `•`,
-`◦` and `▪` down a bullet list, and `1.`, `a.`, `i.` down an ordered one (whatever digits and
-delimiter the file holds). A task line shows its checkbox and no bullet.
+`◦` and `▪` down a bullet list, and `1.`, `a.`, `i.` down an ordered one, keeping the delimiter
+the file holds. An ordered item is numbered by its position, as every markdown renderer numbers
+it, so a file full of `1.` still reads 1, 2, 3 and a gap left by an item you indented away
+closes by itself. A task line shows its checkbox and no bullet.
 
 Recognised by the indexer and handled by pandoc **on export only**, with no editor decoration
 today: footnotes, citations, definition lists, superscript/subscript, bracketed spans, header
@@ -278,7 +280,13 @@ Callout `collapse="true"` is not implemented.
 - **Autocomplete**: type `[[` for note paths, `#` for existing tags. The `@` citation, `:::`
   callout and `/` slash menus described in SPEC §8 are not implemented.
 - **Front matter opens folded** and the cursor lands after it.
-- Standard CodeMirror editing: undo/redo, find (`Ctrl+F`), bracket matching, `Tab` indent.
+- **`Tab` nests a list item** under the item above it, and `Shift+Tab` brings it back out; the
+  item's children come along, and an ordered item is renumbered for the level it lands on.
+  Markdown nests by column, so this is not the same as adding spaces: `Tab` puts the marker
+  exactly where the item above holds its content. Anywhere else it is the usual indent.
+- **On a phone**, where the keyboard has no `Tab`, the same two commands are the ⇤/⇥ buttons in
+  the bar above the note.
+- Standard CodeMirror editing: undo/redo, find (`Ctrl+F`), bracket matching.
 - `.qmd` files are first-class notes with the same editor, links and search.
 
 ---

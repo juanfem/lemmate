@@ -449,8 +449,15 @@ callouts, footnote refs, checkboxes, tags, citations, front matter (folded to a 
 panel), horizontal rules, code blocks with language highlighting, and list markers — a bullet
 list's `-` renders as a shape chosen by nesting depth (disc, circle, square, cycling) and an
 ordered list's number as decimal, then lower-alpha, then lower-roman, so the level of a nested
-item reads without counting the indentation. A task item's bullet is dropped: the checkbox is
-its marker.
+item reads without counting the indentation. The number drawn is the item's *position* in its
+list, counted from the first item's number the way CommonMark counts it, not the digits on the
+line. A task item's bullet is dropped: the checkbox is its marker.
+
+`Tab` and `Shift+Tab` in a list nest an item under the one above it and bring it back out,
+moving its children with it and renumbering an ordered item for its new level. This is a
+command of its own, not the generic indent: markdown nests by column, so the marker has to land
+where the item above holds its *content*. On a coarse pointer the editor also shows a small bar
+with the same two commands, because no phone keyboard has a Tab key.
 
 Editing features:
 - Autocomplete: `[[` notes and headings, `#` tags, `@` citations, `:::` callout kinds,

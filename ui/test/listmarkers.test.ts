@@ -1,5 +1,5 @@
-// Live preview renders a list's marker as the shape (or the numbering) its nesting level calls
-// for, rather than the `-` or the digits the source happens to hold.
+// Live preview renders a list's marker as the shape (or the number) its nesting level and its
+// position call for, rather than the `-` or the digits the source happens to hold.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { GFM, parser } from '@lezer/markdown'
@@ -9,30 +9,43 @@ import { listBullet, listNumber } from '../src/lib/editor/livePreview.ts'
 
 const p = parser.configure([GFM, noteSyntax])
 
+const depthOf = (list: SyntaxNode): number => {
+  let depth = 0
+  for (let a: SyntaxNode | null = list; a; a = a.parent) if (a.name === list.name) depth++
+  return depth
+}
+
 /**
- * What the decoration builder does to every list marker in `src`: the text it renders as, or
+ * What the decoration builder draws over every list marker in `src`, in document order, with
  * `null` where the source is left showing through.
  */
 function markers(src: string): (string | null)[] {
-  const out: (string | null)[] = []
+  const drawn = new Map<number, string | null>()
   p.parse(src).iterate({
     enter: (node) => {
-      if (node.name !== 'ListMark') return
-      const item = node.node.parent
-      const list = item?.parent
-      if (!item || !list) return
-      let depth = 0
-      for (let a: SyntaxNode | null = list; a; a = a.parent) if (a.name === list.name) depth++
-      if (list.name === 'BulletList') {
-        out.push(listBullet(depth, item.getChild('Task') !== null))
-      } else if (list.name === 'OrderedList') {
-        const m = /^(\d+)([.)])$/u.exec(src.slice(node.from, node.to))
-        const label = m ? listNumber(depth, Number(m[1])) : null
-        out.push(label === null ? null : label + m![2]!)
+      const n = node.node
+      if (node.name === 'ListMark') {
+        const item = n.parent
+        if (item?.parent?.name !== 'BulletList') return
+        drawn.set(n.from, listBullet(depthOf(item.parent), item.getChild('Task') !== null))
+      } else if (node.name === 'OrderedList') {
+        const depth = depthOf(n)
+        let start: number | null = null
+        let index = 0
+        for (const li of n.getChildren('ListItem')) {
+          const mark = li.getChild('ListMark')
+          if (!mark) continue
+          const m = /^(\d+)([.)])$/u.exec(src.slice(mark.from, mark.to))
+          if (!m) continue
+          start ??= Number(m[1])
+          const label = listNumber(depth, start + index++)
+          const text = label === null ? null : label + m[2]!
+          drawn.set(mark.from, text === m[0] ? null : text)
+        }
       }
     },
   })
-  return out
+  return [...drawn.entries()].sort((a, b) => a[0] - b[0]).map(([, text]) => text)
 }
 
 test('each bullet level gets its own shape, cycling past three', () => {
@@ -55,10 +68,10 @@ test('a task item shows no bullet — the checkbox is its marker', () => {
 })
 
 test('ordered levels run decimal, alpha, roman', () => {
-  assert.equal(listNumber(1, 3), null) // the digits are already the marker
+  assert.equal(listNumber(1, 3), '3')
   assert.equal(listNumber(2, 3), 'c')
   assert.equal(listNumber(3, 3), 'iii')
-  assert.equal(listNumber(4, 3), null)
+  assert.equal(listNumber(4, 3), '3')
 })
 
 test('alpha and roman go past the easy cases', () => {
@@ -69,7 +82,7 @@ test('alpha and roman go past the easy cases', () => {
   assert.equal(listNumber(3, 1949), 'mcmxlix')
 })
 
-test('a number outside the range keeps its digits', () => {
+test('a number the numerals cannot spell keeps its digits', () => {
   assert.equal(listNumber(2, 0), null)
   assert.equal(listNumber(3, 4000), null)
 })
@@ -77,6 +90,14 @@ test('a number outside the range keeps its digits', () => {
 test('an ordered list is renumbered by level, delimiter and all', () => {
   const src = '1. one\n2. two\n    1. sub\n    2. sub\n        7) deep\n'
   assert.deepEqual(markers(src), [null, null, 'a.', 'b.', 'vii)'])
+})
+
+test('the number is the position in the list, not the digits in the file', () => {
+  // What every markdown renderer does — and what makes `1.` on every line work.
+  assert.deepEqual(markers('1. one\n1. two\n1. three\n'), [null, '2.', '3.'])
+  // A list starts at its first item's number, so the gap an indented-away item leaves closes.
+  assert.deepEqual(markers('1. one\n3. two\n'), [null, '2.'])
+  assert.deepEqual(markers('5. five\n5. six\n'), [null, '6.'])
 })
 
 test('the two kinds of list count their own nesting', () => {

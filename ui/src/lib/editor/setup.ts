@@ -14,6 +14,7 @@ import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { noteSyntax } from './syntax.ts'
 import { livePreview, type LivePreviewOptions } from './livePreview.ts'
+import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
 
 const highlight = HighlightStyle.define([
@@ -153,7 +154,18 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
-      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
+      // Before `indentWithTab`, which only knows about indent units: in a list, Tab means
+      // "nest this under the item above", and the two are different columns. It declines
+      // anywhere its rules do not apply, and the generic indent then runs as before.
+      keymap.of([
+        { key: 'Tab', run: listIndent(1), shift: listIndent(-1) },
+        ...closeBracketsKeymap,
+        ...defaultKeymap,
+        ...searchKeymap,
+        ...historyKeymap,
+        ...foldKeymap,
+        indentWithTab,
+      ]),
       ...(opts.extra ?? []),
     ],
   })
