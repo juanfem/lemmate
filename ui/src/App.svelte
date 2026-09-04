@@ -240,17 +240,20 @@
   }
 
   /**
-   * The menu a tag chip opens. Every label says its own scope, because two of these three reach
-   * every note in the vault and one reaches only the note under the pointer — and a mass edit
-   * that reads as a local one is the way to lose an afternoon's filing.
+   * The menu a tag opens, on a chip at the foot of a note and on a row of the Tags tree. Every
+   * label says its own scope, because the vault-wide pair reach every note there is and a mass
+   * edit that reads as a local one is the way to lose an afternoon's filing.
+   *
+   * `noteId` is what separates the two places: a chip is on a note, so it can be taken off that
+   * note alone, and a row in the tree is about the vault and has no such note to speak of.
    */
-  function tagMenu(tag: string, noteId: string, e: MouseEvent) {
+  function tagMenu(tag: string, vault: string, e: MouseEvent, noteId?: string) {
     menu = menuAt(e, [
       { label: `Show notes tagged #${tag}`, run: () => filterByTag(tag) },
       { separator: true, label: '' },
-      { label: 'Remove from this note', run: () => void removeTagHere(tag, noteId) },
-      { label: `Rename #${tag} everywhere…`, run: () => void renameTag(tag, noteId) },
-      { label: `Delete #${tag} everywhere…`, danger: true, run: () => void deleteTag(tag, noteId) },
+      ...(noteId ? [{ label: 'Remove from this note', run: () => void removeTagHere(tag, noteId) }] : []),
+      { label: `Rename #${tag} everywhere…`, run: () => void renameTag(tag, vault) },
+      { label: `Delete #${tag} everywhere…`, danger: true, run: () => void deleteTag(tag, vault) },
     ])
   }
 
@@ -267,8 +270,8 @@
     return (await api.tagged(vault, tag).catch(() => [])).map((n) => n.id)
   }
 
-  async function renameTag(tag: string, noteId: string) {
-    const s = sessionOf(noteId)
+  async function renameTag(tag: string, vault: string) {
+    const s = solo ?? workspace?.get(vault)
     if (!s) return
     const ids = await taggedNotes(s.id, tag)
     const typed = await ask({
@@ -286,8 +289,8 @@
     if (changed === 0) await ask({ kind: 'confirm', title: `Nothing carried #${tag}.`, confirmLabel: 'OK' })
   }
 
-  async function deleteTag(tag: string, noteId: string) {
-    const s = sessionOf(noteId)
+  async function deleteTag(tag: string, vault: string) {
+    const s = solo ?? workspace?.get(vault)
     if (!s) return
     const ids = await taggedNotes(s.id, tag)
     const ok = await ask({
@@ -1013,7 +1016,15 @@
       {:else if sidebar === 'search'}
         <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
       {:else if sidebar === 'tags'}
-        {#if session}<TagsPane vault={session.id} version={tagsVersion} bind:selected={tagFilter} onOpen={open} />{/if}
+        {#if session}
+          <TagsPane
+            vault={session.id}
+            version={tagsVersion}
+            bind:selected={tagFilter}
+            onOpen={open}
+            onMenu={(t, e) => tagMenu(t, session.id, e)}
+          />
+        {/if}
       {:else if sidebar === 'trash'}
         {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
       {:else}
@@ -1105,7 +1116,7 @@
           onRename={renameActive}
           onDelete={deleteActive}
           onTag={(t) => { focusedPane = i; filterByTag(t) }}
-          onTagMenu={(t, id, e) => { focusedPane = i; tagMenu(t, id, e) }}
+          onTagMenu={(t, id, e) => { focusedPane = i; tagMenu(t, sessionOf(id)?.id ?? '', e, id) }}
           onOpen={(id) => { focusedPane = i; open(id) }}
           onPresence={(names) => (presenceByPane[p.id] = names)}
           onMode={(m) => { focusedPane = i; p.mode = m }}

@@ -396,9 +396,13 @@ the note you are reading is on the note's own page rather than in a panel beside
   nothing is tagged with it — a vault can use `#projects/alpha` and never `#projects`. Clicking
   a row lists its notes *and* everything under it, and the count beside it is that same
   number — the notes you will see, counted once each even where a note sits under a branch
-  twice. Which branches you fold is remembered per vault. A tag chip at the foot of a note
-  picks one here too, opening the branches above it, and the choice survives switching to
-  another tab and back.
+  twice. Which branches you fold is remembered per vault, and **Expand all** / **Collapse all**
+  sit on the strip above — drawn only where there is a branch to fold. A tag chip at the foot
+  of a note picks one here too, opening the branches above it, and the choice survives
+  switching to another tab and back. **Right-click a row** (press and hold on a phone) for
+  *Rename … everywhere* and *Delete … everywhere*, the same two commands the chips offer and
+  with the same meaning; what the tree has no version of is *Remove from this note*, because
+  here there is no note in question.
 - **Starred** are bookmarks. They live in the vault doc, so they follow you to every device;
   `Ctrl+Shift+B` toggles one for the current note.
 - **Your own name** sits at the very bottom, above the status line, and opens the account menu

@@ -3,16 +3,21 @@
   import { api, type NoteSummary } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
   import { buildTagTree, tagAncestors, type TagNode } from '../lib/tags.ts'
+  import { longpress } from '../lib/longpress.ts'
+  import Icon from './Icon.svelte'
 
   let {
     vault,
     version,
     onOpen,
+    onMenu,
     selected = $bindable(null),
   }: {
     vault: string
     version: number
     onOpen: (id: string) => void
+    /** Right-click, or a long press: renaming and deleting are the shell's to offer. */
+    onMenu?: (tag: string, e: MouseEvent) => void
     /** Which tag is being listed. Owned by the shell, because a tag chip at the foot of a note
      *  picks one too, and the choice has to outlive this pane being swapped for another. */
     selected?: string | null
@@ -51,9 +56,45 @@
     save()
   }
 
+  /** Every tag with something under it — the rows the two buttons in the toolbar are about. */
+  function branches(nodes: TagNode[], out: string[] = []): string[] {
+    for (const n of nodes)
+      if (n.children.length) {
+        out.push(n.tag)
+        branches(n.children, out)
+      }
+    return out
+  }
+  let foldable = $derived(branches(tree))
+  // Only this vault's keys move: one record holds them all, and a vault's folds are its own.
+  function expandAll() {
+    collapsed = Object.fromEntries(Object.entries(collapsed).filter(([k]) => !k.startsWith(`${vault}/`)))
+    save()
+  }
+  function collapseAll() {
+    collapsed = { ...collapsed, ...Object.fromEntries(foldable.map((t) => [key(t), true])) }
+    save()
+  }
+
   $effect(() => {
-    version // reload whenever the vault changes
-    api.tags(vault).then((t) => (tags = t)).catch(() => (tags = []))
+    version // reload whenever the vault, or anything that moves a tag, changes
+    const v = vault
+    let live = true
+    const load = () =>
+      api
+        .tags(v)
+        .then((t) => live && (tags = t))
+        .catch(() => live && (tags = []))
+    void load()
+    // Asked twice, because this listing is derived on the *far* side of the socket. Whatever
+    // moved a tag — a keystroke here, a rename across the vault, another device — reaches the
+    // index a beat after it reaches us, so an answer fetched the instant the edit lands is the
+    // tags as they were. The second ask is that beat.
+    const settled = setTimeout(load, 700)
+    return () => {
+      live = false
+      clearTimeout(settled)
+    }
   })
   $effect(() => {
     const tag = selected
@@ -107,7 +148,13 @@
       {:else}
         <span class="chev spacer"></span>
       {/if}
-      <button class="main" onclick={() => pick(n.tag)} title={`#${n.tag}`}>
+      <button
+        class="main"
+        onclick={() => pick(n.tag)}
+        oncontextmenu={(e) => (onMenu ? (e.preventDefault(), onMenu(n.tag, e)) : undefined)}
+        use:longpress
+        title={`#${n.tag}`}
+      >
         <!-- The `#` marks where a tag starts; below the root the indentation supplies the rest,
              and repeating `projects/` down the branch is the thing this view is here to stop. -->
         <span class="name">{depth === 0 ? `#${n.name}` : n.name}</span>
@@ -121,6 +168,15 @@
 {/snippet}
 
 <div class="tags">
+  <!-- Only where there is something to fold: a vault whose tags are all flat has no tree to
+       open or shut, and two buttons that do nothing are two buttons to wonder about. -->
+  {#if foldable.length}
+    <div class="toolbar">
+      <span class="gap"></span>
+      <button onclick={expandAll} title="Expand all" aria-label="Expand all"><Icon name="expand" /></button>
+      <button onclick={collapseAll} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
+    </div>
+  {/if}
   <nav class="tree">
     {@render rows(tree, 0)}
     {#if tags.length === 0}<p class="empty">No tags yet. Write <code>#tag</code> in a note, or list <code>tags:</code> in its front matter.</p>{/if}
@@ -136,6 +192,12 @@
 
 <style>
   .tags { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  /* The same strip as the file browser's, so the two tabs have the same furniture in the same
+     place. */
+  .toolbar { display: flex; align-items: center; gap: 0.1rem; padding: 0.25rem 0.4rem; border-bottom: 1px solid var(--border); }
+  .toolbar .gap { flex: 1; }
+  .toolbar button { display: grid; place-items: center; border: 0; background: none; color: var(--muted); padding: 0.25rem; border-radius: 4px; cursor: pointer; }
+  .toolbar button:hover { background: var(--hover); color: var(--fg); }
   /* The same row, chevron and selection language as the folder tree next door: switching
      between the two tabs should not move the eye. */
   .tree { padding: 0.35rem 0.25rem; font-size: 0.9rem; }
@@ -187,6 +249,8 @@
 
   /* Touch: a row is a target, not a line of text. */
   @media (pointer: coarse) {
+    .toolbar { gap: 0.25rem; padding: 0.4rem; }
+    .toolbar button { padding: 0.45rem; }
     .row { padding-top: 0.4rem; padding-bottom: 0.4rem; }
     li button { padding-top: 0.5rem; padding-bottom: 0.5rem; }
   }
