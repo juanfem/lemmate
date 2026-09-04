@@ -1,6 +1,7 @@
 //! SQLite persistence (SPEC §6.1 / §6.2). One schema serves both the server (`lemmate.db`) and
 //! native clients (`<vault>/.lemmate/local.db`); clients simply leave the multi-user tables empty.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -818,13 +819,36 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
+    /// The vault's tags **and every prefix of one**, each with the number of live notes you get
+    /// by asking for it — the same set `notes_with_tag` answers with, nested tags included.
+    ///
+    /// The prefixes are the point: `#projects/alpha` can exist in a vault where nothing is
+    /// tagged `#projects` at all, and a tree with nothing at its branch point is not a tree.
+    /// So is counting *notes* rather than tag rows — a note carrying both `#projects/alpha` and
+    /// `#projects/beta` is one note under `#projects`, and adding the children up says two.
     pub fn tags_in_vault(&self, vault_id: VaultId) -> Result<Vec<(String, u32)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id = t.note_id
-             WHERE n.vault_id = ?1 AND n.deleted_at IS NULL GROUP BY t.tag ORDER BY t.tag",
+            "SELECT t.tag, t.note_id FROM note_tags t JOIN notes n ON n.id = t.note_id
+             WHERE n.vault_id = ?1 AND n.deleted_at IS NULL",
         )?;
-        let rows = stmt.query_map(params![vault_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        rows.map(|r| r.map_err(Into::into)).collect()
+        let rows = stmt.query_map(params![vault_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        // Sorted, because the tree is drawn in this order and a sibling's place should not
+        // depend on which note happened to be indexed first.
+        let mut under: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+        for row in rows {
+            let (tag, note) = row?;
+            let mut prefix = String::new();
+            for part in tag.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                under.entry(prefix.clone()).or_default().insert(note.clone());
+            }
+        }
+        Ok(under.into_iter().map(|(tag, notes)| (tag, notes.len() as u32)).collect())
     }
 
     /// Full-text search restricted to one vault. Supports the SPEC §10 filters `tag:x`
@@ -1678,6 +1702,46 @@ mod tests {
         store.upsert_note(id, vault, "moved/n.md", Some("n")).unwrap();
         let back = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
         assert!(back > moved, "an undelete must move updated_at: {moved} -> {back}");
+    }
+
+    /// The Tags pane draws a tree, so the listing has to be one: every branch point present
+    /// even where nothing is tagged with it, and every count the number of *notes* you would
+    /// see on clicking — not the sum of the children, which counts a note twice when it
+    /// carries two of them.
+    #[test]
+    fn tags_are_listed_as_a_tree_with_the_notes_under_each_branch() {
+        let mut store = Store::open_in_memory().unwrap();
+        let vault = VaultId::new();
+        let (a, b, c) = (NoteId::new(), NoteId::new(), NoteId::new());
+        for (id, name) in [(a, "a.md"), (b, "b.md"), (c, "c.md")] {
+            store.upsert_note(id, vault, name, None).unwrap();
+        }
+        // Nothing is tagged `#projects` itself, and `a` is under it twice over.
+        store.index_note(a, &markdown::index("#projects/alpha #projects/beta\n").unwrap()).unwrap();
+        store.index_note(b, &markdown::index("#projects/alpha #other\n").unwrap()).unwrap();
+        store.index_note(c, &markdown::index("#projects/alpha/deep\n").unwrap()).unwrap();
+
+        let listed = store.tags_in_vault(vault).unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                ("other".into(), 1),
+                ("projects".into(), 3),
+                ("projects/alpha".into(), 3),
+                ("projects/alpha/deep".into(), 1),
+                ("projects/beta".into(), 1),
+            ],
+        );
+        // The listing and the click agree: that is the whole point of counting this way.
+        for (tag, count) in listed {
+            assert_eq!(store.notes_with_tag(vault, &tag).unwrap().len(), count as usize, "{tag}");
+        }
+
+        // A trashed note leaves the branch it was the only member of.
+        store.trash_note(c).unwrap();
+        let after = store.tags_in_vault(vault).unwrap();
+        assert!(!after.iter().any(|(t, _)| t == "projects/alpha/deep"), "{after:?}");
+        assert_eq!(after.iter().find(|(t, _)| t == "projects").map(|(_, n)| *n), Some(2));
     }
 
     #[test]

@@ -391,9 +391,14 @@ the note you are reading is on the note's own page rather than in a panel beside
 - **Files** lists folders and their notes. Rows carry the date they last changed, and the list
   header switches between **Recent** and **Name** order. Where the server or relay cannot
   answer with a listing, rows show no date and the order falls back to the alphabet.
-- **Tags** shows every tag with a count; clicking one lists its notes, including nested tags
-  under it (`#projects` matches `#projects/alpha`). A tag chip at the foot of a note picks one
-  here too, and the choice survives switching to another tab and back.
+- **Tags** is a tree, because tags are one: `#projects/alpha` sits under `#projects`, named by
+  its last segment alone, and folds like a folder does. A branch point is drawn even where
+  nothing is tagged with it — a vault can use `#projects/alpha` and never `#projects`. Clicking
+  a row lists its notes *and* everything under it, and the count beside it is that same
+  number — the notes you will see, counted once each even where a note sits under a branch
+  twice. Which branches you fold is remembered per vault. A tag chip at the foot of a note
+  picks one here too, opening the branches above it, and the choice survives switching to
+  another tab and back.
 - **Starred** are bookmarks. They live in the vault doc, so they follow you to every device;
   `Ctrl+Shift+B` toggles one for the current note.
 - **Your own name** sits at the very bottom, above the status line, and opens the account menu
