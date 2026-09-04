@@ -887,14 +887,19 @@
     <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
          screen reader to wander into. -->
     <aside class:open={drawer} inert={narrow.current && !drawer}>
-      <div class="side-tabs">
-        <button class:on={sidebar === 'files'} onclick={() => (sidebar = 'files')} title="Files">Files</button>
-        <button class:on={sidebar === 'search'} onclick={() => (sidebar = 'search')} title="Search (Ctrl+Shift+F)">Search</button>
-        <button class:on={sidebar === 'tags'} onclick={() => (sidebar = 'tags')} title="Tags">Tags</button>
-        <button class:on={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')} title="Bookmarks">★</button>
-        <span class="spacer"></span>
-        <button class="quick" title="Search and commands (Ctrl+K)" onclick={() => (palette = '')}>＋</button>
-        <button class="quick" title="Commands (Ctrl+Shift+P)" onclick={() => (palette = '>')}>⌘</button>
+      <div class="side-top">
+        <!-- Not an input: search *is* the palette now, and a box you can type into here would
+             promise a second, weaker search that only looks at what this pane happens to hold. -->
+        <button class="side-search" onclick={() => (palette = '')}>
+          <span class="mag" aria-hidden="true">⌕</span>
+          <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+        <div class="side-tabs" role="tablist">
+          <button class:on={sidebar === 'files'} role="tab" aria-selected={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
+          <button class:on={sidebar === 'tags'} role="tab" aria-selected={sidebar === 'tags'} onclick={() => (sidebar = 'tags')}>Tags</button>
+          <button class:on={sidebar === 'bookmarks'} role="tab" aria-selected={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')}>Starred</button>
+        </div>
       </div>
       {#if solo}
         <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
@@ -1139,29 +1144,69 @@
   .vsplit:focus-visible::after {
     background: var(--accent);
   }
+  .side-top {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    padding: 0.75rem 0.75rem 0.625rem;
+  }
+  .side-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font: inherit;
+    font-size: 0.8125rem;
+    text-align: left;
+    height: 1.875rem;
+    padding: 0 0.625rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--faint);
+    cursor: pointer;
+  }
+  .side-search:hover {
+    color: var(--fg);
+    border-color: var(--muted);
+  }
+  .side-search .mag {
+    font-size: 0.9em;
+  }
+  .side-search kbd {
+    margin-left: auto;
+    border: 0;
+    font-family: var(--ui);
+    font-size: 0.65rem;
+    color: var(--faint);
+  }
+  /* A segmented control in a groove — the same shape as the pane's mode switch and the note
+     panel's tabs, because all three are "pick one of these". */
   .side-tabs {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.2rem;
-    padding: 0.4rem;
-    border-bottom: 1px solid var(--border);
+    gap: 0.25rem;
+    background: var(--chrome);
+    padding: 3px;
+    border-radius: 7px;
   }
   .side-tabs button {
+    flex: 1;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     border: 0;
     background: none;
     color: var(--muted);
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
+    padding: 0.25rem 0;
+    border-radius: 5px;
     cursor: pointer;
+  }
+  .side-tabs button:hover:not(.on) {
+    color: var(--fg);
   }
   .side-tabs button.on {
     color: var(--fg);
-    background: var(--hover);
-  }
-  .spacer {
-    flex: 1;
+    font-weight: 600;
+    background: var(--bg);
+    box-shadow: 0 1px 1.5px rgb(0 0 0 / 0.07);
   }
   .denied {
     font-size: 0.8rem;
@@ -1318,10 +1363,6 @@
     /* Only once it is out: a shadow on the parked drawer bleeds along the left edge. */
     box-shadow: 0 0 40px rgb(0 0 0 / 0.35);
   }
-  /* The top bar already carries these two; a second copy only costs the drawer a row. */
-  .layout.narrow .side-tabs .quick {
-    display: none;
-  }
   @media (prefers-reduced-motion: reduce) {
     .layout.narrow aside {
       transition: none;
@@ -1338,12 +1379,11 @@
 
   /* ---- touch: no hover to reveal anything, and a finger is not a pixel */
   @media (pointer: coarse) {
-    .side-tabs {
-      gap: 0.3rem;
-      padding: 0.5rem 0.4rem;
-    }
     .side-tabs button {
-      padding: 0.45rem 0.7rem;
+      padding: 0.5rem 0;
+    }
+    .side-search {
+      height: 2.25rem;
     }
     .bookmarks-pane button,
     .shared button {

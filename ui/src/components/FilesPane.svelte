@@ -22,6 +22,7 @@
   import { beginDrag, endDrag, readDrag } from '../lib/dnd.ts'
   import { clamp, dragResize } from '../lib/resize.ts'
   import { displayName } from '../lib/vault.svelte.ts'
+  import { api } from '../lib/api.ts'
 
   /**
    * The Files sidebar. Two layouts over the same folders:
@@ -79,6 +80,46 @@
   type Selection = { vault: string; folder: string }
   let selected: Selection | null = $state(stored<Selection | null>('lemmate.files.selected', null))
   let host: HTMLElement | undefined = $state()
+
+  /** How the note list is ordered. Recency is the useful default in a vault of any size; the
+   *  alphabet is what you want when you already know the name. */
+  type Sort = 'recent' | 'name'
+  const SORTS: { id: Sort; label: string }[] = [
+    { id: 'recent', label: 'Recent' },
+    { id: 'name', label: 'Name' },
+  ]
+  let sort: Sort = $state(stored<Sort>('lemmate.files.sort', 'recent'))
+  function setSort(next: Sort) {
+    sort = next
+    save('lemmate.files.sort', next)
+  }
+
+  /**
+   * note id → when it last changed, from the REST listing (SPEC §6.4). The vault doc carries
+   * paths, not timestamps, so this is the one thing on a row that has to be asked for; the
+   * relay answers it as well as the server, so both modes get dates.
+   */
+  let dates: Record<string, string> = $state({})
+  $effect(() => {
+    const vault = selected?.vault
+    // Refetch when the vault's note set changes — a create, rename or delete moves dates.
+    picked?.notes.length
+    if (!vault) return
+    let live = true
+    api
+      .notes(vault)
+      .then((rows) => {
+        if (live) dates = Object.fromEntries(rows.map((r) => [r.id, r.updated_at ?? '']))
+      })
+      .catch(() => {
+        // No listing (offline, or a server that will not answer): rows simply show no date,
+        // and a recency sort falls back to the alphabet below.
+        if (live) dates = {}
+      })
+    return () => {
+      live = false
+    }
+  })
 
   // ---- note selection: click replaces, Ctrl/Cmd toggles, Shift takes the range on screen
   let picks: string[] = $state([])
@@ -176,7 +217,11 @@
   let pickedRoot = $derived(picked ? buildTree(picked.notes) : null)
   let listed = $derived.by(() => {
     const s = selected
-    return pickedRoot && s ? notesIn(pickedRoot, s.folder, recursive) : []
+    const rows = pickedRoot && s ? notesIn(pickedRoot, s.folder, recursive) : []
+    if (sort === 'name') return [...rows].sort((a, b) => displayName(a.path).localeCompare(displayName(b.path)))
+    // Undated notes sort last rather than first: an empty string would win a descending
+    // comparison, and "we do not know when this changed" is not "it changed most recently".
+    return [...rows].sort((a, b) => (dates[b.id] ?? '').localeCompare(dates[a.id] ?? ''))
   })
   let listTitle = $derived.by(() => {
     const s = selected
@@ -400,6 +445,9 @@
     <div class="list-head">
       <span class="title" title={selected?.folder || picked?.label}>{listTitle}</span>
       <span class="n">{listed.length}</span>
+      <button class="sort" onclick={() => setSort(sort === 'recent' ? 'name' : 'recent')} title="Sort by {sort === 'recent' ? 'name' : 'recency'}">
+        {SORTS.find((x) => x.id === sort)?.label}<span class="caret">▾</span>
+      </button>
       <button
         class:on={recursive}
         onclick={() => setRecursive(!recursive)}
@@ -414,6 +462,7 @@
       notes={listed}
       base={selected?.folder ?? ''}
       {activeId}
+      {dates}
       showFolders={recursive}
       empty={recursive ? 'No notes in this folder or below.' : 'No notes directly in this folder.'}
       {browser}
@@ -531,8 +580,23 @@
     color: var(--muted);
   }
   .list-head .n {
-    color: var(--muted);
+    color: var(--faint);
     font-size: 0.72rem;
+  }
+  /* A word, not an icon: which order the list is in is worth saying out loud, and it is the
+     only control here whose current value matters as much as the fact it can be clicked. */
+  .list-head .sort {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    font: inherit;
+    font-size: 0.72rem;
+    color: var(--muted);
+    padding: 0.1rem 0.3rem;
+  }
+  .list-head .sort .caret {
+    font-size: 0.85em;
+    color: var(--faint);
   }
 
   /* A folder height dragged tall on a monitor would fill a phone on its own, leaving no room

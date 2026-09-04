@@ -9,6 +9,7 @@
     notes,
     base,
     activeId,
+    dates = {},
     showFolders = false,
     empty = 'No notes here.',
     browser,
@@ -17,10 +18,32 @@
     /** Selected folder path, stripped from the sub-folder hint on each row. */
     base: string
     activeId: string | null
+    /** note id → ISO timestamp of its last change, where the listing knew one. */
+    dates?: Record<string, string>
     showFolders?: boolean
     empty?: string
     browser: BrowserApi
   } = $props()
+
+  /**
+   * How long ago, at about the precision you care about at that distance: minutes for the last
+   * hour, a clock time for today, a weekday for this week, then a date. A vault this size is
+   * unscannable as a column of bare filenames, and "when did I last touch it" is the question
+   * the list is usually being asked.
+   */
+  function when(iso: string | undefined): string {
+    if (!iso) return ''
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    const now = new Date()
+    const ms = now.getTime() - d.getTime()
+    if (ms < 60_000) return 'now'
+    if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    if (ms < 6 * 86_400_000) return d.toLocaleDateString(undefined, { weekday: 'short' })
+    if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' })
+  }
 
   function hint(path: string): string {
     const folder = folderOf(path)
@@ -47,6 +70,8 @@
     >
       <span class="name">{displayName(n.path)}</span>
       {#if showFolders && hint(n.path)}<span class="hint">{hint(n.path)}</span>{/if}
+      {#if !showFolders || !hint(n.path)}<span class="spacer"></span>{/if}
+      <span class="when">{when(dates[n.id])}</span>
     </button>
   {/each}
   {#if notes.length === 0}
@@ -83,7 +108,11 @@
   }
   .row.active {
     background: var(--accent-bg);
-    color: var(--accent);
+    color: var(--sel-fg);
+    font-weight: 600;
+  }
+  .row.active .when {
+    color: var(--sel-muted);
   }
   .row.active.selected {
     box-shadow: inset 2px 0 0 var(--accent);
@@ -93,12 +122,23 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .spacer {
+    flex: 1;
+  }
+  .when {
+    flex: none;
+    padding-left: 0.5rem;
+    color: var(--faint);
+    font-size: 0.72em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
   .hint {
     margin-left: auto;
     flex: none;
-    color: var(--muted);
+    color: var(--faint);
     font-size: 0.72em;
-    max-width: 45%;
+    max-width: 40%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

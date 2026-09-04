@@ -153,11 +153,14 @@
   }
   /* Selection is the weaker mark, the open note the stronger one: a note can be both. */
   .row.selected {
-    background: var(--accent-bg);
+    background: var(--accent);
+    color: var(--accent-fg);
   }
+  /* The note you are reading: the same "the row fills" language as a selected folder, one
+     step quieter, so the two states read as the same idea at two scopes. */
   .row.active {
     background: var(--accent-bg);
-    color: var(--accent);
+    color: var(--sel-fg);
   }
   .row.active.selected {
     box-shadow: inset 2px 0 0 var(--accent);

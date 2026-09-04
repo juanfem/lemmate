@@ -148,15 +148,24 @@
   .row:hover {
     background: var(--hover);
   }
+  /* One selection language (see NoteList): the row fills. A folder fills at full strength
+     because it is the container you are browsing; the note you are reading fills at the tint.
+     What neither does any more is recolour its text and leave the background alone. */
   .row.selected {
-    background: var(--accent-bg);
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  /* Everything on a filled row rides the fill: a count or a chevron still painted in the
+     muted grey it uses on the panel disappears into the accent. */
+  .row.selected .count,
+  .row.selected .chev,
+  .row.selected .actions button {
+    color: inherit;
+    opacity: 0.75;
   }
   .row.drop {
     background: var(--accent-bg);
     box-shadow: inset 0 0 0 1px var(--accent);
-  }
-  .row.selected .name {
-    color: var(--accent);
   }
   .main {
     flex: 1;
@@ -200,7 +209,7 @@
   }
   .vault.selected .name,
   .vault.selected .main :global(svg) {
-    color: var(--accent);
+    color: var(--accent-fg);
   }
   .chev {
     flex: none;
