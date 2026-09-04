@@ -11,7 +11,7 @@ specification; this README covers the repository and the current milestone.
 | `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`, including vault deletion for merges), serves the web client. |
 | `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), `serve` (standalone relay, no server), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
 | `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for every vault under the configured root — with a server, or standalone with none — and opens one window on it. |
-| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, quick switcher, command palette, cross-vault search, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, connecting a server and merging vaults (SPEC §3.2), sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
+| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks/embeds, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs, one ⌘K palette over notes/folders/full text/commands, tags, outline, backlinks, bookmarks, history, daily notes + templates, paste/drop attachments, Obsidian import, connecting a server and merging vaults (SPEC §3.2), sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
 | corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
@@ -93,7 +93,7 @@ lemmate sync  --vault ~/vault --server https://notes.example.org   # uses the sa
 ## Vaults in the client
 
 The web and desktop clients show **every vault you can read at once**: the tree's roots are the
-vaults, tabs may hold notes from different ones, the quick switcher lists them all, and search
+vaults, tabs may hold notes from different ones, the palette lists them all, and search
 runs across them (`GET /api/v1/search`). Tags, history, trash and sharing are per vault and
 follow the focused note. It is all one WebSocket — frames are addressed by doc id, so the
 connection was never per vault. A vault can be given a name (stored in the vault doc, shared

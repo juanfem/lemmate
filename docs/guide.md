@@ -351,13 +351,24 @@ holds it, so the note is re-created in the target vault with a **new id**, the a
 references are copied across, and the original goes to trash. Links to it from notes left
 behind in the old vault will not follow it.
 
-**Quick switcher** (`Ctrl+O`, `Ctrl+P`, `Ctrl+N`) fuzzy-matches paths **across every vault**,
-each hit labelled with the vault it comes from; substring matches rank above subsequence
-matches. If nothing matches exactly, the last entry offers to **create** the note at that path
-(`.md` appended unless you typed `.md`/`.qmd`) in the vault you are currently in.
+**The palette** (`Ctrl+K`, `Ctrl+O`, `Ctrl+P`, `Ctrl+N`) is the one place to search from. It
+matches, together and ranked against each other:
 
-**Command palette** (`Ctrl+Shift+P`) lists every command with its shortcut. Shortcut remapping
-is not implemented.
+- **note titles and paths**, across every vault, each hit labelled with the vault it comes
+  from; substring matches rank above subsequence matches;
+- **folder names** — choosing one reveals and selects it in the file tree;
+- **full text**, from the same FTS index the old search pane used;
+- **commands**, with their shortcuts.
+
+Titles outrank folders outrank commands, and body matches come last: matching a note's name is
+a stronger signal than matching a word inside it. If nothing matches exactly, the last entry
+offers to **create** the note at that path (`.md` appended unless you typed `.md`/`.qmd`) in
+the vault you are currently in.
+
+`Enter` opens, `Ctrl+Enter` opens in a split, and `Shift+Enter` creates a note from what you
+typed whatever row is highlighted. Typing `>` first narrows to commands only — which is what
+`Ctrl+Shift+P` opens with, so it still behaves like a command palette. Shortcut remapping is
+not implemented.
 
 **Three ways to look at a note.** The switch in the note header — or `Ctrl+E`, which steps
 through them — picks one:
@@ -371,23 +382,30 @@ through them — picks one:
 The mode belongs to the **pane**, not the note: split with `Ctrl+\` and you can read a note in
 one pane while editing its source in the other. It is saved with the layout, per device.
 
-**Sidebar panes**: Files, Search, Tags, Outline, Bookmarks (★), Version history (⏱).
+**Two side panels.** The left one is about *finding* a note, the right one is about the note
+you have open. They answer different questions, so neither costs you the other.
 
-- **Search** is SQLite FTS5 over title and body, with highlighted snippets, and covers every
-  vault you can read — hits are labelled with theirs. FTS5 syntax works (`"exact phrase"`,
-  `OR`, `NOT`, `prefix*`); the `tag:`, `path:`, `has:math` filters in SPEC §10 are not
-  implemented yet.
+**Left sidebar**: Files, Tags, Starred. Searching is not a tab here — that is the palette.
+
+- **Files** lists folders and their notes. Rows carry the date they last changed, and the list
+  header switches between **Recent** and **Name** order. Where the server or relay cannot
+  answer with a listing, rows show no date and the order falls back to the alphabet.
+- **Tags** shows every tag with a count; clicking one lists its notes, including nested tags
+  under it (`#projects` matches `#projects/alpha`).
+- **Starred** are bookmarks. They live in the vault doc, so they follow you to every device;
+  `Ctrl+Shift+B` toggles one for the current note.
 - **Tags, version history and trash** are per vault, so they show the vault of the note you
   are on. Tabs and bookmarks are not: a pane can hold notes from two vaults side by side, and
   the bookmarks list shows all of them.
-- **Tags** shows every tag with a count; clicking one lists its notes, including nested tags
-  under it (`#projects` matches `#projects/alpha`).
-- **Outline** lists the current note's headings; click to jump.
-- **Backlinks** appear under the editor as "Linked from". They match links whose target is the
-  note's full path, its path without extension, or its basename. Unlinked mentions and an
-  outgoing-links pane are not built.
-- **Bookmarks** live in the vault doc, so they follow you to every device. `Ctrl+Shift+B`
-  toggles a bookmark for the current note.
+
+**Right note panel** (`Ctrl+Shift+R`, or the ◫ in the note header) follows whichever note has
+the focus — one panel, however many panes are open:
+
+- **Outline** lists the note's headings; click to jump.
+- **Links** shows backlinks and the note's tags. Backlinks match links whose target is the
+  note's full path, its path without extension, or its basename. Unlinked mentions, outgoing
+  links and context snippets are not built.
+- **History** is the version history for the note.
 
 **Daily notes.** `Ctrl+Shift+D` opens (or creates) `Daily/YYYY-MM-DD.md` for today. The path
 and format are fixed at present — the per-vault configuration, prev/next-day navigation and
@@ -423,7 +441,7 @@ Two tabs are never displaced: a **pinned** one, and one already showing that not
 switch to it). To open something alongside what you have, use the **＋** on the tab strip for
 an empty tab, or right-click a note for *Open in a new tab* / *Open in a new pane*.
 
-**Tabs and panes.** Each pane has its own tab strip, editor and backlinks. `Ctrl+\` splits
+**Tabs and panes.** Each pane has its own tab strip and editor. `Ctrl+\` splits
 right (up to three panes); `Ctrl+Alt+←/→` moves focus. Pinned tabs sort first and ignore
 `Ctrl+W` (unpin from the palette to close them). `Ctrl+Shift+T` reopens the last closed tab —
 the last twenty are remembered. The layout, pins and collapsed folders are stored per vault in
@@ -516,10 +534,11 @@ your account.
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+O` / `Ctrl+P` | Open or create note (quick switcher) — toggles |
-| `Ctrl+N` | New note (quick switcher; type a path, Enter creates) |
-| `Ctrl+Shift+P` | Command palette |
-| `Ctrl+Shift+F` | Search pane |
+| `Ctrl+K` / `Ctrl+O` / `Ctrl+P` | Search notes, folders, text and commands — toggles |
+| `Ctrl+N` | Same palette (type a path, Enter creates) |
+| `Ctrl+Shift+P` | The palette, narrowed to commands |
+| `Ctrl+Shift+F` | The palette (it covers full text) |
+| `Ctrl+Shift+R` | Show / hide the note panel |
 | `Ctrl+Shift+D` | Today's daily note |
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
 | `Ctrl+E` | Cycle this pane's view: live → source → reading |
@@ -529,15 +548,16 @@ your account.
 | `Ctrl+\` | Split right |
 | `Ctrl+Alt+→` / `Ctrl+Alt+←` | Focus next / previous pane |
 
-Inside the quick switcher and palette: `↑`/`↓` to move, `Enter` to choose, `Escape` to close.
+Inside the palette: `↑`/`↓` to move, `Enter` to choose, `Ctrl+Enter` to open in a split,
+`Shift+Enter` to create a note from what you typed, `Escape` to close.
 
 Some of these — `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Shift+T` — are shortcuts the browser
 keeps for itself and a web page cannot intercept. They work in the desktop app; in a browser
 tab, use the ＋ button, a tab's ×, and the palette instead.
 
-Commands without a shortcut, reachable from the palette: show Files / Tags / Outline /
-Bookmarks / Version history, set the view to live / source / reading, Share note…, Rename /
-move note, Move note to trash, Pin / unpin tab, Close pane, Switch vault, Sign out.
+Commands without a shortcut, reachable from the palette: show Files / Tags / Starred / Outline
+/ Links / Version history / Trash, set the view to live / source / reading, Share note…,
+Rename / move note, Move note to trash, Pin / unpin tab, Close pane, Switch vault, Sign out.
 
 Inside the editor, CodeMirror's own bindings apply — `Ctrl+F` find, `Ctrl+Z` / `Ctrl+Y` undo
 and redo, `Tab` indent, `Ctrl+Space` autocomplete. There is no vim keymap (SPEC §17).
