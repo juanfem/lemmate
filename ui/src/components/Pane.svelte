@@ -88,11 +88,21 @@
   // Pinned tabs sort first; the rest keep the order they were opened in.
   let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
 
-  // In a narrow pane three word-buttons push the header onto a third row. Share, rename and
-  // delete are the rare ones, so they fold into `⋯` while the two you reach for as you read —
-  // the mode switch and the bookmark — stay put. Which of the two sets is shown is decided by
-  // the container query below, not here: only the pane's own width can answer it, and both
-  // sets are cheap enough to render and let CSS pick.
+  /** The path as a trail — folders, then the note. The note is what you are looking at, so it
+   *  is the only part drawn at full strength; the folders are context. */
+  let crumbs = $derived.by(() => {
+    const parts = activePath.split('/').filter(Boolean)
+    const name = parts.pop() ?? ''
+    return { folders: parts, name: displayName(name) }
+  })
+  /** Quarto notes are still markdown, but saying so is the point of the label. */
+  let format = $derived(activePath.endsWith('.qmd') ? 'Quarto' : 'Markdown')
+  let stats: { lines: number; words: number } = $state({ lines: 0, words: 0 })
+
+  // Rename, share and delete all live in `⋯`, at every width. Delete especially: a destructive
+  // action should not sit one pixel from a view toggle wearing the same plain-text clothes as
+  // the thing beside it. What stays on the bar is what you reach for while reading — the mode
+  // switch and the bookmark.
   let menu: MenuState | null = $state(null)
   let moreItems = $derived([
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
@@ -132,10 +142,13 @@
   <div class="tabs">
     {#each tabs as id (id)}
       <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} title={pathOf(id)}>
-        {#if pinned.includes(id)}<span class="pin" title="Pinned">•</span>{/if}
-        {isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}
+        <!-- One dot, two meanings, never at once: on the active tab it marks where you are, and
+             on the others it marks a pin. A pinned tab is also the one without a `×`, so an
+             active pinned tab still says so. -->
+        {#if id === pane.active}<span class="dot"></span>{:else if pinned.includes(id)}<span class="dot pinned" title="Pinned"></span>{/if}
+        <span class="label">{isBlank(id) ? 'New tab' : displayName(pathOf(id) ?? id)}</span>
         {#if !pinned.includes(id)}
-          <span class="x" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
+          <span class="x" role="button" tabindex="-1" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
         {/if}
       </button>
     {/each}
@@ -146,8 +159,11 @@
   {#if pane.active && session && !isBlank(pane.active)}
     {#key pane.active}
       <div class="note-head">
-        {#if vaultLabel?.(pane.active)}<span class="vault">{vaultLabel(pane.active)}</span>{/if}
-        <span class="path">{activePath}</span>
+        <nav class="crumbs" title={activePath}>
+          {#if vaultLabel?.(pane.active)}<span class="vault">{vaultLabel(pane.active)}</span><span class="sep">/</span>{/if}
+          {#each crumbs.folders as f (f)}<span class="folder">{f}</span><span class="sep">/</span>{/each}
+          <span class="name">{crumbs.name}</span>
+        </nav>
         {#if presence.length}
           <span class="presence" title={presence.join(', ')}>· with {presence.length === 1 ? presence[0] : `${presence.length} others`}</span>
         {/if}
@@ -157,13 +173,8 @@
             <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
           {/each}
         </span>
-        <button onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
-        <span class="wide-actions">
-          {#if !session.noteOnly && onShare}<button onclick={onShare} title="Share">Share</button>{/if}
-          <button onclick={onRename} title="Rename / move">Rename</button>
-          <button onclick={onDelete} title="Move to trash">Delete</button>
-        </span>
-        <button class="more" onclick={(e) => (menu = menuAt(e, moreItems))} title="More" aria-label="More actions">⋯</button>
+        <button class="star" onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)">{session.isBookmarked('note', activePath) ? '★' : '☆'}</button>
+        <button class="more" onclick={(e) => (menu = menuAt(e, moreItems))} title="Rename, share, delete" aria-label="More actions">···</button>
       </div>
       <div class="editor-wrap">
         <Editor
@@ -172,6 +183,7 @@
           {onOpen}
           onHeadings={(h) => onHeadings?.(h)}
           onPresence={(p) => { presence = p; onPresence?.(p) }}
+          onStats={(s) => (stats = s)}
           mode={pane.mode}
           bind:jumpTo
         />
@@ -184,6 +196,12 @@
           {/each}
         </div>
       {/if}
+      <div class="note-foot">
+        <span>{stats.lines} {stats.lines === 1 ? 'line' : 'lines'}</span>
+        <span>{stats.words} {stats.words === 1 ? 'word' : 'words'}</span>
+        <span class="spacer"></span>
+        <span>{format}</span>
+      </div>
     {/key}
   {:else}
     <div class="placeholder">
@@ -199,7 +217,8 @@
 <style>
   .pane {
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
+    /* tabs · header · editor · backlinks · footer */
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
     min-width: 0;
     min-height: 0;
     flex: 1 1 0;
@@ -214,29 +233,65 @@
   .pane.focused {
     border-top-color: var(--accent);
   }
+  /* Tabs sit *on* the chrome and the active one lifts out of it into the document, so the
+     strip and the page below read as one surface with a notch cut in it rather than two
+     stacked bars. That is what `flex-end` plus the negative margin buy. */
   .tabs {
     display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    padding: 0 0.5rem;
     overflow-x: auto;
     border-bottom: 1px solid var(--border);
-    background: var(--panel);
+    background: var(--chrome);
   }
   .tab {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font: inherit;
-    font-size: 0.85rem;
-    border: 0;
-    border-right: 1px solid var(--border);
+    font-size: 0.8125rem;
+    border: 1px solid transparent;
+    border-bottom: 0;
     background: none;
     color: var(--muted);
-    padding: 0.4rem 0.8rem;
+    height: 2.125rem;
+    padding: 0 0.875rem;
+    border-radius: 8px 8px 0 0;
     cursor: pointer;
     white-space: nowrap;
+    flex: none;
+  }
+  .tab:hover:not(.active) {
+    color: var(--fg);
+    background: var(--hover);
   }
   .tab.active {
     color: var(--fg);
+    font-weight: 500;
     background: var(--bg);
+    border-color: var(--border);
+    /* Over the strip's own bottom border, so the active tab opens into the page. */
+    margin-bottom: -1px;
+    padding-bottom: 1px;
   }
   .tab.blank {
     font-style: italic;
+  }
+  .tab .label {
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tab .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+  }
+  .tab .dot.pinned {
+    background: var(--faint);
   }
   /* Sits after the last tab rather than pinned to the right, the way a browser strip does. */
   .newtab {
@@ -244,8 +299,10 @@
     place-items: center;
     border: 0;
     background: none;
-    color: var(--muted);
-    padding: 0.4rem 0.7rem;
+    color: var(--faint);
+    height: 2.125rem;
+    padding: 0 0.6rem;
+    border-radius: 6px;
     cursor: pointer;
     flex: none;
   }
@@ -254,50 +311,76 @@
     background: var(--hover);
   }
   .tab .x {
-    margin-left: 0.5rem;
-    opacity: 0.6;
+    color: var(--faint);
+    font-size: 1.05em;
+    line-height: 1;
+    border-radius: 3px;
   }
-  .tab .pin {
-    color: var(--accent);
-    margin-right: 0.25rem;
+  .tab .x:hover {
+    color: var(--fg);
+    background: var(--hover);
   }
-  .note-head .vault {
-    color: var(--muted);
-    text-transform: uppercase;
-    font-size: 0.75em;
-    letter-spacing: 0.03em;
-  }
-  .note-head .vault::after {
-    content: ' /';
-  }
+
+  /* The second and last chrome row: where you are, how you are looking at it, and everything
+     else behind `···`. The file path used to have a row of its own above this one. */
   .note-head {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
-    padding: 0.2rem 1rem;
-    font-size: 0.8rem;
+    gap: 0.35rem;
+    padding: 0 1rem;
+    height: 2.5rem;
+    font-size: 0.75rem;
     color: var(--muted);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-soft);
     /* A pane is as narrow as a third of the window; when the controls stop fitting they take
        a second row instead of being squeezed until their labels clip. */
     flex-wrap: wrap;
   }
-  .note-head .path {
+  .crumbs {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .crumbs .vault {
+    text-transform: uppercase;
+    font-size: 0.9em;
+    letter-spacing: 0.05em;
+  }
+  .crumbs .folder,
+  .crumbs .vault {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .crumbs .sep {
+    color: var(--border);
+    flex: none;
+  }
+  .crumbs .name {
+    color: var(--fg);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .note-head button,
   .backlinks button {
     font: inherit;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     border: 0;
     background: none;
-    color: var(--muted);
-    padding: 0.2rem 0.5rem;
+    color: var(--faint);
+    padding: 0.2rem 0.45rem;
     border-radius: 4px;
     cursor: pointer;
+  }
+  .note-head button:hover {
+    color: var(--fg);
+    background: var(--hover);
+  }
+  .note-head .more {
+    letter-spacing: 0.06em;
   }
   .spacer {
     flex: 1;
@@ -307,22 +390,37 @@
     display: inline-flex;
     /* Never shrink: a clipped “Reading” is worse than a wrapped row. */
     flex: none;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    overflow: hidden;
-    margin-right: 0.3rem;
+    gap: 2px;
+    background: var(--chrome);
+    border-radius: 6px;
+    padding: 2px;
   }
   .modes button {
-    border-radius: 0;
-    padding: 0.1rem 0.45rem;
-    font-size: 0.75rem;
+    border-radius: 4px;
+    padding: 0.15rem 0.6rem;
+    font-size: 0.7rem;
   }
-  .modes button + button {
-    border-left: 1px solid var(--border);
-  }
+  /* A raised chip rather than a tinted one: the same "lifted out of the groove" language the
+     active tab uses, so both say "selected" the same way. */
   .modes button.on {
-    background: var(--accent-bg);
-    color: var(--accent);
+    background: var(--bg);
+    color: var(--fg);
+    font-weight: 600;
+    box-shadow: 0 1px 1.5px rgb(0 0 0 / 0.07);
+  }
+
+  /* Counts and format, in the quietest type in the app — it is reference, not chrome you act
+     on, so nothing in it is a button. */
+  .note-foot {
+    display: flex;
+    align-items: center;
+    gap: 1.1rem;
+    height: 1.75rem;
+    padding: 0 1.25rem;
+    border-top: 1px solid var(--border-soft);
+    font-size: 0.6875rem;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
   }
   .presence {
     color: var(--accent);
@@ -350,31 +448,21 @@
     text-align: center;
   }
 
-  /* `contents` so the three stay direct flex children of the header — the wrapper exists only
-     to give the container query one thing to switch off. */
-  .wide-actions {
-    display: contents;
-  }
-  .more {
-    display: none;
-  }
+  /* ---- a narrow pane.
 
-  /* ---- a narrow pane, in two steps.
-
-     First the rare actions fold away: below roughly this width the full set stops fitting
-     beside a path you can still read, and folding keeps the header on one row. */
+     The actions no longer fold at a breakpoint — they live in `···` at every width — so all
+     that is left to give back is the padding. */
   @container pane (max-width: 560px) {
-    .wide-actions {
-      display: none;
-    }
-    .more {
-      display: block;
-    }
-    .note-head {
-      padding: 0.25rem 0.6rem;
+    .note-head,
+    .note-foot {
+      padding-left: 0.6rem;
+      padding-right: 0.6rem;
     }
     .backlinks {
       padding: 0.4rem 0.6rem;
+    }
+    .tab .label {
+      max-width: 8rem;
     }
   }
 
@@ -394,14 +482,16 @@
       /* Flicking the strip must not drag the note behind it. */
       overscroll-behavior-x: contain;
     }
-    .tab {
-      padding: 0.6rem 0.9rem;
+    /* The tab keeps its shape and grows downwards: the notch it cuts in the strip only works
+       while the tab and the strip are the same height. */
+    .tab,
+    .newtab {
+      height: 2.6rem;
+      padding-left: 0.9rem;
+      padding-right: 0.9rem;
     }
     .tab .x {
       padding: 0 0.3rem;
-    }
-    .newtab {
-      padding: 0.6rem 0.9rem;
     }
     .note-head button {
       padding: 0.4rem 0.6rem;

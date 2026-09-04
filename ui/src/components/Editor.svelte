@@ -17,6 +17,7 @@
     onOpen,
     onHeadings,
     onPresence,
+    onStats,
     mode = 'live',
     jumpTo = $bindable(),
   }: {
@@ -25,6 +26,8 @@
     onOpen: (id: string) => void
     onHeadings?: (items: OutlineItem[]) => void
     onPresence?: (names: string[]) => void
+    /** Line and word counts for the pane's footer. Debounced with the outline. */
+    onStats?: (stats: { lines: number; words: number }) => void
     /** SPEC §8: live preview, plain source, or rendered and read-only. */
     mode?: ViewMode
     jumpTo?: (pos: number) => void
@@ -73,6 +76,8 @@
   }
 
   let headingTimer: ReturnType<typeof setTimeout> | undefined
+  /** Outline and counts share one debounce: both walk the whole document, and both are read
+   *  by chrome outside the editor that has no reason to update mid-keystroke. */
   function reportHeadings(v: EditorView) {
     clearTimeout(headingTimer)
     headingTimer = setTimeout(() => {
@@ -86,6 +91,8 @@
         },
       })
       onHeadings?.(items)
+      const text = v.state.doc.toString().trim()
+      onStats?.({ lines: v.state.doc.lines, words: text ? text.split(/\s+/u).length : 0 })
     }, 150)
   }
   const headingWatcher = EditorView.updateListener.of((u) => {
