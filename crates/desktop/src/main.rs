@@ -32,6 +32,8 @@ const WINDOW_LABEL: &str = "main";
 const WINDOW_SIZE: (f64, f64) = (1280.0, 840.0);
 /// A note on its own has no sidebar to make room for.
 const NOTE_WINDOW_SIZE: (f64, f64) = (960.0, 900.0);
+/// A path the relay never serves: a note window navigating to it is asking to be closed.
+const CLOSE_PATH: &str = "/.lemmate-shell/close-window";
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
 
@@ -245,15 +247,40 @@ fn relay_window<M: Manager<Wry>>(
 
 /// A note moved out of the main window. Its page names the note in the document title, which
 /// is the only thing a window list or a task switcher has to tell several of them apart by.
+///
+/// The page closes the window when its last tab goes. `window.close()` cannot do that here: a
+/// page may only close a window a script opened, this one was opened by the shell, and on Linux
+/// wry answers it by destroying the webview and leaving an empty frame behind. So the shell
+/// hands the page a `lemmateShell.closeWindow()` that navigates to [`CLOSE_PATH`], and the
+/// navigation handler cancels that navigation and closes the window instead. Nothing crosses
+/// Tauri IPC, which this shell still exposes none of.
 fn open_note_window(app: &tauri::AppHandle, url: Url) -> anyhow::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let label = format!("note-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     tracing::info!(%url, label, "opening a note window");
+    let (handle, me) = (app.clone(), label.clone());
     relay_window(app, label, url)
         .title("Lemmate")
         .inner_size(NOTE_WINDOW_SIZE.0, NOTE_WINDOW_SIZE.1)
         .on_document_title_changed(|window, title| {
             let _ = window.set_title(&title);
+        })
+        .initialization_script(format!(
+            "window.lemmateShell = {{ closeWindow: () => location.assign({CLOSE_PATH:?}) }}"
+        ))
+        .on_navigation(move |url| {
+            if !(url.path() == CLOSE_PATH && handle.try_state::<Relay>().is_some_and(|r| r.serves(url))) {
+                return true;
+            }
+            // Closed once this callback has returned, for the same reason `relay_window` builds
+            // windows outside its own.
+            let (handle, me) = (handle.clone(), me.clone());
+            tauri::async_runtime::spawn(async move {
+                if let Some(window) = handle.get_webview_window(&me) {
+                    let _ = window.close();
+                }
+            });
+            false
         })
         .build()
         .context("creating the window")?;
@@ -464,5 +491,13 @@ mod tests {
         assert!(!same_origin(addr, &url("https://127.0.0.1:4242/")));
         assert!(!same_origin(addr, &url("http://localhost:4242/")));
         assert!(!same_origin(addr, &url("https://example.com/")));
+    }
+
+    #[test]
+    fn the_close_path_survives_url_normalisation() {
+        // `on_navigation` compares the parsed path, so a path a URL parser rewrites (a `.` or
+        // `..` segment, say) would never match and no window would ever close.
+        let url = Url::parse(&format!("http://127.0.0.1:4242{CLOSE_PATH}")).unwrap();
+        assert_eq!(url.path(), CLOSE_PATH);
     }
 }

@@ -492,7 +492,8 @@ exist are dropped once the vault has synced.
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window
 with no sidebar — another app window in the desktop app, a popup in a browser. Links, the palette
 and the other tabs you open there all work as usual; the window just keeps no layout of its own,
-so closing it loses nothing and the main window's panes are restored as you left them. Not offered
+so closing it loses nothing and the main window's panes are restored as you left them. The window
+closes by itself when its last tab does. Not offered
 on a phone, where there is no second window to put it in.
 
 **Version history** opens in a pane of its own — the clock on the tab strip, `Ctrl+Shift+R`, or

@@ -957,6 +957,26 @@
   $effect(() => {
     if (detached) document.title = activeTitle
   })
+  /**
+   * A detached window goes away with its last tab, however the tab went — closed, moved on to
+   * another window, trashed. Watched here rather than in `close` so that a tab closed and a
+   * replacement opened in the same breath (a move between vaults) does not take the window with
+   * it, and only once it has held a tab: it starts empty, waiting for its note to sync.
+   */
+  let heldTab = false
+  $effect(() => {
+    if (!detached) return
+    const empty = panes.every((p) => p.tabs.length === 0)
+    if (!empty) heldTab = true
+    else if (heldTab) closeWindow()
+  })
+  function closeWindow() {
+    // The desktop shell opened this window, so only it can close it (see `open_note_window`); a
+    // browser lets a page close a popup it opened itself, and ignores this otherwise.
+    const shell = (window as unknown as { lemmateShell?: { closeWindow?: () => void } }).lemmateShell
+    if (shell?.closeWindow) shell.closeWindow()
+    else window.close()
+  }
   let denied = $derived(solo ? solo.denied : (workspace?.denied ?? null))
   let status = $derived(solo ? solo.status : (workspace?.status ?? 'connecting'))
   let noteCount = $derived(solo ? solo.notes.length : (workspace?.noteCount ?? 0))
