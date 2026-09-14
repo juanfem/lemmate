@@ -56,6 +56,8 @@
     onSplit,
     splitFull = false,
     onClosePane,
+    onDetach,
+    onPin,
     onHistory,
     historyOpen = false,
     onSeq,
@@ -91,6 +93,9 @@
     splitFull?: boolean
     /** Absent in the last pane — there is nothing to close back to. */
     onClosePane?: () => void
+    /** Move a tab out into a window of its own. Absent where there is no second window to have. */
+    onDetach?: (id: string) => void
+    onPin?: (id: string) => void
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
@@ -145,12 +150,28 @@
   let bookmarked = $derived(!!session?.isBookmarked('note', activePath))
   let moreItems = $derived([
     ...(onHistory ? [{ label: 'Version history', run: onHistory }] : []),
+    ...(onDetach && pane.active && !isBlank(pane.active) ? [{ label: 'Move to new window', run: () => onDetach(pane.active!) }] : []),
     { label: bookmarked ? 'Remove bookmark' : 'Bookmark this note', run: onBookmark },
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
     { label: 'Rename / move…', run: onRename },
     { label: '', separator: true },
     { label: 'Move to trash', danger: true, run: onDelete },
   ])
+
+  /** Right-click on a tab: what you do to the tab, as opposed to `⋯`, which is about the note. */
+  function tabMenu(id: string, e: MouseEvent) {
+    const isPinned = pinned.includes(id)
+    const about = [
+      ...(onDetach && !isBlank(id) ? [{ label: 'Move to new window', run: () => onDetach(id) }] : []),
+      ...(onPin && !isBlank(id) ? [{ label: isPinned ? 'Unpin tab' : 'Pin tab', run: () => onPin(id) }] : []),
+    ]
+    menu = menuAt(e, [
+      ...about,
+      ...(about.length ? [{ label: '', separator: true }] : []),
+      // A pinned tab ignores closing everywhere else too; unpin it first.
+      { label: 'Close tab', disabled: isPinned, run: () => onClose(id) },
+    ])
+  }
 
   // A declarative onmousedown would trip svelte a11y on a non-interactive element; this
   // catches clicks anywhere in the pane (the editor included) without a role.
@@ -168,7 +189,7 @@
        to the page itself (lib/editor/page.ts), which is what freed the second row. -->
   <div class="tabs">
     {#each tabs as id (id)}
-      <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} title={pathOf(id)}>
+      <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)} title={pathOf(id)}>
         {#if isHistory}
           <Icon name="history" size={13} />
         {:else if id === pane.active}

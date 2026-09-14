@@ -105,9 +105,18 @@
   // ---- the workspace: every vault at once (SPEC §9), on one socket
   //
   // Routes: `#/v/<vault>` focuses a vault, `#/v/<vault>/<note>` a note inside it, and both are
-  // written back as you move around. `#/n/<vault>/<note>` (a note shared directly with you) and
+  // written back as you move around. `#/w/<vault>/<note>` is the same note in a window of its
+  // own (a tab's *Move to new window*). `#/n/<vault>/<note>` (a note shared directly with you) and
   // `#/s/<token>` (a public link) are single-note views with no workspace behind them.
   const ULID = '[0-9A-HJKMNP-TV-Z]{26}'
+  /**
+   * A window a tab was moved out into: the whole workspace behind it, so links, the palette and
+   * other vaults all still work, but no sidebar and — above all — no say in the saved layout.
+   * Every window on this origin shares one `localStorage`, and a window holding one note must
+   * not replace the main window's panes with it. Fixed for the life of the page: the route it
+   * writes back keeps the `w`.
+   */
+  const detached = /^#\/w\//u.test(location.hash)
   let workspace = $state<Workspace | null>(null)
   /** The single-note session behind `#/n/…`; never a workspace member. */
   let solo = $state<VaultSession | null>(null)
@@ -116,13 +125,13 @@
   let routeNote = $state<string | null>(readRouteNote())
 
   function readRouteVault(): string | null {
-    const m = new RegExp(`^#/v/(${ULID})`, 'u').exec(location.hash)
+    const m = new RegExp(`^#/[vw]/(${ULID})`, 'u').exec(location.hash)
     if (m) return m[1]!
     const n = new RegExp(`^#/n/(${ULID})/(${ULID})`, 'u').exec(location.hash)
     return n ? n[1]! : null
   }
   function readRouteNote(): string | null {
-    const m = new RegExp(`^#/v/${ULID}/(${ULID})`, 'u').exec(location.hash)
+    const m = new RegExp(`^#/[vw]/${ULID}/(${ULID})`, 'u').exec(location.hash)
     return m ? m[1]! : null
   }
   function readNoteOnly(): string | null {
@@ -181,7 +190,8 @@
       workspace = ws
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
       ;(window as unknown as { lemmate?: unknown }).lemmate = { workspace: ws }
-      const restored = loadLayout()
+      // A detached window starts empty and opens the note its route names once it is known.
+      const restored = detached ? { panes: [blankPane()], focused: 0 } : loadLayout()
       panes = restored.panes
       focusedPane = restored.focused
       pinned = loadPinned()
@@ -402,7 +412,8 @@
     if (publicToken || noteOnly || invite) return
     const vault = session?.id
     const note = active
-    const want = note && vault ? `#/v/${vault}/${note}` : vault ? `#/v/${vault}` : ''
+    // A detached window with its last tab closed keeps its route, and with it what it is.
+    const want = note && vault ? `#/${detached ? 'w' : 'v'}/${vault}/${note}` : vault && !detached ? `#/v/${vault}` : ''
     if (want && location.hash !== want) location.hash = want
   })
 
@@ -442,7 +453,7 @@
     }
   }
   $effect(() => {
-    if (solo || !workspace) return
+    if (solo || detached || !workspace) return
     const data = JSON.stringify({
       panes: panes.map((p) => ({ tabs: p.tabs.filter((t) => !isBlank(t)), active: p.active, mode: p.mode, kind: p.kind, seq: p.seq })),
       focused: focusedPane,
@@ -618,7 +629,16 @@
     if (id && sessionOf(id)?.pathOf(id)) openInNewTab(id)
   }
   function togglePin(id: string) {
-    pinned = pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
+    // Re-read first: another window on this origin may have pinned or unpinned something since
+    // this one loaded, and writing our copy back would undo it. Our copy is only the fallback
+    // for storage that holds nothing.
+    let current = pinned
+    try {
+      if (localStorage.getItem('lemmate.pins') !== null) current = loadPinned()
+    } catch {
+      /* storage may be unavailable */
+    }
+    pinned = current.includes(id) ? current.filter((p) => p !== id) : [...current, id]
     try {
       localStorage.setItem('lemmate.pins', JSON.stringify(pinned))
     } catch {
@@ -633,6 +653,19 @@
     const path = s?.pathOf(id)
     if (s && path) s.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
   }
+  /**
+   * Move a tab out into a window of its own (the `#/w/` route). The desktop shell turns this
+   * `window.open` into another app window on the same relay; a browser makes it a popup. The
+   * tab leaves this pane either way, and not onto the reopen stack — the note is not closed,
+   * it is over there.
+   */
+  function detach(id: string) {
+    const vault = sessionOf(id)?.id
+    if (!vault || isBlank(id)) return
+    window.open(`${location.pathname}${location.search}#/w/${vault}/${id}`, '_blank', 'popup,width=960,height=900')
+    close(id, true)
+    closed = closed.filter((c) => c !== id)
+  }
   /** Open a note beside the current one, splitting if there is room and reusing a pane if not. */
   function openInNewPane(id: string) {
     if (!solo && !narrow.current && panes.length < MAX_PANES) {
@@ -644,6 +677,8 @@
       open(id)
     }
   }
+  /** A phone has no second window to put a note in: `window.open` there is just another tab. */
+  let canDetach = $derived(!solo && !narrow.current)
   let commands: Command[] = $derived([
     { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (palette = '') },
     { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
@@ -670,6 +705,7 @@
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
     { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => active && close(active) },
+    ...(canDetach ? [{ id: 'detach', label: 'Move tab to new window', run: () => active && detach(active) }] : []),
     { id: 'pin', label: active && pinned.includes(active) ? 'Unpin tab' : 'Pin tab', run: () => active && togglePin(active) },
     { id: 'reopen', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T', run: reopenClosed },
     { id: 'split', label: 'Split right', shortcut: 'Ctrl+\\', run: splitRight },
@@ -916,6 +952,11 @@
   let activePath = $derived(session && active ? (session.pathOf(active) ?? unnamedNote(session)) : '')
   /** What the narrow top bar names, where there is no tab strip wide enough to read. */
   let activeTitle = $derived(active && !isBlank(active) && activePath ? displayName(activePath) : 'Lemmate')
+  // The desktop shell names a detached window after its document, so the task switcher can
+  // tell several of them apart.
+  $effect(() => {
+    if (detached) document.title = activeTitle
+  })
   let denied = $derived(solo ? solo.denied : (workspace?.denied ?? null))
   let status = $derived(solo ? solo.status : (workspace?.status ?? 'connecting'))
   let noteCount = $derived(solo ? solo.notes.length : (workspace?.noteCount ?? 0))
@@ -949,157 +990,166 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout" class:narrow={narrow.current} style:--side="{sideWidth}px">
-    <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
-         two shortcuts (new note, commands) that have no keyboard to be reached from. -->
-    <header class="topbar">
-      <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
-      <span class="here" title={activePath}>{activeTitle}</span>
-      <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
-      <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands">＋</button>
-      <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
-    </header>
-    {#if narrow.current && drawer}
-      <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
-    {/if}
-    <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
-         screen reader to wander into. -->
-    <aside class:open={drawer} inert={narrow.current && !drawer}>
-      <div class="side-top">
-        <!-- Not an input: search *is* the palette now, and a box you can type into here would
-             promise a second, weaker search that only looks at what this pane happens to hold. -->
-        <button class="side-search" onclick={() => (palette = '')}>
-          <span class="mag" aria-hidden="true">⌕</span>
-          <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
-          <kbd>Ctrl K</kbd>
-        </button>
-        <div class="side-tabs" role="tablist">
-          <button class:on={sidebar === 'files'} role="tab" aria-selected={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
-          <button class:on={sidebar === 'tags'} role="tab" aria-selected={sidebar === 'tags'} onclick={() => (sidebar = 'tags')}>Tags</button>
-          <button class:on={sidebar === 'bookmarks'} role="tab" aria-selected={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')}>Starred</button>
-        </div>
+  <div class="layout" class:narrow={narrow.current} class:detached style:--side="{sideWidth}px">
+    {#if detached && denied}
+      <div class="denied">
+        Permission denied by the server ({denied.reason}) — your last change was not saved.
+        <button class="link" onclick={() => location.reload()}>Reload</button>
+        <button class="link" onclick={() => { if (workspace) workspace.denied = null }}>Dismiss</button>
       </div>
-      {#if solo}
-        <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
-      {:else if sidebar === 'files'}
-        <FilesPane
-          bind:revealFolder
-          {vaults}
-          activeId={active}
-          activeVault={session?.id ?? null}
-          onOpen={open}
-          actions={{
-            onCreateIn: createInFolder,
-            onRenameFolder: renameFolder,
-            onDeleteFolder: deleteFolder,
-            onCreateInVault: createInVault,
-            onRenameVault: renameVault,
-            onImportInto: (v) => (importInto = v),
-            onNewVault: newVault,
-            onRenameNote: renameNote,
-            onTrashNotes: trashNotes,
-            onOpenInTab: openInNewTab,
-            onOpenInPane: openInNewPane,
-            onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
-            onBookmarkNote: bookmarkNote,
-            onMove: moveDropped,
-          }}
-        />
-        {#if sharedWithMe.length}
-          <nav class="shared">
-            <p class="muted">Shared with me</p>
-            {#each sharedWithMe as n (n.id)}
-              <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
+    {/if}
+    {#if !detached}
+      <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
+           two shortcuts (new note, commands) that have no keyboard to be reached from. -->
+      <header class="topbar">
+        <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
+        <span class="here" title={activePath}>{activeTitle}</span>
+        <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
+        <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands">＋</button>
+        <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
+      </header>
+      {#if narrow.current && drawer}
+        <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
+      {/if}
+      <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
+           screen reader to wander into. -->
+      <aside class:open={drawer} inert={narrow.current && !drawer}>
+        <div class="side-top">
+          <!-- Not an input: search *is* the palette now, and a box you can type into here would
+               promise a second, weaker search that only looks at what this pane happens to hold. -->
+          <button class="side-search" onclick={() => (palette = '')}>
+            <span class="mag" aria-hidden="true">⌕</span>
+            <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          <div class="side-tabs" role="tablist">
+            <button class:on={sidebar === 'files'} role="tab" aria-selected={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
+            <button class:on={sidebar === 'tags'} role="tab" aria-selected={sidebar === 'tags'} onclick={() => (sidebar = 'tags')}>Tags</button>
+            <button class:on={sidebar === 'bookmarks'} role="tab" aria-selected={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')}>Starred</button>
+          </div>
+        </div>
+        {#if solo}
+          <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
+        {:else if sidebar === 'files'}
+          <FilesPane
+            bind:revealFolder
+            {vaults}
+            activeId={active}
+            activeVault={session?.id ?? null}
+            onOpen={open}
+            actions={{
+              onCreateIn: createInFolder,
+              onRenameFolder: renameFolder,
+              onDeleteFolder: deleteFolder,
+              onCreateInVault: createInVault,
+              onRenameVault: renameVault,
+              onImportInto: (v) => (importInto = v),
+              onNewVault: newVault,
+              onRenameNote: renameNote,
+              onTrashNotes: trashNotes,
+              onOpenInTab: openInNewTab,
+              onOpenInPane: openInNewPane,
+              onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
+              onBookmarkNote: bookmarkNote,
+              onMove: moveDropped,
+            }}
+          />
+          {#if sharedWithMe.length}
+            <nav class="shared">
+              <p class="muted">Shared with me</p>
+              {#each sharedWithMe as n (n.id)}
+                <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
+              {/each}
+            </nav>
+          {/if}
+        {:else if sidebar === 'search'}
+          <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
+        {:else if sidebar === 'tags'}
+          {#if session}
+            <TagsPane
+              vault={session.id}
+              version={tagsVersion}
+              bind:selected={tagFilter}
+              onOpen={open}
+              onMenu={(t, e) => tagMenu(t, session.id, e)}
+            />
+          {/if}
+        {:else if sidebar === 'trash'}
+          {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
+        {:else}
+          <nav class="bookmarks-pane">
+            {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
+              <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
+                ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
+              </button>
             {/each}
+            {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
           </nav>
         {/if}
-      {:else if sidebar === 'search'}
-        <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
-      {:else if sidebar === 'tags'}
-        {#if session}
-          <TagsPane
-            vault={session.id}
-            version={tagsVersion}
-            bind:selected={tagFilter}
-            onOpen={open}
-            onMenu={(t, e) => tagMenu(t, session.id, e)}
-          />
+        {#if denied}
+          <div class="denied">
+            Permission denied by the server ({denied.reason}) — your last change was not saved.
+            <button class="link" onclick={() => location.reload()}>Reload</button>
+            <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
+          </div>
         {/if}
-      {:else if sidebar === 'trash'}
-        {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
-      {:else}
-        <nav class="bookmarks-pane">
-          {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
-            <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
-              ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
-            </button>
-          {/each}
-          {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
-        </nav>
-      {/if}
-      {#if denied}
-        <div class="denied">
-          Permission denied by the server ({denied.reason}) — your last change was not saved.
-          <button class="link" onclick={() => location.reload()}>Reload</button>
-          <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
-        </div>
-      {/if}
-      <!-- Who you are, and the way back out. Both were commands and nothing else, and a session
-           you can only end by knowing what to type is a session you cannot end. Absent with the
-           relay and with `--no-auth`, where `me` is the local user and there is nothing to leave. -->
-      {#if me && me.id !== 'local'}
-        <button
-          class="account"
-          title={me.email}
-          aria-haspopup="menu"
-          onclick={(e) => {
-            // Anchored to the button, not to the pointer: this one is reached from the keyboard
-            // too, and a menu that lands in the corner of the window because the click carried
-            // no coordinates is not a menu about this row.
-            const r = e.currentTarget.getBoundingClientRect()
-            menu = {
-              x: r.left,
-              y: r.top,
-              items: [
-                { label: 'Account, password and invites…', run: () => (accountOpen = true) },
-                { separator: true, label: '' },
-                { label: 'Sign out', run: signOut, danger: true },
-              ],
-            }
-          }}
-        >
-          <span class="who">{me.display_name}</span>
-          <span class="chev" aria-hidden="true">⌄</span>
-        </button>
-      {/if}
-      <footer class="status" class:offline={status !== 'online'}>
-        <span class="dot"></span>
-        {statusLine}
-      </footer>
-    </aside>
-    <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
-         static kind. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="vsplit"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the sidebar"
-      aria-valuenow={sideWidth}
-      aria-valuemin={SIDE_MIN}
-      aria-valuemax={SIDE_MAX}
-      tabindex="0"
-      onpointerdown={(e) =>
-        dragResize(e, { axis: 'x', from: sideWidth, min: SIDE_MIN, max: SIDE_MAX, onMove: (v) => (sideWidth = v), onEnd: saveSideWidth })}
-      onkeydown={(e) => {
-        const step = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
-        if (!step) return
-        e.preventDefault()
-        saveSideWidth(clamp(sideWidth + step, SIDE_MIN, SIDE_MAX))
-      }}
-      ondblclick={() => saveSideWidth(SIDE_DEFAULT)}
-    ></div>
+        <!-- Who you are, and the way back out. Both were commands and nothing else, and a session
+             you can only end by knowing what to type is a session you cannot end. Absent with the
+             relay and with `--no-auth`, where `me` is the local user and there is nothing to leave. -->
+        {#if me && me.id !== 'local'}
+          <button
+            class="account"
+            title={me.email}
+            aria-haspopup="menu"
+            onclick={(e) => {
+              // Anchored to the button, not to the pointer: this one is reached from the keyboard
+              // too, and a menu that lands in the corner of the window because the click carried
+              // no coordinates is not a menu about this row.
+              const r = e.currentTarget.getBoundingClientRect()
+              menu = {
+                x: r.left,
+                y: r.top,
+                items: [
+                  { label: 'Account, password and invites…', run: () => (accountOpen = true) },
+                  { separator: true, label: '' },
+                  { label: 'Sign out', run: signOut, danger: true },
+                ],
+              }
+            }}
+          >
+            <span class="who">{me.display_name}</span>
+            <span class="chev" aria-hidden="true">⌄</span>
+          </button>
+        {/if}
+        <footer class="status" class:offline={status !== 'online'}>
+          <span class="dot"></span>
+          {statusLine}
+        </footer>
+      </aside>
+      <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
+           static kind. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="vsplit"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the sidebar"
+        aria-valuenow={sideWidth}
+        aria-valuemin={SIDE_MIN}
+        aria-valuemax={SIDE_MAX}
+        tabindex="0"
+        onpointerdown={(e) =>
+          dragResize(e, { axis: 'x', from: sideWidth, min: SIDE_MIN, max: SIDE_MAX, onMove: (v) => (sideWidth = v), onEnd: saveSideWidth })}
+        onkeydown={(e) => {
+          const step = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
+          if (!step) return
+          e.preventDefault()
+          saveSideWidth(clamp(sideWidth + step, SIDE_MIN, SIDE_MAX))
+        }}
+        ondblclick={() => saveSideWidth(SIDE_DEFAULT)}
+      ></div>
+    {/if}
     <section class="main">
       {#each panes as p, i (p.id)}
         <Pane
@@ -1124,6 +1174,8 @@
           onSplit={solo || narrow.current ? undefined : () => splitRight(i)}
           splitFull={panes.length >= MAX_PANES}
           onClosePane={panes.length > 1 ? () => closePane(i) : undefined}
+          onDetach={canDetach ? detach : undefined}
+          onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
           onSeq={(seq) => { focusedPane = i; p.seq = seq }}
@@ -1468,6 +1520,16 @@
     inset: 0;
     z-index: 25;
     background: rgb(0 0 0 / 0.35);
+  }
+  /* Nothing but the panes: the sidebar stays in the window the tab came from. */
+  .layout.detached,
+  .layout.detached.narrow {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: 'denied' 'main';
+  }
+  .layout.detached > .denied {
+    grid-area: denied;
   }
   .layout.narrow {
     grid-template-columns: 1fr;

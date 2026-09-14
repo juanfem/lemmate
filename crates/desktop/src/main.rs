@@ -6,7 +6,9 @@
 //! thing standalone (SPEC §3.2): the vaults are whatever folders are under the root, and there
 //! is no connection to make. All of the application lives in
 //! `lemmate-core` (sync, projection, search) and in the shared TypeScript UI; nothing is
-//! exposed to the webview over Tauri IPC yet.
+//! exposed to the webview over Tauri IPC yet. The one thing the page asks of the shell — a note
+//! moved out into a window of its own — it asks with a plain `window.open`, which
+//! [`relay_window`] answers with another window on the same relay.
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod config;
@@ -15,6 +17,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -22,10 +25,13 @@ use clap::Parser;
 use lemmate_core::client::{self, LocalHandle, LocalOptions, SyncOptions};
 use lemmate_core::local::ConnectRequest;
 use lemmate_core::vaults;
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Wry};
 
 const WINDOW_LABEL: &str = "main";
 const WINDOW_SIZE: (f64, f64) = (1280.0, 840.0);
+/// A note on its own has no sidebar to make room for.
+const NOTE_WINDOW_SIZE: (f64, f64) = (960.0, 900.0);
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
 
@@ -34,6 +40,11 @@ const RESTART_GRACE: Duration = Duration::from_millis(500);
 struct Relay(Mutex<Option<LocalHandle>>);
 
 impl Relay {
+    /// Whether `url` is a page this relay serves: the only thing a window may be opened on.
+    fn serves(&self, url: &Url) -> bool {
+        self.0.lock().is_ok_and(|guard| guard.as_ref().is_some_and(|h| same_origin(h.addr, url)))
+    }
+
     fn abort(&self) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(handle) = guard.take()
@@ -112,7 +123,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
             .context("starting the setup server")?;
             let url: tauri::Url = format!("http://{addr}/").parse()?;
             tracing::info!(%url, "opening setup window");
-            WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+            relay_window(app, WINDOW_LABEL, url)
                 .title("Lemmate — setup")
                 .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
                 .build()
@@ -194,13 +205,64 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
     tracing::info!(%url, "opening main window");
     let url = url.parse().with_context(|| format!("relay URL {url} is not a valid URL"))?;
 
-    WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+    relay_window(app, WINDOW_LABEL, url)
         .title("Lemmate")
         .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
         .build()
         .context("creating the main window")?;
 
     Ok(Relay(Mutex::new(Some(handle))))
+}
+
+/// A window on the relay's page, which may open more of them.
+///
+/// *Move to new window* on a tab is a `window.open` of the same page on the note's `#/w/…`
+/// route. A webview left to itself does something different with that on every platform —
+/// nothing at all on Linux and macOS — so a request for a page this relay serves gets a window
+/// built here instead, like this one, and the request itself is refused. Anything else is left
+/// to the platform, as it was before this handler existed.
+fn relay_window<M: Manager<Wry>>(
+    app: &M,
+    label: impl Into<String>,
+    url: Url,
+) -> WebviewWindowBuilder<'_, Wry, M> {
+    let handle = app.app_handle().clone();
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url)).on_new_window(move |url, _features| {
+        if !handle.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
+            return NewWindowResponse::Allow;
+        }
+        // Built once this callback has returned rather than inside it: the callback runs on
+        // the event loop, and building a window waits for that loop to answer.
+        let handle = handle.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = open_note_window(&handle, url) {
+                tracing::warn!(error = %format!("{e:#}"), "could not open a note window");
+            }
+        });
+        NewWindowResponse::Deny
+    })
+}
+
+/// A note moved out of the main window. Its page names the note in the document title, which
+/// is the only thing a window list or a task switcher has to tell several of them apart by.
+fn open_note_window(app: &tauri::AppHandle, url: Url) -> anyhow::Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let label = format!("note-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    tracing::info!(%url, label, "opening a note window");
+    relay_window(app, label, url)
+        .title("Lemmate")
+        .inner_size(NOTE_WINDOW_SIZE.0, NOTE_WINDOW_SIZE.1)
+        .on_document_title_changed(|window, title| {
+            let _ = window.set_title(&title);
+        })
+        .build()
+        .context("creating the window")?;
+    Ok(())
+}
+
+/// Same scheme, host and port as the relay listening on `addr`.
+fn same_origin(addr: SocketAddr, url: &Url) -> bool {
+    Url::parse(&format!("http://{addr}/")).is_ok_and(|relay| relay.origin() == url.origin())
 }
 
 /// Where to point the window: at the workspace, or — when this shell holds exactly one vault —
@@ -386,4 +448,21 @@ fn resolve_web_dir(app: &tauri::App, override_dir: Option<&Path>) -> anyhow::Res
          `npm install && npm run build` in {}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui").display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_relays_own_pages_get_a_window() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 4242));
+        let url = |s: &str| Url::parse(s).unwrap();
+        assert!(same_origin(addr, &url("http://127.0.0.1:4242/#/w/01J/01K")));
+        assert!(same_origin(addr, &url("http://127.0.0.1:4242/")));
+        assert!(!same_origin(addr, &url("http://127.0.0.1:4243/")));
+        assert!(!same_origin(addr, &url("https://127.0.0.1:4242/")));
+        assert!(!same_origin(addr, &url("http://localhost:4242/")));
+        assert!(!same_origin(addr, &url("https://example.com/")));
+    }
 }

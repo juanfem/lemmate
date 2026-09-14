@@ -483,10 +483,17 @@ an empty tab, or right-click a note for *Open in a new tab* / *Open in a new pan
 **Tabs and panes.** Each pane has its own tab strip and editor. Split right with the ◫ at the
 right of the strip or `Ctrl+\` (up to three panes — at the limit the control stays and says
 so); the ⨯ beside it closes a pane, and `Ctrl+Alt+←/→` moves focus. Pinned tabs sort first and ignore
-`Ctrl+W` (unpin from the palette to close them). `Ctrl+Shift+T` reopens the last closed tab —
+`Ctrl+W` (unpin them — right-click the tab, or the palette — to close them). `Ctrl+Shift+T` reopens the last closed tab —
 the last twenty are remembered. The layout, pins and collapsed folders are stored per vault in
 the browser's local storage, so they are per device, and tabs pointing at notes that no longer
 exist are dropped once the vault has synced.
+
+**A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
+(*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window
+with no sidebar — another app window in the desktop app, a popup in a browser. Links, the palette
+and the other tabs you open there all work as usual; the window just keeps no layout of its own,
+so closing it loses nothing and the main window's panes are restored as you left them. Not offered
+on a phone, where there is no second window to put it in.
 
 **Version history** opens in a pane of its own — the clock on the tab strip, `Ctrl+Shift+R`, or
 *Show version history* in the palette. It splits right where there is room and reuses the last
