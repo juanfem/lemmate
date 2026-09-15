@@ -19,7 +19,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { moveTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { moveTab, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -678,13 +678,29 @@
       open(id)
     }
   }
-  /** A tab dragged within this window (lib/tabmoves.ts); a split needs room for another pane. */
-  function dropTab(drag: TabDrag, drop: TabDrop) {
+  /** A tab dragged within this window or in from another (lib/tabmoves.ts); a split needs room
+   *  for another pane. Answers whether the tab was taken. */
+  function dropTab(drag: TabDrag, drop: TabDrop): boolean {
+    // From another window, only a note this one holds too: a blank tab, or a note this workspace
+    // cannot open (not synced yet, another account's), stays in the window it came from.
+    if (drag.pane === null && (isBlank(drag.tab) || !sessionOf(drag.tab)?.pathOf(drag.tab))) return false
     const room = solo || narrow.current ? panes.length : MAX_PANES
-    const moved = moveTab(panes, drag, drop, pinned, room, (tab, from) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: from.mode, kind: 'note' }))
-    if (!moved) return
+    const moved = moveTab(panes, drag, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: 'note' }))
+    if (!moved) return false
     panes = moved.panes
     focusedPane = moved.focused
+    closed = closed.filter((c) => c !== drag.tab)
+    return true
+  }
+  /**
+   * Another window took it. It still goes on the reopen stack: the window learns of the drop only
+   * from the drag's final `dropEffect`, and if an engine ever reports a drop that did not happen,
+   * Ctrl+Shift+T is the way back — the worst case is the note open in both windows.
+   */
+  function tabGone(drag: TabDrag) {
+    panes = removeTab(panes, drag)
+    focusedPane = Math.min(focusedPane, panes.length - 1)
+    if (!isBlank(drag.tab)) closed = [...closed.filter((c) => c !== drag.tab), drag.tab].slice(-20)
   }
   /** A phone has no second window to put a note in: `window.open` there is just another tab. */
   let canDetach = $derived(!solo && !narrow.current)
@@ -1205,6 +1221,7 @@
           onClosePane={panes.length > 1 ? () => closePane(i) : undefined}
           onDetach={canDetach ? detach : undefined}
           onTabDrop={dropTab}
+          onTabGone={tabGone}
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}

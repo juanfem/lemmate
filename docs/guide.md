@@ -491,8 +491,12 @@ exist are dropped once the vault has synced.
 **Drag tabs** to rearrange them: along the strip to reorder (pinned tabs stay ahead of the rest),
 onto another pane's strip or page to move them there, or onto the left or right third of a page
 to split that pane with the tab in the new half — the part of the page that will change lights
-up while you hold it there. A pane you drag the last tab out of closes. Dragging between windows
-is not supported; use *Move to new window* for that.
+up while you hold it there. A pane you drag the last tab out of closes. The same works **between
+windows** — the main one and any you moved a note into, or two browser windows on the same site:
+drop a tab on another window's strip or page and it moves there, and a window that loses its last
+tab this way closes. A window that does not hold that note (still loading, or signed in as someone
+else) refuses the drop, and the tab stays where it was. *Move to new window* is still the way to
+make a new one.
 
 **A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window

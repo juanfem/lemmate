@@ -34,7 +34,7 @@
   import type { OutlineItem } from '../lib/outline.ts'
   import { unnamedNote } from '../lib/notename.ts'
   import { clampIndex, drawn, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
-  import { beginTabDrag, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
+  import { beginTabDrag, carriesTab, droppedTab, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
 
   let {
     lookup,
@@ -61,6 +61,7 @@
     onDetach,
     onPin,
     onTabDrop,
+    onTabGone,
     onHistory,
     historyOpen = false,
     onSeq,
@@ -99,8 +100,12 @@
     /** Move a tab out into a window of its own. Absent where there is no second window to have. */
     onDetach?: (id: string) => void
     onPin?: (id: string) => void
-    /** A tab let go over this pane: on its strip, on its page, or against one of its edges. */
-    onTabDrop?: (drag: TabDrag, drop: TabDrop) => void
+    /** A tab let go over this pane: on its strip, on its page, or against one of its edges.
+     *  Answers whether it was taken — a tab from another window is refused if this one does not
+     *  hold its note, and that window then keeps it. */
+    onTabDrop?: (drag: TabDrag, drop: TabDrop) => boolean
+    /** A tab dragged from this pane was taken by another window. */
+    onTabGone?: (drag: TabDrag) => void
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
@@ -204,9 +209,12 @@
     return own ? null : { pane: pane.id, index: Infinity }
   }
 
+  /** From another window the tab is unknown until the drop, so it excludes nothing and owns no pane. */
+  const FOREIGN: TabDrag = { tab: '', pane: null }
+
   function dragOver(e: DragEvent) {
-    const drag = tabDrag.current
-    if (!drag || !onTabDrop) return
+    if (!onTabDrop || !carriesTab(e)) return
+    const drag = tabDrag.current ?? FOREIGN
     e.stopPropagation()
     const at = isHistory ? null : dropAt(e, drag)
     hoverTab(at)
@@ -216,14 +224,31 @@
   }
 
   function drop(e: DragEvent) {
-    const drag = tabDrag.current
-    if (!drag || !onTabDrop) return
+    if (!onTabDrop || !carriesTab(e)) return
     e.stopPropagation()
-    e.preventDefault()
-    const at = isHistory ? null : dropAt(e, drag)
-    // Before the move: the tab's own element may not survive it to hear `dragend`.
+    const local = tabDrag.current
+    if (local) {
+      e.preventDefault()
+      const at = isHistory ? null : dropAt(e, local)
+      // Before the move: the tab's own element may not survive it to hear `dragend`.
+      endTabDrag()
+      if (at) onTabDrop(local, at)
+      return
+    }
+    hoverTab(null)
+    const tab = droppedTab(e)
+    const at = tab && !isHistory ? dropAt(e, { tab, pane: null }) : null
+    // Taken only if it really lands: an unhandled drop reports `none` to the window it came
+    // from, which then keeps its tab.
+    if (tab && at && onTabDrop({ tab, pane: null }, at)) e.preventDefault()
+  }
+
+  function dragEnd(e: DragEvent) {
+    const drag = tabDrag.current
     endTabDrag()
-    if (at) onTabDrop(drag, at)
+    // Still in flight means no pane here took it (a drop here ends it first). If the drop was
+    // taken all the same, it was taken by another window, which has the tab open now.
+    if (drag && e.dataTransfer?.dropEffect === 'move') onTabGone?.(drag)
   }
 
   function dragLeave(e: DragEvent) {
@@ -235,8 +260,8 @@
   let over = $derived(tabDrag.over?.pane === pane.id ? tabDrag.over : null)
   /** Where on the strip the insertion bar goes, in the strip's own scrolling coordinates. */
   let marker = $derived.by(() => {
-    const drag = tabDrag.current
-    if (!over || !drag || !('index' in over) || !Number.isFinite(over.index) || !strip) return null
+    const drag = tabDrag.current ?? FOREIGN
+    if (!over || !('index' in over) || !Number.isFinite(over.index) || !strip) return null
     const others = [...strip.querySelectorAll<HTMLElement>('.tab')].filter((el) => el.dataset.tab !== drag.tab)
     const at = clampIndex(
       others.map((el) => el.dataset.tab ?? ''),
@@ -285,7 +310,7 @@
         data-tab={id}
         draggable={onTabDrop && !isHistory ? 'true' : undefined}
         ondragstart={(e) => beginTabDrag(e, { tab: id, pane: pane.id })}
-        ondragend={endTabDrag}
+        ondragend={dragEnd}
         onclick={() => onActivate(id)}
         oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)}
         title={pathOf(id)}

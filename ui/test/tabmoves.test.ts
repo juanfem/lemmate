@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, moveTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, moveTab, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
@@ -64,4 +64,23 @@ test('history panes are neither sources nor targets', () => {
   const panes = [pane(1, ['a', 'b']), pane(2, ['a'], 'a', 'history')]
   assert.equal(moveTab(panes, { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
   assert.equal(moveTab(panes, { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
+})
+
+test('a tab from another window arrives without leaving anything here', () => {
+  const panes = [pane(1, ['a', 'b']), pane(2, ['x'])]
+  assert.deepEqual(shape(moveTab(panes, { tab: 'n', pane: null }, { pane: 2, index: 0 }, [], 3, fresh)), { panes: ['[a] b', '[n] x'], focused: 1 })
+  assert.deepEqual(shape(moveTab(panes, { tab: 'n', pane: null }, { pane: 1, split: 'left' }, [], 3, fresh)), { panes: ['[n]', '[a] b', '[x]'], focused: 0 })
+  // Already open in the target pane: it is not doubled, just moved to where it was dropped.
+  assert.deepEqual(shape(moveTab(panes, { tab: 'b', pane: null }, { pane: 1, index: 0 }, [], 3, fresh))?.panes, ['[b] a', '[x]'])
+  assert.equal(moveTab([pane(1, ['a'], 'a', 'history')], { tab: 'n', pane: null }, { pane: 1, index: 0 }, [], 3, fresh), null)
+})
+
+test('removeTab: the window a tab was dragged out of', () => {
+  const panes = [pane(1, ['a', 'b', 'c'], 'b'), pane(2, ['x'])]
+  assert.deepEqual(removeTab(panes, { tab: 'b', pane: 1 }).map((p) => `${p.tabs.join(' ')}|${p.active}`), ['a c|c', 'x|x'])
+  assert.deepEqual(removeTab(panes, { tab: 'x', pane: 2 }).map((p) => p.tabs.join(' ')), ['a b c'])
+  // The last pane stays, empty: a detached window closes itself on that.
+  assert.deepEqual(removeTab([pane(1, ['a'])], { tab: 'a', pane: 1 }).map((p) => `${p.tabs.length}|${p.active}`), ['0|null'])
+  // Nothing to take away.
+  assert.equal(removeTab(panes, { tab: 'zz', pane: 1 }), panes)
 })

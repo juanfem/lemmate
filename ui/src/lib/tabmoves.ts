@@ -10,10 +10,10 @@ export interface TabPane {
   kind?: 'note' | 'history'
 }
 
-/** The tab in flight, and the pane it left. */
+/** The tab in flight, and the pane it left — `null` when that pane is in another window. */
 export interface TabDrag {
   tab: string
-  pane: number
+  pane: number | null
 }
 
 /**
@@ -48,6 +48,9 @@ function without<P extends TabPane>(p: P, tab: string): P {
  * history panes are neither sources nor targets, and a pane cannot be split off its own only tab.
  * A split past `maxPanes` lands in the target pane instead, as dropping on its middle would.
  *
+ * A tab from another window (`drag.pane` null) only arrives: taking it out of the pane it left is
+ * that window's business, done by `removeTab` there once it hears the drop was taken.
+ *
  * The tab becomes the active one where it lands, and the pane it lands in takes the focus. A pane
  * the move empties goes away, unless it is the last one. The same note already open in the target
  * is not doubled: the move takes that tab's place.
@@ -58,18 +61,20 @@ export function moveTab<P extends TabPane>(
   drop: TabDrop,
   pinned: string[],
   maxPanes: number,
-  newPane: (tab: string, from: P) => P,
+  /** A pane for a split, taking its view mode from `like` — the pane the tab left, if here. */
+  newPane: (tab: string, like: P) => P,
 ): { panes: P[]; focused: number } | null {
-  const src = panes.find((p) => p.id === drag.pane)
+  const src = drag.pane === null ? undefined : panes.find((p) => p.id === drag.pane)
   const dst = panes.find((p) => p.id === drop.pane)
-  if (!src || !dst || !src.tabs.includes(drag.tab) || src.kind === 'history' || dst.kind === 'history') return null
+  if (!dst || dst.kind === 'history') return null
+  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || src.kind === 'history')) return null
   const split = 'split' in drop && panes.length < maxPanes ? drop.split : null
   if (split && src === dst && src.tabs.length === 1) return null
 
   let out = panes.map((p) => (p === src ? without(p, drag.tab) : p))
   let landed: P
   if (split) {
-    landed = newPane(drag.tab, src)
+    landed = newPane(drag.tab, src ?? dst)
     const at = out.findIndex((p) => p.id === dst.id)
     out.splice(split === 'left' ? at : at + 1, 0, landed)
   } else {
@@ -84,7 +89,19 @@ export function moveTab<P extends TabPane>(
     landed = { ...target, tabs, active: drag.tab }
     out = out.map((p) => (p.id === dst.id ? landed : p))
   }
-  const emptied = out.find((p) => p.id === src.id)
+  const emptied = src && out.find((p) => p.id === src.id)
   if (emptied && emptied.tabs.length === 0 && out.length > 1) out = out.filter((p) => p !== emptied)
   return { panes: out, focused: out.indexOf(landed) }
+}
+
+/**
+ * The other half of a move between windows: the tab left `drag.pane` for somewhere else. The pane
+ * picks its neighbour as closing the tab would, and goes if that empties it and it is not the last.
+ */
+export function removeTab<P extends TabPane>(panes: P[], drag: TabDrag): P[] {
+  const src = panes.find((p) => p.id === drag.pane)
+  if (!src || !src.tabs.includes(drag.tab)) return panes
+  const out = panes.map((p) => (p === src ? without(p, drag.tab) : p))
+  const emptied = out.find((p) => p.id === src.id)!
+  return emptied.tabs.length === 0 && out.length > 1 ? out.filter((p) => p !== emptied) : out
 }
