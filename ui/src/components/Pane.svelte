@@ -33,7 +33,7 @@
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
   import type { OutlineItem } from '../lib/outline.ts'
   import { unnamedNote } from '../lib/notename.ts'
-  import { clampIndex, drawn, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
+  import { clampIndex, drawn, endedOutside, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
   import { beginTabDrag, carriesTab, droppedTab, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
 
   let {
@@ -62,6 +62,7 @@
     onPin,
     onTabDrop,
     onTabGone,
+    onTabOut,
     onHistory,
     historyOpen = false,
     onSeq,
@@ -106,6 +107,8 @@
     onTabDrop?: (drag: TabDrag, drop: TabDrop) => boolean
     /** A tab dragged from this pane was taken by another window. */
     onTabGone?: (drag: TabDrag) => void
+    /** A tab dragged from this pane was let go outside every window, at screen `x`, `y`. */
+    onTabOut?: (drag: TabDrag, x: number, y: number) => void
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
@@ -247,8 +250,11 @@
     const drag = tabDrag.current
     endTabDrag()
     // Still in flight means no pane here took it (a drop here ends it first). If the drop was
-    // taken all the same, it was taken by another window, which has the tab open now.
-    if (drag && e.dataTransfer?.dropEffect === 'move') onTabGone?.(drag)
+    // taken all the same, it was taken by another window, which has the tab open now; if nothing
+    // took it and it ended outside this window, it asks for a window of its own.
+    if (!drag) return
+    if (e.dataTransfer?.dropEffect === 'move') onTabGone?.(drag)
+    else if (endedOutside(e, innerWidth, innerHeight)) onTabOut?.(drag, e.screenX, e.screenY)
   }
 
   function dragLeave(e: DragEvent) {

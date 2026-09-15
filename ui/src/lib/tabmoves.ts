@@ -95,6 +95,22 @@ export function moveTab<P extends TabPane>(
 }
 
 /**
+ * Whether a drag that no window took ended outside this one (`width` × `height`): dropped on the
+ * desktop, another app, or a window that refused it. Judged by where it ended rather than by a
+ * `dragleave` on the way out, because a cancelled drag fires `dragleave` too. An engine that
+ * reports no position for the end of a drag (both screen coordinates zero) is taken to have ended
+ * inside, so the worst it can do is not open a window.
+ */
+export function endedOutside(
+  e: { screenX: number; screenY: number; clientX: number; clientY: number },
+  width: number,
+  height: number,
+): boolean {
+  if (e.screenX === 0 && e.screenY === 0) return false
+  return e.clientX < 0 || e.clientY < 0 || e.clientX >= width || e.clientY >= height
+}
+
+/**
  * The other half of a move between windows: the tab left `drag.pane` for somewhere else. The pane
  * picks its neighbour as closing the tab would, and goes if that empties it and it is not the last.
  */

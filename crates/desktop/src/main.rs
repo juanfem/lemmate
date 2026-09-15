@@ -6,9 +6,9 @@
 //! thing standalone (SPEC §3.2): the vaults are whatever folders are under the root, and there
 //! is no connection to make. All of the application lives in
 //! `lemmate-core` (sync, projection, search) and in the shared TypeScript UI; nothing is
-//! exposed to the webview over Tauri IPC yet. The one thing the page asks of the shell — a note
-//! moved out into a window of its own — it asks with a plain `window.open`, which
-//! [`relay_window`] answers with another window on the same relay.
+//! exposed to the webview over Tauri IPC yet. The two things the page asks of the shell — open a
+//! note in a window of its own, close that window again — it asks by navigating to a path the
+//! relay never serves, which [`relay_window`] cancels and acts on instead (see [`ShellRequest`]).
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod config;
@@ -32,8 +32,19 @@ const WINDOW_LABEL: &str = "main";
 const WINDOW_SIZE: (f64, f64) = (1280.0, 840.0);
 /// A note on its own has no sidebar to make room for.
 const NOTE_WINDOW_SIZE: (f64, f64) = (960.0, 900.0);
-/// A path the relay never serves: a note window navigating to it is asking to be closed.
+/// Paths the relay never serves. A window navigating under here is asking the shell for something.
+const SHELL_PREFIX: &str = "/.lemmate-shell/";
 const CLOSE_PATH: &str = "/.lemmate-shell/close-window";
+const OPEN_PATH: &str = "/.lemmate-shell/open-window";
+/// What every relay window's page gets as `window.lemmateShell`: the two requests, as navigations.
+const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
+  closeWindow: () => location.assign("/.lemmate-shell/close-window"),
+  openWindow: (route, x, y) => {
+    const q = new URLSearchParams({ route })
+    if (Number.isFinite(x) && Number.isFinite(y)) q.set('x', String(Math.round(x))), q.set('y', String(Math.round(y)))
+    location.assign("/.lemmate-shell/open-window?" + q)
+  },
+}"#;
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
 
@@ -125,7 +136,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
             .context("starting the setup server")?;
             let url: tauri::Url = format!("http://{addr}/").parse()?;
             tracing::info!(%url, "opening setup window");
-            relay_window(app, WINDOW_LABEL, url)
+            relay_window(app, WINDOW_LABEL.into(), url)
                 .title("Lemmate — setup")
                 .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
                 .build()
@@ -207,7 +218,7 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
     tracing::info!(%url, "opening main window");
     let url = url.parse().with_context(|| format!("relay URL {url} is not a valid URL"))?;
 
-    relay_window(app, WINDOW_LABEL, url)
+    relay_window(app, WINDOW_LABEL.into(), url)
         .title("Lemmate")
         .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
         .build()
@@ -216,80 +227,112 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
     Ok(Relay(Mutex::new(Some(handle))))
 }
 
-/// A window on the relay's page, which may open more of them.
+/// A window on the relay's page, which may open more of them and close itself.
 ///
-/// *Move to new window* on a tab is a `window.open` of the same page on the note's `#/w/…`
-/// route. A webview left to itself does something different with that on every platform —
-/// nothing at all on Linux and macOS — so a request for a page this relay serves gets a window
-/// built here instead, like this one, and the request itself is refused. Anything else is left
-/// to the platform, as it was before this handler existed.
-fn relay_window<M: Manager<Wry>>(
-    app: &M,
-    label: impl Into<String>,
-    url: Url,
-) -> WebviewWindowBuilder<'_, Wry, M> {
-    let handle = app.app_handle().clone();
+/// *Move to new window* on a tab, or a tab dragged out of every window, asks for a window on the
+/// note's `#/w/…` route. `window.open` is not enough for that: WebKit only lets a page open one
+/// in answer to a click or a key, and the end of a drag is neither. Closing is the same story —
+/// a page may only close a window a script opened, and on Linux wry answers `window.close()` by
+/// destroying the webview and leaving an empty frame behind. So the page gets
+/// [`SHELL_SCRIPT`], which turns both requests into navigations under [`SHELL_PREFIX`], and the
+/// navigation handler here cancels those and does what they ask. Nothing crosses Tauri IPC.
+///
+/// A plain `window.open` of a page this relay serves still gets a window built here too, since a
+/// webview left to itself does something different with it on every platform — nothing at all on
+/// Linux and macOS. Anything else is left to the platform, as it was before this handler existed.
+fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWindowBuilder<'_, Wry, M> {
+    let (opener, navigator, me) = (app.app_handle().clone(), app.app_handle().clone(), label.clone());
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
         // The page does its own drag and drop — notes and folders in the tree, tabs between
         // panes, files onto the editor — and on Windows Tauri's file-drop handler swallows
         // every HTML5 drag. Nothing listens to that handler's events: there is no IPC.
         .disable_drag_drop_handler()
-        .on_new_window(move |url, _features| {
-            if !handle.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
-                return NewWindowResponse::Allow;
-            }
-            // Built once this callback has returned rather than inside it: the callback runs on
-            // the event loop, and building a window waits for that loop to answer.
-            let handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = open_note_window(&handle, url) {
-                    tracing::warn!(error = %format!("{e:#}"), "could not open a note window");
-                }
-            });
-            NewWindowResponse::Deny
-        })
-}
-
-/// A note moved out of the main window. Its page names the note in the document title, which
-/// is the only thing a window list or a task switcher has to tell several of them apart by.
-///
-/// The page closes the window when its last tab goes. `window.close()` cannot do that here: a
-/// page may only close a window a script opened, this one was opened by the shell, and on Linux
-/// wry answers it by destroying the webview and leaving an empty frame behind. So the shell
-/// hands the page a `lemmateShell.closeWindow()` that navigates to [`CLOSE_PATH`], and the
-/// navigation handler cancels that navigation and closes the window instead. Nothing crosses
-/// Tauri IPC, which this shell still exposes none of.
-fn open_note_window(app: &tauri::AppHandle, url: Url) -> anyhow::Result<()> {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    let label = format!("note-{}", NEXT.fetch_add(1, Ordering::Relaxed));
-    tracing::info!(%url, label, "opening a note window");
-    let (handle, me) = (app.clone(), label.clone());
-    relay_window(app, label, url)
-        .title("Lemmate")
-        .inner_size(NOTE_WINDOW_SIZE.0, NOTE_WINDOW_SIZE.1)
-        .on_document_title_changed(|window, title| {
-            let _ = window.set_title(&title);
-        })
-        .initialization_script(format!(
-            "window.lemmateShell = {{ closeWindow: () => location.assign({CLOSE_PATH:?}) }}"
-        ))
+        .initialization_script(SHELL_SCRIPT)
         .on_navigation(move |url| {
-            if !(url.path() == CLOSE_PATH && handle.try_state::<Relay>().is_some_and(|r| r.serves(url))) {
+            let served = || navigator.try_state::<Relay>().is_some_and(|r| r.serves(url));
+            if !url.path().starts_with(SHELL_PREFIX) || !served() {
                 return true;
             }
-            // Closed once this callback has returned, for the same reason `relay_window` builds
-            // windows outside its own.
-            let (handle, me) = (handle.clone(), me.clone());
+            // Acted on once this callback has returned rather than inside it: the callback runs
+            // on the event loop, and building or closing a window waits for that loop to answer.
+            let (handle, me, request) = (navigator.clone(), me.clone(), ShellRequest::parse(url));
             tauri::async_runtime::spawn(async move {
-                if let Some(window) = handle.get_webview_window(&me) {
-                    let _ = window.close();
+                match request {
+                    // The main window is the app: it closes when the user says so.
+                    Some(ShellRequest::Close) if me != WINDOW_LABEL => {
+                        if let Some(window) = handle.get_webview_window(&me) {
+                            let _ = window.close();
+                        }
+                    }
+                    Some(ShellRequest::Open { url, position }) => open_note_window(&handle, url, position),
+                    _ => tracing::debug!(window = me, "ignored a shell request"),
                 }
             });
             false
         })
-        .build()
-        .context("creating the window")?;
-    Ok(())
+        .on_new_window(move |url, features| {
+            if !opener.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
+                return NewWindowResponse::Allow;
+            }
+            let (handle, position) = (opener.clone(), features.position().map(|p| (p.x, p.y)));
+            tauri::async_runtime::spawn(async move { open_note_window(&handle, url, position) });
+            NewWindowResponse::Deny
+        })
+}
+
+/// What a navigation under [`SHELL_PREFIX`] asks for.
+#[derive(Debug, PartialEq)]
+enum ShellRequest {
+    Close,
+    /// A note window on `url`, at a screen position (logical pixels, top left) if the page knew one.
+    Open {
+        url: Url,
+        position: Option<(f64, f64)>,
+    },
+}
+
+impl ShellRequest {
+    /// `None` for anything but the two requests, including an open of a route that is not a note
+    /// window's — the page is ours, but nothing it navigates to should become a window by accident.
+    fn parse(url: &Url) -> Option<Self> {
+        match url.path() {
+            CLOSE_PATH => Some(Self::Close),
+            OPEN_PATH => {
+                let arg =
+                    |name: &str| url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned());
+                let route = arg("route").filter(|r| r.starts_with("#/w/"))?;
+                let mut target = url.clone();
+                target.set_path("/");
+                target.set_query(None);
+                target.set_fragment(Some(&route[1..]));
+                let coord = |name| arg(name).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+                let position = coord("x").zip(coord("y"));
+                Some(Self::Open { url: target, position })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A note moved out of the main window. Its page names the note in the document title, which
+/// is the only thing a window list or a task switcher has to tell several of them apart by; the
+/// page also closes the window when its last tab goes (see [`relay_window`]).
+fn open_note_window(app: &tauri::AppHandle, url: Url, position: Option<(f64, f64)>) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let label = format!("note-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    tracing::info!(%url, label, ?position, "opening a note window");
+    let mut builder = relay_window(app, label, url)
+        .title("Lemmate")
+        .inner_size(NOTE_WINDOW_SIZE.0, NOTE_WINDOW_SIZE.1)
+        .on_document_title_changed(|window, title| {
+            let _ = window.set_title(&title);
+        });
+    if let Some((x, y)) = position {
+        builder = builder.position(x, y);
+    }
+    if let Err(e) = builder.build() {
+        tracing::warn!(error = %e, "could not open a note window");
+    }
 }
 
 /// Same scheme, host and port as the relay listening on `addr`.
@@ -499,10 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn the_close_path_survives_url_normalisation() {
-        // `on_navigation` compares the parsed path, so a path a URL parser rewrites (a `.` or
-        // `..` segment, say) would never match and no window would ever close.
-        let url = Url::parse(&format!("http://127.0.0.1:4242{CLOSE_PATH}")).unwrap();
-        assert_eq!(url.path(), CLOSE_PATH);
+    fn shell_requests_are_parsed_from_the_navigation() {
+        let url = |s: &str| Url::parse(&format!("http://127.0.0.1:4242{s}")).unwrap();
+        // The paths survive URL normalisation (no `.` or `..` segment gets rewritten away), or no
+        // request would ever match.
+        assert!(CLOSE_PATH.starts_with(SHELL_PREFIX) && OPEN_PATH.starts_with(SHELL_PREFIX));
+        // The page's script spells the same paths out.
+        assert!(SHELL_SCRIPT.contains(CLOSE_PATH) && SHELL_SCRIPT.contains(OPEN_PATH));
+        assert_eq!(ShellRequest::parse(&url(CLOSE_PATH)), Some(ShellRequest::Close));
+        assert_eq!(
+            ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fw%2F01J%2F01K&x=120&y=-40"))),
+            Some(ShellRequest::Open { url: url("/#/w/01J/01K"), position: Some((120.0, -40.0)) })
+        );
+        assert_eq!(
+            ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fw%2F01J%2F01K&x=NaN"))),
+            Some(ShellRequest::Open { url: url("/#/w/01J/01K"), position: None })
+        );
+        // Only a note window's route, and nothing outside the two paths.
+        assert_eq!(ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fv%2F01J"))), None);
+        assert_eq!(ShellRequest::parse(&url(OPEN_PATH)), None);
+        assert_eq!(ShellRequest::parse(&url("/.lemmate-shell/other")), None);
+        assert_eq!(ShellRequest::parse(&url("/")), None);
     }
 }

@@ -654,17 +654,33 @@
     const path = s?.pathOf(id)
     if (s && path) s.toggleBookmark({ kind: 'note', target: path, label: displayName(path) })
   }
+  /** What the desktop shell hands every window it opens (`SHELL_SCRIPT` in crates/desktop); absent
+   *  in a browser. */
+  const shell = (window as unknown as { lemmateShell?: { openWindow?: (route: string, x?: number, y?: number) => void; closeWindow?: () => void } }).lemmateShell
+
   /**
-   * Move a tab out into a window of its own (the `#/w/` route). The desktop shell turns this
-   * `window.open` into another app window on the same relay; a browser makes it a popup. The
-   * tab leaves this pane either way, and not onto the reopen stack — the note is not closed,
-   * it is over there.
+   * Move a tab out into a window of its own (the `#/w/` route): from a menu, or dragged out of
+   * every window, in which case `from` says which pane it left and where on the screen it was let
+   * go. The desktop shell opens another app window on the same relay; a browser opens a popup, and
+   * if it blocks that — a drag's end is not a click — the tab stays where it is. Otherwise the tab
+   * leaves its pane, and not onto the reopen stack: the note is not closed, it is over there.
    */
-  function detach(id: string) {
+  function detach(id: string, from?: { pane: number | null; x?: number; y?: number }) {
     const vault = sessionOf(id)?.id
     if (!vault || isBlank(id)) return
-    window.open(`${location.pathname}${location.search}#/w/${vault}/${id}`, '_blank', 'popup,width=960,height=900')
-    close(id, true)
+    const route = `#/w/${vault}/${id}`
+    // Put the new window's tab strip under the pointer, roughly where the tab was let go.
+    const x = from?.x === undefined ? undefined : from.x - 80
+    const y = from?.y === undefined ? undefined : from.y - 20
+    if (shell?.openWindow) shell.openWindow(route, x, y)
+    else {
+      const at = x === undefined || y === undefined ? '' : `,left=${x},top=${y}`
+      if (!window.open(`${location.pathname}${location.search}${route}`, '_blank', `popup,width=960,height=900${at}`)) return
+    }
+    if (from?.pane != null) {
+      panes = removeTab(panes, { tab: id, pane: from.pane })
+      focusedPane = Math.min(focusedPane, panes.length - 1)
+    } else close(id, true)
     closed = closed.filter((c) => c !== id)
   }
   /** Open a note beside the current one, splitting if there is room and reusing a pane if not. */
@@ -996,9 +1012,8 @@
     else if (heldTab) closeWindow()
   })
   function closeWindow() {
-    // The desktop shell opened this window, so only it can close it (see `open_note_window`); a
+    // The desktop shell opened this window, so only it can close it (see `relay_window`); a
     // browser lets a page close a popup it opened itself, and ignores this otherwise.
-    const shell = (window as unknown as { lemmateShell?: { closeWindow?: () => void } }).lemmateShell
     if (shell?.closeWindow) shell.closeWindow()
     else window.close()
   }
@@ -1222,6 +1237,7 @@
           onDetach={canDetach ? detach : undefined}
           onTabDrop={dropTab}
           onTabGone={tabGone}
+          onTabOut={canDetach ? (drag, x, y) => detach(drag.tab, { pane: drag.pane, x, y }) : undefined}
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, moveTab, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, moveTab, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
@@ -83,4 +83,16 @@ test('removeTab: the window a tab was dragged out of', () => {
   assert.deepEqual(removeTab([pane(1, ['a'])], { tab: 'a', pane: 1 }).map((p) => `${p.tabs.length}|${p.active}`), ['0|null'])
   // Nothing to take away.
   assert.equal(removeTab(panes, { tab: 'zz', pane: 1 }), panes)
+})
+
+test('endedOutside: where a drag nobody took was let go', () => {
+  const at = (clientX: number, clientY: number, screenX = 500, screenY = 400) => endedOutside({ clientX, clientY, screenX, screenY }, 1000, 800)
+  assert.equal(at(500, 400), false)
+  assert.equal(at(0, 0), false)
+  assert.equal(at(-1, 400), true)
+  assert.equal(at(500, -30), true)
+  assert.equal(at(1000, 400), true)
+  assert.equal(at(500, 800), true)
+  // No position at all (an engine that does not report one): not outside, so no window opens.
+  assert.equal(at(-200, -200, 0, 0), false)
 })
