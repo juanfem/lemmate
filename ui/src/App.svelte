@@ -9,7 +9,7 @@
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
-  import { unnamedNote } from './lib/notename.ts'
+  import { notePath, unnamedNote } from './lib/notename.ts'
   import { Workspace } from './lib/workspace.svelte.ts'
   import { ulid } from './lib/ulid.ts'
   import FilesPane from './components/FilesPane.svelte'
@@ -793,9 +793,10 @@
       .replace(/\{\{title\}\}/gu, title)
       .replace(/\{\{cursor\}\}/gu, '')
   }
-  async function create(path: string, vault: string | undefined = session?.id) {
+  async function create(typed: string, vault: string | undefined = session?.id) {
     const s = workspace?.get(vault) ?? (solo ? undefined : undefined)
     if (!s) return
+    const path = notePath(typed)
     const title = displayName(path)
     open(s.createNote(path, await template(s, 'Note', title, `# ${title}\n\n`)))
   }

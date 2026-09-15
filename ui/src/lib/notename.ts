@@ -13,3 +13,14 @@ export function unnamedNote(vault: { noteOnly: boolean; vaultLoaded: boolean } |
   if (vault?.noteOnly) return 'shared note'
   return vault?.vaultLoaded ? '(deleted)' : ''
 }
+
+/**
+ * The path a note typed by name gets: leading slashes off, and `.md` on unless it already ends in
+ * `.md` or `.qmd`. Every way of making a note by name goes through here — the palette, and the
+ * folder and vault "new note" prompts, which once wrote `Work/Delta` with no extension at all and
+ * so made a file nothing else recognised as a note.
+ */
+export function notePath(text: string): string {
+  const t = text.trim().replace(/^\/+/u, '')
+  return t.endsWith('.md') || t.endsWith('.qmd') ? t : `${t}.md`
+}

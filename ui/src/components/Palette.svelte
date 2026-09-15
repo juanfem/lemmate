@@ -21,6 +21,7 @@
   import { untrack } from 'svelte'
   import { api, type SearchHit } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
+  import { notePath } from '../lib/notename.ts'
   import type { WorkspaceNote } from '../lib/workspace.svelte.ts'
 
   /**
@@ -102,10 +103,6 @@
     return () => clearTimeout(timer)
   })
 
-  function normalize(text: string): string {
-    const t = text.trim().replace(/^\/+/u, '')
-    return t.endsWith('.md') || t.endsWith('.qmd') ? t : `${t}.md`
-  }
 
   let rows: Row[] = $derived.by(() => {
     const actions: Row[] = commands
@@ -147,8 +144,8 @@
       })
 
     const out = [...scored.slice(0, 30).map((x) => x.row), ...text]
-    if (createVault && !notes.some((n) => n.path === normalize(term)))
-      out.push({ kind: 'New', key: 'new', name: `Create “${normalize(term)}”`, path: label?.(createVault) ?? '', create: normalize(term) })
+    if (createVault && !notes.some((n) => n.path === notePath(term)))
+      out.push({ kind: 'New', key: 'new', name: `Create “${notePath(term)}”`, path: label?.(createVault) ?? '', create: notePath(term) })
     return out
   })
 
@@ -158,7 +155,7 @@
     // ⇧↵ makes a note out of what you typed, whatever the highlighted row happens to be.
     if (e?.shiftKey && createVault && term) {
       onClose()
-      onCreate(normalize(term))
+      onCreate(notePath(term))
       return
     }
     onClose()
