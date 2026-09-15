@@ -229,20 +229,25 @@ fn relay_window<M: Manager<Wry>>(
     url: Url,
 ) -> WebviewWindowBuilder<'_, Wry, M> {
     let handle = app.app_handle().clone();
-    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url)).on_new_window(move |url, _features| {
-        if !handle.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
-            return NewWindowResponse::Allow;
-        }
-        // Built once this callback has returned rather than inside it: the callback runs on
-        // the event loop, and building a window waits for that loop to answer.
-        let handle = handle.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = open_note_window(&handle, url) {
-                tracing::warn!(error = %format!("{e:#}"), "could not open a note window");
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        // The page does its own drag and drop — notes and folders in the tree, tabs between
+        // panes, files onto the editor — and on Windows Tauri's file-drop handler swallows
+        // every HTML5 drag. Nothing listens to that handler's events: there is no IPC.
+        .disable_drag_drop_handler()
+        .on_new_window(move |url, _features| {
+            if !handle.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
+                return NewWindowResponse::Allow;
             }
-        });
-        NewWindowResponse::Deny
-    })
+            // Built once this callback has returned rather than inside it: the callback runs on
+            // the event loop, and building a window waits for that loop to answer.
+            let handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = open_note_window(&handle, url) {
+                    tracing::warn!(error = %format!("{e:#}"), "could not open a note window");
+                }
+            });
+            NewWindowResponse::Deny
+        })
 }
 
 /// A note moved out of the main window. Its page names the note in the document title, which
