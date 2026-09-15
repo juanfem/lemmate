@@ -30,6 +30,7 @@
   import ImportDialog from './components/ImportDialog.svelte'
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
+  import Icon from './components/Icon.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
   let setup = $state<{ config_path: string; suggested_root_dir: string } | null>(null)
@@ -1066,6 +1067,9 @@
         <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
         <span class="here" title={activePath}>{activeTitle}</span>
         <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
+        {#if !solo}
+          <button class="icon" onclick={daily} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
+        {/if}
         <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands">＋</button>
         <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
       </header>
@@ -1078,11 +1082,20 @@
         <div class="side-top">
           <!-- Not an input: search *is* the palette now, and a box you can type into here would
                promise a second, weaker search that only looks at what this pane happens to hold. -->
-          <button class="side-search" onclick={() => (palette = '')}>
-            <span class="mag" aria-hidden="true">⌕</span>
-            <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
-            <kbd>Ctrl K</kbd>
-          </button>
+          <div class="side-row">
+            <button class="side-search" onclick={() => (palette = '')}>
+              <span class="mag" aria-hidden="true">⌕</span>
+              <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
+              <kbd>Ctrl K</kbd>
+            </button>
+            <!-- Beside search rather than in the Files toolbar: the daily note is the one note you
+                 open every day, and it should not depend on which sidebar tab is showing. -->
+            {#if !solo}
+              <button class="side-daily" onclick={daily} title="Today's daily note — opened, or created from Templates/Daily.md (Ctrl+Shift+D)" aria-label="Today's daily note">
+                <Icon name="calendar" size={15} />
+              </button>
+            {/if}
+          </div>
           <div class="side-tabs" role="tablist">
             <button class:on={sidebar === 'files'} role="tab" aria-selected={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
             <button class:on={sidebar === 'tags'} role="tab" aria-selected={sidebar === 'tags'} onclick={() => (sidebar = 'tags')}>Tags</button>
@@ -1366,7 +1379,13 @@
     gap: 0.625rem;
     padding: 0.75rem 0.75rem 0.625rem;
   }
+  .side-row {
+    display: flex;
+    gap: 0.375rem;
+  }
   .side-search {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -1381,9 +1400,24 @@
     color: var(--faint);
     cursor: pointer;
   }
-  .side-search:hover {
+  .side-search:hover,
+  .side-daily:hover {
     color: var(--fg);
     border-color: var(--muted);
+  }
+  /* The search box's height and frame, square: a companion to it rather than a toolbar button. */
+  .side-daily {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 1.875rem;
+    height: 1.875rem;
+    padding: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--muted);
+    cursor: pointer;
   }
   .side-search .mag {
     font-size: 0.9em;
@@ -1560,6 +1594,8 @@
     border-bottom: 1px solid var(--border);
   }
   .topbar .icon {
+    display: grid;
+    place-items: center;
     font: inherit;
     font-size: 1.05rem;
     line-height: 1;

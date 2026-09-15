@@ -457,6 +457,18 @@
       >
         <Icon name="subfolders" />
       </button>
+      <!-- The list shows one folder, so a new note has an obvious home: this one. It stands a
+           little apart from the two view controls before it, because it changes the vault and
+           they only change the list. -->
+      <button
+        class="new"
+        disabled={!selected}
+        onclick={() => selected && (selected.folder ? actions.onCreateIn?.(selected.vault, selected.folder) : actions.onCreateInVault?.(selected.vault))}
+        title={selected ? `New note in ${listTitle}` : 'Pick a folder first'}
+        aria-label={selected ? `New note in ${listTitle}` : 'New note'}
+      >
+        <Icon name="newnote" />
+      </button>
     </div>
     <NoteList
       notes={listed}
@@ -520,7 +532,7 @@
     cursor: pointer;
   }
   .toolbar button:hover:not(:disabled),
-  .list-head button:hover {
+  .list-head button:hover:not(:disabled) {
     background: var(--hover);
     color: var(--fg);
   }
@@ -578,6 +590,13 @@
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--muted);
+  }
+  .list-head .new {
+    margin-left: 0.2rem;
+  }
+  .list-head button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .list-head .n {
     color: var(--faint);

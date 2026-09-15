@@ -324,7 +324,9 @@ one you left it on:
   Obsidian's *File Tree Alternative*. Clicking a folder selects it; clicking the one you are
   already on folds it. The ↳ button in the list header decides whether the list stops at that
   folder or reaches into its subfolders — with subfolders included, each row says which one it
-  came from. Drag the divider between the two halves to re-balance them (double-click resets).
+  came from. The note-with-a-plus at the end of that header makes a **new note in the folder**
+  the list is showing (or at the vault's root, when the vault itself is selected). Drag the
+  divider between the two halves to re-balance them (double-click resets).
 
 The other three toolbar buttons **expand all**, **collapse all**, and **reveal the open note**
 — unfolding the path down to it, selecting its folder in the split view, and scrolling it into
@@ -446,7 +448,9 @@ lives there and underneath it rather than in a column of its own:
   mentions, outgoing links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).
 
-**Daily notes.** `Ctrl+Shift+D` opens (or creates) `Daily/YYYY-MM-DD.md` for today. The path
+**Daily notes.** `Ctrl+Shift+D`, or the calendar button beside the search box (in the top bar on
+a phone), opens `Daily/YYYY-MM-DD.md` for today — creating it from `Templates/Daily.md` if it
+does not exist yet. It goes in the vault of the note you are on. The path
 and format are fixed at present — the per-vault configuration, prev/next-day navigation and
 calendar popover in SPEC §9 are not built.
 
