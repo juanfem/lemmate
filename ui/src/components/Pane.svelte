@@ -33,6 +33,8 @@
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
   import type { OutlineItem } from '../lib/outline.ts'
   import { unnamedNote } from '../lib/notename.ts'
+  import { clampIndex, drawn, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
+  import { beginTabDrag, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
 
   let {
     lookup,
@@ -58,6 +60,7 @@
     onClosePane,
     onDetach,
     onPin,
+    onTabDrop,
     onHistory,
     historyOpen = false,
     onSeq,
@@ -96,6 +99,8 @@
     /** Move a tab out into a window of its own. Absent where there is no second window to have. */
     onDetach?: (id: string) => void
     onPin?: (id: string) => void
+    /** A tab let go over this pane: on its strip, on its page, or against one of its edges. */
+    onTabDrop?: (drag: TabDrag, drop: TabDrop) => void
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
@@ -130,8 +135,8 @@
   }
   let session = $derived(pane.active ? lookup(pane.active) : undefined)
   let activePath = $derived(pane.active ? (pathOf(pane.active) ?? unnamedNote(session)) : '')
-  // Pinned tabs sort first; the rest keep the order they were opened in.
-  let tabs = $derived([...pane.tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a))))
+  // Pinned tabs sort first; the rest keep the order they were opened in, or dragged into.
+  let tabs = $derived(drawn(pane.tabs, pinned))
 
   /** Where the note lives — vault, then folders. Its name is the heading below, not here. */
   let trail = $derived.by(() => {
@@ -173,6 +178,78 @@
     ])
   }
 
+  // ---- dragging tabs (lib/tabmoves.ts has the rules)
+  //
+  // Handled in the capture phase on the whole pane, so a tab over the page never reaches the
+  // editor underneath — CodeMirror would draw its drop cursor, and take a drop as text.
+  let strip: HTMLElement | undefined = $state()
+  /** The outer thirds of a page split the pane; the middle, like the strip, moves the tab in. */
+  const EDGE = 0.3
+
+  function dropAt(e: DragEvent, drag: TabDrag): TabDrop | null {
+    if (strip?.contains(e.target as Node)) {
+      const others = [...strip.querySelectorAll<HTMLElement>('.tab')].filter((el) => el.dataset.tab !== drag.tab)
+      const index = others.filter((el) => {
+        const r = el.getBoundingClientRect()
+        return r.left + r.width / 2 < e.clientX
+      }).length
+      return { pane: pane.id, index }
+    }
+    const r = host.getBoundingClientRect()
+    const x = (e.clientX - r.left) / r.width
+    const side = x < EDGE ? 'left' : x > 1 - EDGE ? 'right' : null
+    const own = drag.pane === pane.id
+    if (side && onSplit && !splitFull && !(own && pane.tabs.length === 1)) return { pane: pane.id, split: side }
+    // The middle of the page a tab already sits in is where it already is.
+    return own ? null : { pane: pane.id, index: Infinity }
+  }
+
+  function dragOver(e: DragEvent) {
+    const drag = tabDrag.current
+    if (!drag || !onTabDrop) return
+    e.stopPropagation()
+    const at = isHistory ? null : dropAt(e, drag)
+    hoverTab(at)
+    if (!at) return
+    e.preventDefault()
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  }
+
+  function drop(e: DragEvent) {
+    const drag = tabDrag.current
+    if (!drag || !onTabDrop) return
+    e.stopPropagation()
+    e.preventDefault()
+    const at = isHistory ? null : dropAt(e, drag)
+    // Before the move: the tab's own element may not survive it to hear `dragend`.
+    endTabDrag()
+    if (at) onTabDrop(drag, at)
+  }
+
+  function dragLeave(e: DragEvent) {
+    if (tabDrag.over?.pane !== pane.id) return
+    if (e.relatedTarget instanceof Node && host.contains(e.relatedTarget)) return
+    hoverTab(null)
+  }
+
+  let over = $derived(tabDrag.over?.pane === pane.id ? tabDrag.over : null)
+  /** Where on the strip the insertion bar goes, in the strip's own scrolling coordinates. */
+  let marker = $derived.by(() => {
+    const drag = tabDrag.current
+    if (!over || !drag || !('index' in over) || !Number.isFinite(over.index) || !strip) return null
+    const others = [...strip.querySelectorAll<HTMLElement>('.tab')].filter((el) => el.dataset.tab !== drag.tab)
+    const at = clampIndex(
+      others.map((el) => el.dataset.tab ?? ''),
+      drag.tab,
+      over.index,
+      pinned,
+    )
+    const next = others[at]
+    const last = others[others.length - 1]
+    return next ? next.offsetLeft - 2 : last ? last.offsetLeft + last.offsetWidth + 1 : 6
+  })
+  let zone = $derived(!over ? null : 'split' in over ? over.split : Number.isFinite(over.index) ? null : 'whole')
+
   // A declarative onmousedown would trip svelte a11y on a non-interactive element; this
   // catches clicks anywhere in the pane (the editor included) without a role.
   $effect(() => {
@@ -183,13 +260,36 @@
   })
 </script>
 
-<section class="pane" class:focused bind:this={host} onfocusin={onFocus}>
+<!-- The drag handlers are a pointer gesture over the pane, not a control; there is nothing here
+     for a role to describe. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<section
+  class="pane"
+  class:focused
+  bind:this={host}
+  onfocusin={onFocus}
+  ondragovercapture={dragOver}
+  ondropcapture={drop}
+  ondragleave={dragLeave}
+>
   <!-- One row of chrome, not two: the tabs say which note, and everything you do *to* the note
        you are looking at sits at the other end of the same strip. Where the note lives moved on
        to the page itself (lib/editor/page.ts), which is what freed the second row. -->
-  <div class="tabs">
+  <div class="tabs" bind:this={strip}>
     {#each tabs as id (id)}
-      <button class="tab" class:active={id === pane.active} class:blank={isBlank(id)} onclick={() => onActivate(id)} oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)} title={pathOf(id)}>
+      <button
+        class="tab"
+        class:active={id === pane.active}
+        class:blank={isBlank(id)}
+        class:dragging={tabDrag.current?.tab === id && tabDrag.current.pane === pane.id}
+        data-tab={id}
+        draggable={onTabDrop && !isHistory ? 'true' : undefined}
+        ondragstart={(e) => beginTabDrag(e, { tab: id, pane: pane.id })}
+        ondragend={endTabDrag}
+        onclick={() => onActivate(id)}
+        oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)}
+        title={pathOf(id)}
+      >
         {#if isHistory}
           <Icon name="history" size={13} />
         {:else if id === pane.active}
@@ -207,6 +307,9 @@
         {/if}
       </button>
     {/each}
+    {#if marker !== null}
+      <span class="insert" style:left="{marker}px" aria-hidden="true"></span>
+    {/if}
     {#if onNewTab && !isHistory}
       <button class="newtab" onclick={onNewTab} title="New tab (Ctrl+T)" aria-label="New tab"><Icon name="plus" size={13} /></button>
     {/if}
@@ -302,6 +405,10 @@
       <p>Open a note from the tree, or press <kbd>Ctrl</kbd>+<kbd>O</kbd>.</p>
     </div>
   {/if}
+  {#if zone}
+    <!-- What letting go here would do: the half the new pane would take, or the whole page. -->
+    <div class="drop-zone {zone}" style:top="{strip?.offsetHeight ?? 0}px" aria-hidden="true"></div>
+  {/if}
 </section>
 
 {#if menu}
@@ -327,12 +434,34 @@
   .pane.focused {
     border-top-color: var(--accent);
   }
+  .pane {
+    position: relative;
+  }
+  .drop-zone {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 5;
+    pointer-events: none;
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-radius: 4px;
+  }
+  .drop-zone.left {
+    right: 50%;
+  }
+  .drop-zone.right {
+    left: 50%;
+  }
   /* Tabs sit *on* the chrome and the active one lifts out of it into the document, so the
      strip and the page below read as one surface with a notch cut in it rather than two
      stacked bars. That is what `flex-end` plus the negative margin buy. The strip is `--panel`
      rather than `--chrome` so the groove of the mode switch, which is `--chrome`, still reads
      as a groove when it sits on it. */
   .tabs {
+    /* For the insertion bar, which is placed in the strip's scrolling coordinates. */
+    position: relative;
     display: flex;
     align-items: flex-end;
     gap: 2px;
@@ -373,6 +502,18 @@
   }
   .tab.blank {
     font-style: italic;
+  }
+  .tab.dragging {
+    opacity: 0.45;
+  }
+  .insert {
+    position: absolute;
+    top: 0.35rem;
+    bottom: 0.35rem;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+    pointer-events: none;
   }
   .tab .label {
     max-width: 12rem;

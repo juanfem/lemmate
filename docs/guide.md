@@ -488,6 +488,12 @@ the last twenty are remembered. The layout, pins and collapsed folders are store
 the browser's local storage, so they are per device, and tabs pointing at notes that no longer
 exist are dropped once the vault has synced.
 
+**Drag tabs** to rearrange them: along the strip to reorder (pinned tabs stay ahead of the rest),
+onto another pane's strip or page to move them there, or onto the left or right third of a page
+to split that pane with the tab in the new half — the part of the page that will change lights
+up while you hold it there. A pane you drag the last tab out of closes. Dragging between windows
+is not supported; use *Move to new window* for that.
+
 **A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window
 with no sidebar — another app window in the desktop app, a popup in a browser. Links, the palette

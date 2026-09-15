@@ -19,6 +19,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
+  import { moveTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -677,6 +678,14 @@
       open(id)
     }
   }
+  /** A tab dragged within this window (lib/tabmoves.ts); a split needs room for another pane. */
+  function dropTab(drag: TabDrag, drop: TabDrop) {
+    const room = solo || narrow.current ? panes.length : MAX_PANES
+    const moved = moveTab(panes, drag, drop, pinned, room, (tab, from) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: from.mode, kind: 'note' }))
+    if (!moved) return
+    panes = moved.panes
+    focusedPane = moved.focused
+  }
   /** A phone has no second window to put a note in: `window.open` there is just another tab. */
   let canDetach = $derived(!solo && !narrow.current)
   let commands: Command[] = $derived([
@@ -1195,6 +1204,7 @@
           splitFull={panes.length >= MAX_PANES}
           onClosePane={panes.length > 1 ? () => closePane(i) : undefined}
           onDetach={canDetach ? detach : undefined}
+          onTabDrop={dropTab}
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
