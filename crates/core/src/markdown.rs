@@ -80,6 +80,14 @@ pub fn parse_options() -> ParseOptions {
     }
 }
 
+/// What [`index`] would derive from the same text, versioned. Bump it whenever a change to the
+/// indexer derives something different from text that has not changed — a construct it starts
+/// or stops looking inside — so the stores built by the old one are re-derived on their next
+/// start ([`crate::store::Store::index_is_current`]).
+///
+/// 2: table cells are indexed like paragraphs.
+pub const INDEX_VERSION: u32 = 2;
+
 pub fn index(source: &str) -> Result<NoteIndex> {
     let tree = markdown::to_mdast(source, &parse_options()).map_err(|e| Error::Markdown(e.to_string()))?;
     let mut ix = NoteIndex::default();

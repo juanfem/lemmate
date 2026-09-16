@@ -258,6 +258,7 @@ async fn run_inner(
     opts: SyncOptions,
     mut local_rx: mpsc::UnboundedReceiver<LocalEvent>,
 ) -> Result<SyncReport> {
+    engine.reindex_if_stale()?;
     engine.reconcile_disk()?;
     engine.maintain_all()?;
 
@@ -779,6 +780,25 @@ impl Engine {
     }
 
     // ---- Startup reconciliation -------------------------------------------------------------
+
+    /// Re-derive every note's tags, links and search text if they were written by an older
+    /// indexer ([`markdown::INDEX_VERSION`]). The text is unchanged, so nothing is stamped as
+    /// edited; only what the indexer reads out of it is new.
+    pub fn reindex_if_stale(&mut self) -> Result<()> {
+        if self.store.index_is_current()? {
+            return Ok(());
+        }
+        let notes: Vec<(NoteId, String, String)> =
+            self.notes.iter().map(|(id, s)| (*id, s.path.clone(), s.doc.text())).collect();
+        for (id, path, text) in &notes {
+            let ix = markdown::index(text)?;
+            self.store.reindex_note(*id, &ix)?;
+            self.discover_attachments(path, &ix)?;
+        }
+        self.store.mark_index_current()?;
+        info!(vault_id = %self.vault_id, notes = notes.len(), "re-indexed notes for a newer indexer");
+        Ok(())
+    }
 
     /// Bring the store in line with the directory: files changed/added/removed while we were
     /// not running are handled exactly like live watcher events.
@@ -2108,6 +2128,33 @@ mod tests {
         drop(again);
         let other = SyncOptions { vault_id: Some(VaultId::new()), ..base.clone() };
         assert!(Engine::open(&other).is_err());
+    }
+
+    /// A sidecar indexed by an older indexer is re-derived on start, once.
+    #[test]
+    fn stale_index_is_rederived_on_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SyncOptions {
+            vault_dir: dir.path().into(),
+            server_url: None,
+            vault_id: None,
+            once: true,
+            ca_cert: None,
+            token: None,
+        };
+        Projection::new(dir.path()).write("t.md", "| a |\n|---|\n| #in-table |\n").unwrap();
+        let mut e = Engine::open(&opts).unwrap();
+        e.reconcile_disk().unwrap();
+        let id = e.by_path["t.md"];
+        // What an older indexer left behind: nothing read out of the table, no version recorded.
+        e.store.reindex_note(id, &NoteIndex::default()).unwrap();
+        e.store.meta_clear("index_version").unwrap();
+        drop(e);
+
+        let mut e = Engine::open(&opts).unwrap();
+        e.reindex_if_stale().unwrap();
+        assert_eq!(e.store.tags_in_vault(e.vault_id).unwrap(), vec![("in-table".to_owned(), 1)]);
+        assert!(e.store.index_is_current().unwrap());
     }
 
     #[test]

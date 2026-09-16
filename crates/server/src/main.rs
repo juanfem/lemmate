@@ -64,7 +64,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::parse();
     std::fs::create_dir_all(&cfg.data_dir).with_context(|| format!("creating {}", cfg.data_dir.display()))?;
     std::fs::create_dir_all(cfg.data_dir.join("attachments"))?;
-    let store = Store::open(cfg.data_dir.join("lemmate.db")).context("opening lemmate.db")?;
+    let mut store = Store::open(cfg.data_dir.join("lemmate.db")).context("opening lemmate.db")?;
+    if let Some(n) = lemmate_server::app::reindex_if_stale(&mut store).context("re-indexing notes")? {
+        info!(notes = n, "re-indexed notes for a newer indexer");
+    }
 
     let options = ServerOptions {
         attachments_dir: cfg.data_dir.join("attachments"),

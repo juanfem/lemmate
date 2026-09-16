@@ -455,7 +455,7 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
                 if existing.is_none() {
                     let text = store.load_doc(DocId::Note(id))?.text();
                     if !text.is_empty() {
-                        index_note_text(&mut store, id, &path, &text, &attachment_paths)?;
+                        index_note_text(&mut store, id, &path, &text, &attachment_paths, true)?;
                     }
                 }
             }
@@ -468,7 +468,7 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
                     .into_iter()
                     .map(|(p, _)| p)
                     .collect();
-                index_note_text(&mut store, id, &row.path, &n.text(), &attachment_paths)?;
+                index_note_text(&mut store, id, &row.path, &n.text(), &attachment_paths, true)?;
             } else {
                 // No vault entry yet: keep the FTS/tags fresh; the title lands when the entry does.
                 store.index_note(id, &markdown::index(&n.text())?)?;
@@ -479,16 +479,44 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
     Ok(())
 }
 
+/// Re-derive every note's metadata if the store's was written by an older indexer
+/// ([`markdown::INDEX_VERSION`]): a note indexed before the indexer learned to read a construct
+/// would otherwise keep its old tags, links and search text until somebody next edits it.
+/// Returns how many notes were re-derived, or `None` when the store was already current.
+pub fn reindex_if_stale(store: &mut Store) -> lemmate_core::Result<Option<usize>> {
+    if store.index_is_current()? {
+        return Ok(None);
+    }
+    let mut count = 0;
+    for (vault_id, _) in store.vaults()? {
+        let attachment_paths: Vec<String> =
+            store.load_vault_doc(vault_id)?.attachment_entries().into_iter().map(|(p, _)| p).collect();
+        for row in store.list_notes(vault_id)? {
+            let text = store.load_doc(DocId::Note(row.id))?.text();
+            index_note_text(store, row.id, &row.path, &text, &attachment_paths, false)?;
+            count += 1;
+        }
+    }
+    store.mark_index_current()?;
+    Ok(Some(count))
+}
+
 /// Index one note's text: tags, links, FTS, title, and which vault attachments it references.
+/// `edited` stamps the note as changed; a re-derivation of unchanged text does not.
 fn index_note_text(
     store: &mut Store,
     id: NoteId,
     path: &str,
     text: &str,
     attachment_paths: &[String],
+    edited: bool,
 ) -> lemmate_core::Result<()> {
     let ix = markdown::index(text)?;
-    store.index_note(id, &ix)?;
+    if edited {
+        store.index_note(id, &ix)?;
+    } else {
+        store.reindex_note(id, &ix)?;
+    }
     let mut paths: Vec<String> = Vec::new();
     let targets = ix
         .wikilinks

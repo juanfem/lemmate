@@ -10,10 +10,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::doc::NoteDoc;
 use crate::error::Result;
 use crate::ids::{DocId, NoteId, VaultId};
-use crate::markdown::NoteIndex;
+use crate::markdown::{self, NoteIndex};
 use crate::vault_doc::VaultDoc;
 
 pub const SCHEMA_VERSION: u32 = 8;
+
+/// `meta` key holding the [`markdown::INDEX_VERSION`] the derived rows were written with.
+const INDEX_VERSION_KEY: &str = "index_version";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_updates (
@@ -742,12 +745,38 @@ impl Store {
     /// touching its title left the column exactly where it was, so a change made on one device
     /// was invisible to another that was not looking at that note.
     pub fn index_note(&mut self, id: NoteId, ix: &NoteIndex) -> Result<()> {
+        self.write_index(id, ix, true)
+    }
+
+    /// [`Store::index_note`] for text that has not changed, only the indexer reading it: the
+    /// derived rows are replaced and `updated_at` is left alone. A stamp here would tell every
+    /// offline client that every note had just been edited, and date the whole file list to
+    /// the moment the server restarted.
+    pub fn reindex_note(&mut self, id: NoteId, ix: &NoteIndex) -> Result<()> {
+        self.write_index(id, ix, false)
+    }
+
+    /// Whether the derived rows were written by this build's indexer
+    /// ([`markdown::INDEX_VERSION`]). A store that has never recorded one is stale.
+    pub fn index_is_current(&self) -> Result<bool> {
+        let stored = self.meta_get(INDEX_VERSION_KEY)?.and_then(|v| v.parse::<u32>().ok());
+        Ok(stored == Some(markdown::INDEX_VERSION))
+    }
+
+    /// Record that every note has been re-derived with this build's indexer.
+    pub fn mark_index_current(&mut self) -> Result<()> {
+        self.meta_set(INDEX_VERSION_KEY, &markdown::INDEX_VERSION.to_string())
+    }
+
+    fn write_index(&mut self, id: NoteId, ix: &NoteIndex, stamp: bool) -> Result<()> {
         let sid = id.to_string();
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![sid],
-        )?;
+        if stamp {
+            tx.execute(
+                "UPDATE notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                params![sid],
+            )?;
+        }
         tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![sid])?;
         tx.execute("DELETE FROM note_links WHERE note_id = ?1", params![sid])?;
         tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![sid])?;
@@ -1675,6 +1704,27 @@ mod tests {
         store.index_note(id, &markdown::index("# n\n\nrewritten\n").unwrap()).unwrap();
         let second = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
         assert!(second > first, "a body-only change must move updated_at: {first} -> {second}");
+    }
+
+    /// A store is stale until marked, and re-deriving a note replaces its rows without dating
+    /// it: the text did not change, only what the indexer reads out of it.
+    #[test]
+    fn reindexing_for_a_new_indexer_leaves_the_stamp_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.index_is_current().unwrap(), "a store that never recorded a version is stale");
+        let vault = VaultId::new();
+        let id = NoteId::new();
+        store.upsert_note(id, vault, "n.md", Some("n")).unwrap();
+        store.index_note(id, &markdown::index("#old\n").unwrap()).unwrap();
+        let first = store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.reindex_note(id, &markdown::index("#new\n").unwrap()).unwrap();
+        assert_eq!(store.tags_in_vault(vault).unwrap(), vec![("new".to_owned(), 1)]);
+        assert_eq!(store.list_notes(vault).unwrap()[0].updated_at.clone().expect("listed"), first);
+
+        store.mark_index_current().unwrap();
+        assert!(store.index_is_current().unwrap());
     }
 
     /// The mirror image: re-recording a row that already says exactly this must *not* move the
