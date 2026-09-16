@@ -184,6 +184,219 @@ class MarkerWidget extends WidgetType {
 
 const hide = Decoration.replace({})
 
+/** A cell's content, as the few inline shapes a rendered table draws. */
+export type Inline =
+  | { kind: 'text'; text: string }
+  | { kind: 'em' | 'strong' | 's'; children: Inline[] }
+  | { kind: 'code'; text: string }
+  | { kind: 'link'; href: string; children: Inline[] }
+  | { kind: 'wikilink'; target: string; label: string }
+  | { kind: 'tag'; text: string }
+  | { kind: 'math'; tex: string }
+
+export interface TableCell {
+  /** Offset of the cell's source from `base` (the widget's start) — where a click puts the caret. */
+  at: number
+  content: Inline[]
+}
+
+export interface TableModel {
+  align: ('left' | 'center' | 'right' | null)[]
+  header: (TableCell | null)[]
+  rows: (TableCell | null)[][]
+}
+
+const WRAPPERS: Record<string, 'em' | 'strong' | 's'> = { Emphasis: 'em', StrongEmphasis: 'strong', Strikethrough: 's' }
+const MARKS = new Set(['EmphasisMark', 'StrikethroughMark', 'CodeMark', 'LinkMark', 'URL', 'LinkTitle', 'LinkLabel'])
+
+/** The inline content between `from` and `to` under `node`: children rendered, gaps as text. */
+function inlines(doc: (f: number, t: number) => string, node: SyntaxNode, from: number, to: number): Inline[] {
+  const out: Inline[] = []
+  const text = (f: number, t: number) => {
+    if (t > f) out.push({ kind: 'text', text: doc(f, t) })
+  }
+  let pos = from
+  for (let c = node.firstChild; c; c = c.nextSibling) {
+    if (c.from < from || c.to > to) continue
+    text(pos, c.from)
+    pos = c.to
+    const src = doc(c.from, c.to)
+    if (c.name in WRAPPERS) out.push({ kind: WRAPPERS[c.name]!, children: inlines(doc, c, c.from, c.to) })
+    else if (c.name === 'InlineCode') out.push({ kind: 'code', text: src.replace(/^`+/u, '').replace(/`+$/u, '').trim() })
+    else if (c.name === 'Link') {
+      // `[text](url "title")`: the text is what sits between the first two marks.
+      const url = c.getChild('URL')
+      const marks = c.getChildren('LinkMark')
+      const inner = marks.length >= 2 ? inlines(doc, c, marks[0]!.to, marks[1]!.from) : [{ kind: 'text' as const, text: src }]
+      out.push({ kind: 'link', href: url ? doc(url.from, url.to) : '', children: inner })
+    } else if (c.name === 'WikiLink' || c.name === 'WikiEmbed') {
+      // Inside a table the alias pipe is written `\|`, or it would end the cell.
+      const [targetPart, label] = src.slice(c.name === 'WikiLink' ? 2 : 3, -2).split(/\\?\|/u, 2)
+      out.push({ kind: 'wikilink', target: targetPart!.split('#')[0]!.trim(), label: (label ?? targetPart!).trim() })
+    } else if (c.name === 'NoteTag') out.push({ kind: 'tag', text: src })
+    else if (c.name === 'InlineMath') out.push({ kind: 'math', tex: src.slice(1, -1) })
+    else if (c.name === 'Escape') out.push({ kind: 'text', text: src.slice(1) })
+    else if (!MARKS.has(c.name)) out.push({ kind: 'text', text: src })
+  }
+  text(pos, to)
+  // Adjacent text runs (an escape splits one) read better, and compare equal, as one.
+  return out.reduce<Inline[]>((acc, it) => {
+    const last = acc[acc.length - 1]
+    if (it.kind === 'text' && last?.kind === 'text') last.text += it.text
+    else acc.push(it)
+    return acc
+  }, [])
+}
+
+/**
+ * What a GFM `Table` node draws: the column alignment from the delimiter row, and each row's
+ * cells by column. The parser leaves an empty cell out altogether, so a cell's column is the
+ * count of pipes before it — less the leading one, when the row has it.
+ */
+export function tableModel(doc: (f: number, t: number) => string, table: SyntaxNode, base = table.from): TableModel {
+  const model: TableModel = { align: [], header: [], rows: [] }
+  const cells = (row: SyntaxNode): (TableCell | null)[] => {
+    const out: (TableCell | null)[] = []
+    let pipes = 0
+    let leading = false
+    for (let c = row.firstChild; c; c = c.nextSibling) {
+      if (c.name === 'TableDelimiter') {
+        if (c.from === row.from) leading = true
+        pipes++
+      } else if (c.name === 'TableCell') {
+        const col = pipes - (leading ? 1 : 0)
+        while (out.length < col) out.push(null)
+        out[col] = { at: c.from - base, content: inlines(doc, c, c.from, c.to) }
+      }
+    }
+    return out
+  }
+  for (let c = table.firstChild; c; c = c.nextSibling) {
+    if (c.name === 'TableHeader') model.header = cells(c)
+    else if (c.name === 'TableRow') model.rows.push(cells(c))
+    else if (c.name === 'TableDelimiter') {
+      model.align = doc(c.from, c.to)
+        .replace(/^\s*\|/u, '')
+        .replace(/\|\s*$/u, '')
+        .split('|')
+        .map((d) => {
+          const s = d.trim()
+          const l = s.startsWith(':')
+          const r = s.endsWith(':')
+          return l && r ? 'center' : r ? 'right' : l ? 'left' : null
+        })
+    }
+  }
+  // GFM gives the table the header's width: a short row is padded, a long one cut.
+  const fit = (cells: (TableCell | null)[]) => Array.from({ length: model.align.length }, (_, i) => cells[i] ?? null)
+  return { align: model.align, header: fit(model.header), rows: model.rows.map(fit) }
+}
+
+function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string) => void) {
+  for (const it of content) {
+    switch (it.kind) {
+      case 'text':
+        parent.append(it.text)
+        break
+      case 'em':
+      case 'strong':
+      case 's': {
+        const el = document.createElement(it.kind)
+        renderInlines(el, it.children, open)
+        parent.append(el)
+        break
+      }
+      case 'code': {
+        const el = document.createElement('code')
+        el.textContent = it.text
+        parent.append(el)
+        break
+      }
+      case 'link': {
+        const a = document.createElement('a')
+        a.href = it.href
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        renderInlines(a, it.children, open)
+        parent.append(a)
+        break
+      }
+      case 'wikilink':
+        parent.append(new LinkWidget(it.label, it.target, open).toDOM())
+        break
+      case 'tag': {
+        const el = document.createElement('span')
+        el.className = 'cm-tag'
+        el.textContent = it.text
+        parent.append(el)
+        break
+      }
+      case 'math':
+        parent.append(new MathWidget(it.tex, false).toDOM())
+        break
+    }
+  }
+}
+
+class TableWidget extends WidgetType {
+  readonly source: string
+  readonly model: TableModel
+  readonly open: (t: string) => void
+  constructor(source: string, model: TableModel, open: (t: string) => void) {
+    super()
+    this.source = source
+    this.model = model
+    this.open = open
+  }
+  eq(other: TableWidget) {
+    return other.source === this.source
+  }
+  toDOM(view: EditorView) {
+    // The wrapper scrolls a table wider than the measure, and carries the gap around it as
+    // padding — a margin would sit outside the rect the height map measures (see `.cm-heading`).
+    const wrap = document.createElement('div')
+    wrap.className = 'cm-table'
+    const table = document.createElement('table')
+    const row = (cells: (TableCell | null)[], tag: 'th' | 'td') => {
+      const tr = document.createElement('tr')
+      for (let i = 0; i < this.model.align.length; i++) {
+        const el = document.createElement(tag)
+        const align = this.model.align[i]
+        if (align) el.style.textAlign = align
+        const cell = cells[i]
+        if (cell) {
+          renderInlines(el, cell.content, this.open)
+          el.dataset.at = String(cell.at)
+        }
+        tr.append(el)
+      }
+      return tr
+    }
+    const thead = document.createElement('thead')
+    thead.append(row(this.model.header, 'th'))
+    const tbody = document.createElement('tbody')
+    for (const r of this.model.rows) tbody.append(row(r, 'td'))
+    table.append(thead)
+    if (this.model.rows.length > 0) table.append(tbody)
+    wrap.append(table)
+    // Clicking a cell edits it: the caret goes to the start of that cell's source, which puts
+    // the selection on the table and reveals the markdown. Links inside still follow.
+    wrap.addEventListener('mousedown', (e) => {
+      const target = e.target as HTMLElement
+      if (target.closest('a') || !view.state.facet(EditorView.editable)) return
+      const at = target.closest<HTMLElement>('[data-at]')?.dataset.at
+      const start = view.posAtDOM(wrap)
+      e.preventDefault()
+      view.dispatch({ selection: { anchor: start + (at === undefined ? 0 : Number(at)) } })
+      view.focus()
+    })
+    return wrap
+  }
+  ignoreEvent() {
+    return true
+  }
+}
+
 class CalloutTitle extends WidgetType {
   readonly title: string
   constructor(title: string) {
@@ -449,7 +662,16 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
           case 'Table': {
             const fromLine = state.doc.lineAt(node.from).number
             const toLine = state.doc.lineAt(node.to).number
-            for (let ln = fromLine; ln <= toLine; ln++) push(state.doc.line(ln).from, state.doc.line(ln).from, Decoration.line({ class: 'cm-table-row' }))
+            if (revealed(state, node.from, node.to)) {
+              for (let ln = fromLine; ln <= toLine; ln++) push(state.doc.line(ln).from, state.doc.line(ln).from, Decoration.line({ class: 'cm-table-row' }))
+              break
+            }
+            // A block widget has to cover whole lines; a table's node starts after any indent.
+            const from = state.doc.line(fromLine).from
+            const to = state.doc.line(toLine).to
+            const doc = (f: number, t: number) => state.sliceDoc(f, t)
+            const model = tableModel(doc, n, from)
+            push(from, to, Decoration.replace({ widget: new TableWidget(state.sliceDoc(from, to), model, opts.openLink), block: true }))
             break
           }
           default:

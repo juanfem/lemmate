@@ -123,6 +123,14 @@ const theme = EditorView.theme({
   '.cm-codeblock': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', paddingLeft: '0.75em', paddingRight: '0.75em' },
   '.cm-codeblock-fence': { color: 'var(--muted)', fontSize: '0.8em' },
   '.cm-table-row': { fontFamily: 'var(--mono)', fontSize: '0.9em' },
+  // The rendered table. The wrapper scrolls a table wider than the measure and holds the gap
+  // around it as padding, for the same measuring reason as `.cm-heading`.
+  '.cm-table': { overflowX: 'auto', padding: '0.4em 0', cursor: 'text' },
+  '.cm-table table': { borderCollapse: 'collapse', fontSize: '0.95em', lineHeight: '1.45' },
+  '.cm-table th, .cm-table td': { border: '1px solid var(--border)', padding: '0.3em 0.7em', textAlign: 'left', verticalAlign: 'top' },
+  '.cm-table th': { fontWeight: '600', background: 'var(--panel)' },
+  '.cm-table code': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', borderRadius: '3px', padding: '0 0.2em' },
+  '.cm-table a:not(.cm-wikilink)': { color: 'var(--accent)' },
   // Source mode drops the prose face along with the decorations: it is code, so it looks it.
   '&.cm-mode-source .cm-scroller': { fontFamily: 'var(--mono)', fontSize: '0.92em' },
   // Nothing in reading mode is editable, so the caret, the active line and the fold gutter
