@@ -115,12 +115,14 @@ fn walk(node: &Node, ix: &mut NoteIndex, plain: &mut String) {
             collect_links(&h.children, ix);
             ix.headings.push(Heading { depth: h.depth, text });
         }
-        Node::Paragraph(p) => {
-            let text = inline_text(&p.children);
+        // A table cell holds inline content just as a paragraph does, and the same links and tags.
+        Node::Paragraph(_) | Node::TableCell(_) => {
+            let children = node.children().map_or(&[][..], Vec::as_slice);
+            let text = inline_text(children);
             scan_inline(&text, ix);
             plain.push_str(&text);
             plain.push('\n');
-            collect_links(&p.children, ix);
+            collect_links(children, ix);
         }
         Node::Math(_) | Node::InlineMath(_) => ix.has_math = true,
         Node::ListItem(li) if li.checked.is_some() => ix.has_tasks = true,
@@ -237,7 +239,11 @@ pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str) -> Option<S
         rest = &rest[i + 2..];
         let Some(end) = rest.find("]]") else { break };
         let inner = &rest[..end];
+        // Inside a table the alias pipe is escaped, `[[Plan\|label]]`; the `\` goes with the suffix.
         let (target, suffix) = match inner.find(['#', '|']) {
+            Some(k) if inner[..k].ends_with('\\') && inner[k..].starts_with('|') => {
+                (&inner[..k - 1], &inner[k - 1..])
+            }
             Some(k) => (&inner[..k], &inner[k..]),
             None => (inner, ""),
         };
@@ -314,6 +320,11 @@ mod tests {
         assert_eq!(
             rewrite_wikilinks("[[Plan]] [[Projects/Plan]]", "Projects/Plan.md", "Done/Plan.md").unwrap(),
             "[[Plan]] [[Done/Plan]]"
+        );
+        // A table cell escapes the alias pipe.
+        assert_eq!(
+            rewrite_wikilinks("| [[Plan\\|the plan]] |", "Projects/Plan.md", "Archive/Roadmap.md").unwrap(),
+            "| [[Roadmap\\|the plan]] |"
         );
     }
 

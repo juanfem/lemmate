@@ -97,7 +97,9 @@ function walk(node: Nodes, ix: NoteIndex, plain: string[]): void {
       ix.headings.push({ depth: node.depth, text })
       break
     }
-    case 'paragraph': {
+    // A table cell holds inline content just as a paragraph does, and the same links and tags.
+    case 'paragraph':
+    case 'tableCell': {
       const text = inlineText(node.children)
       scanInline(text, ix)
       plain.push(text)

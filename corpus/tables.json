@@ -1,0 +1,41 @@
+{
+  "title": "Tables",
+  "front_matter": null,
+  "tags": [
+    "in-table"
+  ],
+  "wikilinks": [
+    {
+      "target": "Plain",
+      "embed": false
+    },
+    {
+      "target": "Aliased",
+      "label": "shown label",
+      "embed": false
+    },
+    {
+      "target": "Deep",
+      "heading": "Part",
+      "label": "with heading",
+      "embed": false
+    },
+    {
+      "target": "chart.png",
+      "embed": true
+    }
+  ],
+  "links": [
+    "https://example.com/t"
+  ],
+  "headings": [
+    {
+      "depth": 1,
+      "text": "Tables"
+    }
+  ],
+  "has_math": true,
+  "has_tasks": false,
+  "code_langs": [],
+  "plain_text": ""
+}

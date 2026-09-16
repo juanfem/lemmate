@@ -14,7 +14,8 @@ export function rewriteWikilinks(text: string, oldPath: string, newPath: string)
   const newBase = base(newStem)
   let changed = false
   const out = text.replace(/\[\[([^\]]*)\]\]/gu, (whole, inner: string) => {
-    const k = inner.search(/[#|]/u)
+    // Inside a table the alias pipe is escaped, `[[Plan\|label]]`; the `\` goes with the suffix.
+    const k = inner.search(/#|\\?\|/u)
     const target = (k === -1 ? inner : inner.slice(0, k)).trim()
     const suffix = k === -1 ? '' : inner.slice(k)
     let r: string | null = null

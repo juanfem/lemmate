@@ -30,5 +30,7 @@ test('wikilink rewrite mirrors the Rust rules', async () => {
     'see [[Archive/Roadmap]] and [[Roadmap|the plan]] and [[Archive/Roadmap#Goals]] but not [[Planning]]',
   )
   assert.equal(rewriteWikilinks('[[Plan]] [[Projects/Plan]]', 'Projects/Plan.md', 'Done/Plan.md'), '[[Plan]] [[Done/Plan]]')
+  // A table cell escapes the alias pipe.
+  assert.equal(rewriteWikilinks('| [[Plan\\|the plan]] |', 'Projects/Plan.md', 'Archive/Roadmap.md'), '| [[Roadmap\\|the plan]] |')
   assert.equal(rewriteWikilinks('nothing', 'a.md', 'b.md'), null)
 })
