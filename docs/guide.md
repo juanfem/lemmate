@@ -397,8 +397,9 @@ the note you are reading is on the note's own page rather than in a panel beside
 
 - **Files** lists folders and their notes. Rows carry the date they last changed, and the list
   header switches between **Recent** and **Name** order. Where the server or relay cannot
-  answer with a listing, rows show no date and the order falls back to the alphabet. The
-  trash-can button at the end of its toolbar opens the **Trash** (below).
+  answer with a listing, rows show no date and the order falls back to the alphabet. Its
+  toolbar starts with three views: the **single tree**, **folders and notes**, and the
+  **Trash** (below).
 - **Tags** is a tree, because tags are one: `#projects/alpha` sits under `#projects`, named by
   its last segment alone, and folds like a folder does. A branch point is drawn even where
   nothing is tagged with it — a vault can use `#projects/alpha` and never `#projects`. Clicking
@@ -529,9 +530,10 @@ Snapshots are kept forever; the raw update log behind them is pruned after `--re
 
 **Trash.** *Move to trash* removes the note from the vault doc; the file disappears from every
 synced replica and the tab closes everywhere. The note's update log and versions stay in the
-store, so nothing is destroyed yet. The trash-can button at the end of the Files toolbar — or
-*Show trash* in the palette — lists a vault's deleted notes, newest first, starting with the
-vault of the note you are on (a picker switches vaults when you have more than one). **Restore**
+store, so nothing is destroyed yet. The trash view — the trash-can beside the two layouts at the
+start of the Files toolbar, or *Show trash* in the palette — lists a vault's deleted notes,
+newest first, starting with the vault of the note you are on (a picker switches vaults when
+you have more than one). Pick either layout to go back to the files. **Restore**
 puts a note back at its old path, or at `… (restored).md` if something has taken that path
 since, and opens it; on a synced vault its file comes back on every replica.
 

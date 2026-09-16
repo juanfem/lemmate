@@ -7,7 +7,6 @@
     vaults = [],
     version,
     onRestored,
-    onBack,
   }: {
     /** The vault to show first: the open note's. */
     vault: string
@@ -15,7 +14,6 @@
     vaults?: { id: string; label: string }[]
     version: number
     onRestored: (id: string) => void
-    onBack: () => void
   } = $props()
   let picked: string | null = $state(null)
   let vault = $derived(picked ?? initial)
@@ -47,15 +45,14 @@
 </script>
 
 <div class="trash">
-  <div class="head">
-    <button class="back" onclick={onBack} title="Back to files" aria-label="Back to files">‹</button>
-    <strong>Trash</strong>
-    {#if vaults.length > 1}
+  <!-- The toolbar above already says this is the trash; only a choice of vault needs a row. -->
+  {#if vaults.length > 1}
+    <div class="head">
       <select value={vault} onchange={(e) => (picked = e.currentTarget.value)} aria-label="Vault">
         {#each vaults as v (v.id)}<option value={v.id}>{v.label}</option>{/each}
       </select>
-    {/if}
-  </div>
+    </div>
+  {/if}
   {#if error}<p class="muted">{error}</p>{/if}
   <ul>
     {#each items as n (n.id)}
@@ -71,9 +68,7 @@
 <style>
   .trash { overflow: auto; font-size: 0.85rem; }
   .head { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--border); }
-  .head .back { border: 0; background: none; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: 0 0.3rem; }
-  .head .back:hover { color: var(--fg); background: var(--hover); }
-  select { margin-left: auto; min-width: 0; font: inherit; font-size: 0.8rem; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.1rem 0.3rem; }
+  select { flex: 1; min-width: 0; font: inherit; font-size: 0.8rem; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.1rem 0.3rem; }
   ul { list-style: none; margin: 0; padding: 0.4rem; display: flex; flex-direction: column; gap: 0.4rem; }
   li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
   button { font: inherit; font-size: 0.8rem; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 6px; padding: 0.2rem 0.6rem; cursor: pointer; }

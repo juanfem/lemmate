@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte'
+  import { tick, untrack, type Snippet } from 'svelte'
   import Tree from './Tree.svelte'
   import FolderTree from './FolderTree.svelte'
   import NoteList from './NoteList.svelte'
@@ -39,7 +39,8 @@
     activeId,
     activeVault,
     onOpen,
-    onShowTrash,
+    trash = $bindable(false),
+    trashView,
     actions = {},
     revealFolder = $bindable(),
   }: {
@@ -47,8 +48,10 @@
     activeId: string | null
     activeVault?: string | null
     onOpen: (id: string) => void
-    /** Deleted notes are one step away from where they were deleted, not only in the palette. */
-    onShowTrash?: () => void
+    /** The third view beside the two layouts: the notes deleted from them. Bound out so the
+     *  palette can open it. Never remembered — a reload lands on the files, not on the trash. */
+    trash?: boolean
+    trashView?: Snippet
     actions?: TreeActions
     /** Bound out for the palette: picking a folder there has to reach the selection in here,
      *  which outlives a switch between the two layouts and so cannot live in either view. */
@@ -187,6 +190,7 @@
   }
 
   revealFolder = (vault: string, folder: string) => {
+    trash = false
     setMode('split')
     select(vault, folder)
     for (const a of ancestors(folder)) collapsed[folderKey(vault, a)] = false
@@ -392,25 +396,31 @@
 >
   <div class="toolbar">
     <div class="modes">
-      <button class:on={mode === 'tree'} onclick={() => setMode('tree')} title="Single tree" aria-label="Single tree">
+      <button class:on={!trash && mode === 'tree'} onclick={() => ((trash = false), setMode('tree'))} title="Single tree" aria-label="Single tree">
         <Icon name="tree" />
       </button>
-      <button class:on={mode === 'split'} onclick={() => setMode('split')} title="Folders and notes" aria-label="Folders and notes">
+      <button class:on={!trash && mode === 'split'} onclick={() => ((trash = false), setMode('split'))} title="Folders and notes" aria-label="Folders and notes">
         <Icon name="split" />
       </button>
+      {#if trashView}
+        <button class:on={trash} onclick={() => (trash = true)} title="Trash — deleted notes, and restoring them" aria-label="Trash">
+          <Icon name="trash" />
+        </button>
+      {/if}
     </div>
-    <span class="gap">{#if picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
-    <button onclick={expandAll} title="Expand all" aria-label="Expand all"><Icon name="expand" /></button>
-    <button onclick={collapseAll} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
-    <button onclick={reveal} disabled={!activeId} title="Reveal the open note" aria-label="Reveal the open note">
-      <Icon name="locate" />
-    </button>
-    {#if onShowTrash}
-      <button onclick={onShowTrash} title="Trash — deleted notes, and restoring them" aria-label="Trash"><Icon name="trash" /></button>
+    <span class="gap">{#if !trash && picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
+    {#if !trash}
+      <button onclick={expandAll} title="Expand all" aria-label="Expand all"><Icon name="expand" /></button>
+      <button onclick={collapseAll} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
+      <button onclick={reveal} disabled={!activeId} title="Reveal the open note" aria-label="Reveal the open note">
+        <Icon name="locate" />
+      </button>
     {/if}
   </div>
 
-  {#if mode === 'tree'}
+  {#if trash && trashView}
+    {@render trashView()}
+  {:else if mode === 'tree'}
     <Tree {vaults} {activeId} {activeVault} {collapsed} onToggle={toggle} {browser} {actions} />
   {:else}
     <div class="folders-wrap" style:height="{foldersHeight}px">

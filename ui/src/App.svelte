@@ -239,7 +239,9 @@
   let presenceByPane: Record<number, string[]> = $state({})
   let layoutRestored = $state(false)
 
-  let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' | 'trash' = $state('files')
+  let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' = $state('files')
+  /** The Files tab's third view, beside its two layouts (FilesPane). */
+  let trashOpen = $state(false)
   /** The tag the Tags pane is listing. Here rather than in the pane: a tag chip at the foot of
    *  a note picks one too, and the pane is unmounted whenever another tab is showing. */
   let tagFilter: string | null = $state(null)
@@ -729,7 +731,7 @@
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', shortcut: 'Ctrl+Shift+R', run: () => openHistory() },
-    { id: 'trash', label: 'Show trash', run: () => (sidebar = 'trash') },
+    { id: 'trash', label: 'Show trash', run: () => ((sidebar = 'files'), (trashOpen = true)) },
     { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
@@ -1111,7 +1113,7 @@
             activeId={active}
             activeVault={session?.id ?? null}
             onOpen={open}
-            onShowTrash={() => (sidebar = 'trash')}
+            bind:trash={trashOpen}
             actions={{
               onCreateIn: createInFolder,
               onRenameFolder: renameFolder,
@@ -1128,7 +1130,18 @@
               onBookmarkNote: bookmarkNote,
               onMove: moveDropped,
             }}
-          />
+          >
+            {#snippet trashView()}
+              {#if session}
+                <TrashPane
+                  vault={session.id}
+                  vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
+                  version={tagsVersion}
+                  onRestored={(id) => open(id)}
+                />
+              {/if}
+            {/snippet}
+          </FilesPane>
           {#if sharedWithMe.length}
             <nav class="shared">
               <p class="muted">Shared with me</p>
@@ -1147,16 +1160,6 @@
               bind:selected={tagFilter}
               onOpen={open}
               onMenu={(t, e) => tagMenu(t, session.id, e)}
-            />
-          {/if}
-        {:else if sidebar === 'trash'}
-          {#if session}
-            <TrashPane
-              vault={session.id}
-              vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
-              version={tagsVersion}
-              onRestored={(id) => open(id)}
-              onBack={() => (sidebar = 'files')}
             />
           {/if}
         {:else}
