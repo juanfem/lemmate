@@ -2,6 +2,7 @@
 // tags, and TeX math. They produce syntax nodes the live-preview plugin decorates.
 
 import type { BlockContext, InlineContext, Line, MarkdownExtension } from '@lezer/markdown'
+import { LanguageDescription } from '@codemirror/language'
 import { Tag, styleTags, tags as t } from '@lezer/highlight'
 
 export const wikiLinkTag = Tag.define()
@@ -65,6 +66,19 @@ const blockMath = {
     cx.nextLine()
     return true
   },
+}
+
+/**
+ * The language a fence's info string names: `rust`, Quarto's `{python}`, Pandoc's
+ * `{.haskell .numberLines}` — the first word, braces and dot stripped. Empty for a bare fence.
+ */
+export function codeLanguageName(info: string): string {
+  return /^\{?\s*\.?([^\s{}.,]+)/u.exec(info.trim())?.[1] ?? ''
+}
+
+export function codeLanguage(languages: readonly LanguageDescription[], info: string): LanguageDescription | null {
+  const name = codeLanguageName(info)
+  return name ? LanguageDescription.matchLanguageName(languages, name, true) : null
 }
 
 export const noteSyntax: MarkdownExtension = [

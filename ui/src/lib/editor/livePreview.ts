@@ -6,6 +6,7 @@ import { StateField, type EditorState } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
+import { codeLanguageName } from './syntax.ts'
 
 export interface LivePreviewOptions {
   /** Never reveal markup (read-only views have no meaningful cursor). */
@@ -652,11 +653,26 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
           case 'FencedCode': {
             const fromLine = state.doc.lineAt(node.from).number
             const toLine = state.doc.lineAt(node.to).number
+            // Off the cursor the fences fold away: the opening one to the language's name, the
+            // closing one to nothing. Each keeps its line, as a band above and below the code.
+            const folded = !revealed(state, node.from, node.to)
+            const marks = n.getChildren('CodeMark')
+            const open = marks[0]
+            const close = marks.length > 1 ? marks[marks.length - 1] : undefined
             for (let ln = fromLine; ln <= toLine; ln++) {
               const line = state.doc.line(ln)
-              const fence = ln === fromLine || (ln === toLine && /^\s*(```|~~~)/u.test(line.text))
-              push(line.from, line.from, Decoration.line({ class: fence ? 'cm-codeblock cm-codeblock-fence' : 'cm-codeblock' }))
+              const opening = ln === fromLine
+              const closing = !opening && close !== undefined && state.doc.lineAt(close.from).number === ln
+              const cls = opening || closing ? `cm-codeblock cm-codeblock-fence${folded ? ' cm-codeblock-folded' : ''}` : 'cm-codeblock'
+              push(line.from, line.from, Decoration.line({ class: cls }))
             }
+            if (folded && open) {
+              const info = n.getChild('CodeInfo')
+              const lang = info ? codeLanguageName(state.sliceDoc(info.from, info.to)) : ''
+              const end = state.doc.lineAt(open.from).to
+              push(open.from, end, lang ? Decoration.replace({ widget: new MarkerWidget(lang, 'cm-codeblock-lang') }) : hide)
+            }
+            if (folded && close) push(close.from, close.to, hide)
             break
           }
           case 'Table': {

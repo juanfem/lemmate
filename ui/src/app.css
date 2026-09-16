@@ -34,6 +34,16 @@
   --danger-bg: #fbeae8;
   --danger-border: #f0c8c4;
   --ok: oklch(0.68 0.13 150);
+  /* Code in fenced blocks. Muted hues at text lightness, so a block reads as code without
+     turning the page into a colour chart. */
+  --syn-keyword: oklch(0.5 0.12 305);
+  --syn-string: oklch(0.5 0.1 145);
+  --syn-comment: #9a948c;
+  --syn-number: oklch(0.55 0.12 50);
+  --syn-function: oklch(0.5 0.11 255);
+  --syn-type: oklch(0.52 0.09 195);
+  --syn-property: oklch(0.48 0.07 230);
+  --syn-meta: oklch(0.55 0.08 80);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -61,6 +71,14 @@
     --danger-bg: #33201e;
     --danger-border: #5c302c;
     --ok: oklch(0.62 0.13 150);
+    --syn-keyword: oklch(0.78 0.1 305);
+    --syn-string: oklch(0.78 0.09 145);
+    --syn-comment: #7d766d;
+    --syn-number: oklch(0.8 0.1 60);
+    --syn-function: oklch(0.78 0.09 255);
+    --syn-type: oklch(0.78 0.08 195);
+    --syn-property: oklch(0.8 0.06 230);
+    --syn-meta: oklch(0.78 0.07 80);
   }
 }
 * {

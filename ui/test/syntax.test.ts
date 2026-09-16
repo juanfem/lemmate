@@ -21,3 +21,16 @@ test('wikilinks, embeds, tags, math', () => {
   assert.ok(names('cost $5 and $6\n').includes('InlineMath') === false || true) // tolerated: heuristic
   assert.ok(names('- [ ] todo\n').includes('TaskMarker'))
 })
+
+test('a fence names its language in any of the usual spellings', async () => {
+  const { codeLanguage, codeLanguageName } = await import('../src/lib/editor/syntax.ts')
+  const { languages } = await import('@codemirror/language-data')
+  assert.equal(codeLanguageName('rust'), 'rust')
+  assert.equal(codeLanguageName('{python}'), 'python')
+  assert.equal(codeLanguageName('{.haskell .numberLines}'), 'haskell')
+  assert.equal(codeLanguageName('js title="x"'), 'js')
+  assert.equal(codeLanguageName(''), '')
+  assert.equal(codeLanguage(languages, '{python}')?.name, 'Python')
+  assert.equal(codeLanguage(languages, 'ts')?.name, 'TypeScript')
+  assert.equal(codeLanguage(languages, 'no-such-language'), null)
+})

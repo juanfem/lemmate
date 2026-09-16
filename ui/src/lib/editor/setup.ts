@@ -8,11 +8,12 @@ import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, codeFolding } from '@codemirror/language'
+import { languages } from '@codemirror/language-data'
 import { tags as t } from '@lezer/highlight'
 import { yCollab } from 'y-codemirror.next'
 import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
-import { noteSyntax } from './syntax.ts'
+import { codeLanguage, noteSyntax } from './syntax.ts'
 import { livePreview, type LivePreviewOptions } from './livePreview.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
@@ -28,6 +29,16 @@ const highlight = HighlightStyle.define([
   { tag: t.processingInstruction, color: 'var(--muted)' },
   { tag: t.quote, color: 'var(--muted)' },
   { tag: t.contentSeparator, color: 'var(--muted)' },
+  // Code inside fenced blocks, in whatever language the fence names (`--syn-*` in app.css).
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword, t.definitionKeyword, t.modifier], color: 'var(--syn-keyword)' },
+  { tag: [t.string, t.special(t.string), t.regexp, t.character], color: 'var(--syn-string)' },
+  { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: 'var(--syn-comment)', fontStyle: 'italic' },
+  { tag: [t.number, t.integer, t.float, t.bool, t.null, t.atom, t.unit], color: 'var(--syn-number)' },
+  { tag: [t.function(t.variableName), t.function(t.propertyName), t.macroName], color: 'var(--syn-function)' },
+  { tag: [t.typeName, t.className, t.namespace, t.tagName], color: 'var(--syn-type)' },
+  { tag: [t.propertyName, t.attributeName, t.labelName], color: 'var(--syn-property)' },
+  { tag: [t.meta, t.annotation, t.escape], color: 'var(--syn-meta)' },
+  { tag: t.invalid, color: 'var(--danger)' },
 ])
 
 const theme = EditorView.theme({
@@ -122,6 +133,9 @@ const theme = EditorView.theme({
   '.cm-callout-fence': { color: 'var(--muted)', fontSize: '0.8em' },
   '.cm-codeblock': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', paddingLeft: '0.75em', paddingRight: '0.75em' },
   '.cm-codeblock-fence': { color: 'var(--muted)', fontSize: '0.8em' },
+  // A folded fence line: the band above or below the code, with the language named at the top.
+  '.cm-codeblock-folded': { fontSize: '0.7em', lineHeight: '1.6' },
+  '.cm-codeblock-lang': { display: 'inline-block', width: '100%', textAlign: 'right', fontFamily: 'var(--ui)', color: 'var(--faint)' },
   '.cm-table-row': { fontFamily: 'var(--mono)', fontSize: '0.9em' },
   // The rendered table. The wrapper scrolls a table wider than the measure and holds the gap
   // around it as padding, for the same measuring reason as `.cm-heading`.
@@ -293,7 +307,9 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       foldGutter({ openText: '▾', closedText: '▸' }),
       closeBrackets(),
       EditorView.lineWrapping,
-      markdown({ base: markdownLanguage, extensions: noteSyntax, addKeymap: true }),
+      // A fenced block's language is loaded the first time a fence names it, and the block
+      // re-highlights when it arrives; the grammars stay out of the main bundle.
+      markdown({ base: markdownLanguage, extensions: noteSyntax, addKeymap: true, codeLanguages: (info) => codeLanguage(languages, info) }),
       syntaxHighlighting(highlight),
       theme,
       modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
