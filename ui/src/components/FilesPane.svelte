@@ -39,6 +39,7 @@
     activeId,
     activeVault,
     onOpen,
+    onShowTrash,
     actions = {},
     revealFolder = $bindable(),
   }: {
@@ -46,6 +47,8 @@
     activeId: string | null
     activeVault?: string | null
     onOpen: (id: string) => void
+    /** Deleted notes are one step away from where they were deleted, not only in the palette. */
+    onShowTrash?: () => void
     actions?: TreeActions
     /** Bound out for the palette: picking a folder there has to reach the selection in here,
      *  which outlives a switch between the two layouts and so cannot live in either view. */
@@ -402,6 +405,9 @@
     <button onclick={reveal} disabled={!activeId} title="Reveal the open note" aria-label="Reveal the open note">
       <Icon name="locate" />
     </button>
+    {#if onShowTrash}
+      <button onclick={onShowTrash} title="Trash — deleted notes, and restoring them" aria-label="Trash"><Icon name="trash" /></button>
+    {/if}
   </div>
 
   {#if mode === 'tree'}

@@ -260,8 +260,14 @@ A footnote[^1] and a citation [@knuth1984].
 Live preview hides markup and draws the result in place; the markup comes back on any line the
 cursor or selection touches. Rendered **in the editor**: headings, emphasis/strong/strikeout,
 inline code, links, images, wikilinks and image embeds, `$…$` and `$$…$$` via KaTeX, `#tags`,
-task checkboxes, blockquotes, fenced code blocks, callout blocks, and front matter (folded to a
-one-line property summary — click it to edit). List markers follow the level they are on: `•`,
+task checkboxes, blockquotes, callout blocks, and front matter (folded to a one-line property
+summary — click it to edit). **Tables** are drawn as tables, with column alignment and the
+inline markup above inside cells; click a cell to edit its row's markdown, with the caret in
+that cell. Inside a table a wikilink's label needs its pipe escaped, `[[Note\|label]]`, or the
+pipe ends the cell. **Fenced code blocks** fold their fences away — the opening one to the
+language's name — and are syntax-highlighted in whatever language the fence names (`rust`,
+Quarto's `{python}`, Pandoc's `{.haskell}`); a language's grammar is fetched the first time a
+block uses it, so offline a never-seen language shows as plain monospace. List markers follow the level they are on: `•`,
 `◦` and `▪` down a bullet list, and `1.`, `a.`, `i.` down an ordered one, keeping the delimiter
 the file holds. An ordered item is numbered by its position, as every markdown renderer numbers
 it, so a file full of `1.` still reads 1, 2, 3 and a gap left by an item you indented away
@@ -269,8 +275,7 @@ closes by itself. A task line shows its checkbox and no bullet.
 
 Recognised by the indexer and handled by pandoc **on export only**, with no editor decoration
 today: footnotes, citations, definition lists, superscript/subscript, bracketed spans, header
-and link attributes. Tables are indexed and exported, but in the editor they are only styled as
-monospace rows — there is no rendered grid or cell-by-cell editing yet. `![[note]]`
+and link attributes. `![[note]]`
 transclusion is parsed but shown as a plain link; only attachment embeds render inline.
 Callout `collapse="true"` is not implemented.
 
@@ -392,7 +397,8 @@ the note you are reading is on the note's own page rather than in a panel beside
 
 - **Files** lists folders and their notes. Rows carry the date they last changed, and the list
   header switches between **Recent** and **Name** order. Where the server or relay cannot
-  answer with a listing, rows show no date and the order falls back to the alphabet.
+  answer with a listing, rows show no date and the order falls back to the alphabet. The
+  trash-can button at the end of its toolbar opens the **Trash** (below).
 - **Tags** is a tree, because tags are one: `#projects/alpha` sits under `#projects`, named by
   its last segment alone, and folds like a folder does. A branch point is drawn even where
   nothing is tagged with it — a vault can use `#projects/alpha` and never `#projects`. Clicking
@@ -521,12 +527,18 @@ way the note is, with the lines it no longer shares with the note marked down it
 Snapshots are kept forever; the raw update log behind them is pruned after `--retain-days`
 (90 by default).
 
-**Trash.** *Delete* removes the note from the vault doc; the file disappears from every synced
-replica and the tab closes everywhere. The note's update log and versions stay in the store, so
-nothing is destroyed — but there is no restore-from-trash view in the UI or CLI yet, so
-recovering a deleted note today means going through the database. On the server, attachments
-that no note references any more are purged after a grace period
-(`--attachment-grace-days`, 30 by default); referencing one again before then rescues it.
+**Trash.** *Move to trash* removes the note from the vault doc; the file disappears from every
+synced replica and the tab closes everywhere. The note's update log and versions stay in the
+store, so nothing is destroyed yet. The trash-can button at the end of the Files toolbar — or
+*Show trash* in the palette — lists a vault's deleted notes, newest first, starting with the
+vault of the note you are on (a picker switches vaults when you have more than one). **Restore**
+puts a note back at its old path, or at `… (restored).md` if something has taken that path
+since, and opens it; on a synced vault its file comes back on every replica.
+
+The server forgets a note for good once it has been in the trash longer than
+`--attachment-grace-days` (30 by default), and purges attachments no note references any more
+after the same period; referencing one again before then rescues it. A standalone vault
+(`lemmate serve`, or the desktop app with no server) never purges: its trash keeps everything.
 
 ---
 

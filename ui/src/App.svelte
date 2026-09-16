@@ -1111,6 +1111,7 @@
             activeId={active}
             activeVault={session?.id ?? null}
             onOpen={open}
+            onShowTrash={() => (sidebar = 'trash')}
             actions={{
               onCreateIn: createInFolder,
               onRenameFolder: renameFolder,
@@ -1149,7 +1150,15 @@
             />
           {/if}
         {:else if sidebar === 'trash'}
-          {#if session}<TrashPane vault={session.id} version={tagsVersion} onRestored={(id) => open(id)} />{/if}
+          {#if session}
+            <TrashPane
+              vault={session.id}
+              vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
+              version={tagsVersion}
+              onRestored={(id) => open(id)}
+              onBack={() => (sidebar = 'files')}
+            />
+          {/if}
         {:else}
           <nav class="bookmarks-pane">
             {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
