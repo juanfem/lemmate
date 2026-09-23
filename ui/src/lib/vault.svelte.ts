@@ -9,7 +9,7 @@
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { IndexeddbPersistence } from 'y-indexeddb'
-import { api } from './api.ts'
+import { api, type FileEntry } from './api.ts'
 import { loadIds, saveIds } from './idstore.ts'
 import { isInstalled } from './install.ts'
 import { loadVault, noteKey, putNotes, removeNotes, type StoredNote } from './searchstore.ts'
@@ -63,11 +63,16 @@ export class VaultSession {
   private stocking = false
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private onVisible: (() => void) | null = null
+  /** Whether anything shows `files`; until then they are never fetched. */
+  private filesWanted = false
+  private filesTimer: ReturnType<typeof setTimeout> | null = null
   /** Waiters for a doc's first successful sync, resolved from `onSynced`. */
   private syncWaiters = new Map<string, (() => void)[]>()
 
   notes: NoteEntry[] = $state([])
   attachments: Record<string, string> = $state({})
+  /** The file manager's listing (SPEC §9), once something has asked for it: `watchFiles`. */
+  files: FileEntry[] = $state([])
   bookmarks: Bookmark[] = $state([])
   /** Optional display name, shared by every replica; falls back to a short id in the UI. */
   name = $state('')
@@ -111,6 +116,10 @@ export class VaultSession {
     }
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
+    // Which files there are, and which of them are kept, is the file list's business too.
+    const files = () => this.filesChanged(300)
+    this.attachmentsMap.observe(files)
+    this.vaultDoc.getMap('kept').observe(files)
     this.bookmarksArr.observe(refresh)
     this.metaMap.observe(refresh)
     if (!this.noteOnly) {
@@ -323,6 +332,32 @@ export class VaultSession {
       this.notesMap.unobserve(onChange)
       this.attachmentsMap.unobserve(onChange)
     }
+  }
+
+  /** Start keeping `files` current: fetched now, and again whenever the vault's files change. */
+  watchFiles() {
+    if (this.filesWanted) return
+    this.filesWanted = true
+    void this.loadFiles()
+  }
+
+  async loadFiles() {
+    try {
+      this.files = await api.files(this.id)
+    } catch {
+      /* no file manager here (an older server, a note shared alone): the list stays empty */
+    }
+  }
+
+  /**
+   * Something may have changed which note uses which file — an edit to a note's links or front
+   * matter — without any file changing. The server re-derives that as the edit lands, so the
+   * list is fetched again once it has had a moment to.
+   */
+  filesChanged(delay = 1500) {
+    if (!this.filesWanted) return
+    if (this.filesTimer) clearTimeout(this.filesTimer)
+    this.filesTimer = setTimeout(() => ((this.filesTimer = null), void this.loadFiles()), delay)
   }
 
   /** Open (or share) a note doc; call `release` when the view goes away. */
@@ -538,6 +573,7 @@ export class VaultSession {
   }
 
   destroy() {
+    if (this.filesTimer) clearTimeout(this.filesTimer)
     if (this.refreshTimer !== null) clearInterval(this.refreshTimer)
     this.refreshTimer = null
     if (this.onVisible) document.removeEventListener('visibilitychange', this.onVisible)

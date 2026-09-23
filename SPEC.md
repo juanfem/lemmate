@@ -531,6 +531,19 @@ Editing features:
   (configurable) **[decided]**, versions retained forever.
 - **Trash** — deleted notes are hidden, restorable for 30 days, then purged along with
   orphaned attachments.
+- **Files that are not notes** — the tree shows notes only; a third view of the Files tab
+  lists every other file (images, stylesheets, `_quarto.yml`, bibliographies) as a tree of the
+  folders that hold them, a chain of otherwise-empty folders folded into one row. A file opens
+  in a tab: text in an editor with an explicit Save (a file is not a CRDT — a save names the
+  version it started from and stops rather than overwriting a newer one), anything else as a
+  preview with Download and Replace. Rename/move rewrites the notes that use the file (links,
+  embeds, front-matter paths); Delete warns while a note still does. Uploading asks where:
+  next to the open note, `attachments/`, or any folder, and on a name clash whether to replace
+  or keep both. Each note's page lists the files it uses, with its own Upload. Pasting or
+  dropping into the editor is unchanged: `attachments/`, linked at the cursor. A file put in
+  on purpose is *kept* (a mark in the vault doc) and survives having no note use it; a pasted
+  one lives as long as a note does. Deleting or moving a kept file removes the synced copy
+  from other desktops too, unless it was edited there since.
 
 ---
 

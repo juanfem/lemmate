@@ -3,6 +3,8 @@
 //   shot:<name>      screenshot -> <outdir>/<name>.png
 //   eval:<js>        Runtime.evaluate (awaits promises), prints result JSON
 //   click:<selector> querySelector(sel).click(), errors if missing
+//   files:<p>[,<p>]  answer the next file picker the page opens with these local files
+//                    (absolute paths); the picker never shows
 //   mouse:<x>,<y>    a real left press and release at viewport coordinates — what CodeMirror's
 //                    own mousedown handling (posAtCoords, the height map) needs to see
 //   type:<text>      Input.insertText
@@ -56,6 +58,9 @@ async function evaluate(cdp, expression) {
 }
 
 const MODS = { alt: 1, ctrl: 2, meta: 4, shift: 8 };
+
+/** Set by a `files:` step: what the next file picker is answered with. */
+let pendingFiles = null;
 async function pressKey(cdp, spec) {
   const parts = spec.split('+');
   const key = parts.pop();
@@ -94,6 +99,13 @@ async function runStep(cdp, step, outdir) {
         if (!el) throw new Error('no element for selector: ' + ${JSON.stringify(arg)});
         el.scrollIntoView({ block: 'center' }); el.click(); return true; })()`);
       return;
+    case 'files': {
+      const paths = arg.split(',').filter(Boolean);
+      if (!paths.length) die('files: needs at least one path');
+      pendingFiles = paths;
+      await cdp.send('Page.setInterceptFileChooserDialog', { enabled: true });
+      return;
+    }
     case 'mouse': {
       const [x, y] = arg.split(',').map(Number);
       if (!Number.isFinite(x) || !Number.isFinite(y)) die(`bad mouse (expected x,y): ${arg}`);
@@ -182,6 +194,12 @@ async function main() {
     cdp.on('Runtime.exceptionThrown', (p) =>
       console.error(`[exception] ${p.exceptionDetails.exception?.description ?? p.exceptionDetails.text}`));
 
+    // A picker opened while `files:` is armed gets those files, once; it never appears.
+    cdp.on('Page.fileChooserOpened', (p) => {
+      const files = pendingFiles; pendingFiles = null;
+      if (files) cdp.send('DOM.setFileInputFiles', { files, backendNodeId: p.backendNodeId })
+        .catch((e) => console.error(`[files] ${e.message}`));
+    });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     const loaded = new Promise((res) => cdp.on('Page.loadEventFired', res));

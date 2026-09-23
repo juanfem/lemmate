@@ -30,6 +30,10 @@
   import Editor from './Editor.svelte'
   import HistoryPage from './HistoryPage.svelte'
   import RenderView from './RenderView.svelte'
+  import FileView from './FileView.svelte'
+  import { parseFileTab } from '../lib/filetabs.ts'
+  import { baseName } from '../lib/filetree.ts'
+  import type { FileEntry } from '../lib/api.ts'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
   import Icon from './Icon.svelte'
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
@@ -69,6 +73,10 @@
     historyOpen = false,
     onRender,
     renderOpen = false,
+    onRenameFile,
+    onDeleteFile,
+    onOpenFile,
+    onUploadFiles,
     onSeq,
     onAsk,
     jumpTo = $bindable(),
@@ -119,6 +127,12 @@
     /** Render the note with Quarto, in a pane beside it; `renderOpen` when one already is. */
     onRender?: () => void
     renderOpen?: boolean
+    /** A file tab's Rename / move and Delete (SPEC §9); the shell owns the dialogs. */
+    onRenameFile?: (vault: string, entry: FileEntry) => void
+    onDeleteFile?: (vault: string, entry: FileEntry) => void
+    /** A note's Files shelf: open one of its files, or upload more. */
+    onOpenFile?: (vault: string, path: string) => void
+    onUploadFiles?: (vault: string, folder: string | null) => void
     onSeq?: (seq: number) => void
     onAsk?: (
       title: string,
@@ -147,9 +161,18 @@
   let isRender = $derived(pane.kind === 'render')
   /** A pane *about* a note rather than the note: one tab, no editing chrome, closed as a whole. */
   let aside = $derived(isHistory || isRender)
+  /** The tab in front holds a vault file, not a note: no note chrome for it either. */
+  let file = $derived(pane.active ? parseFileTab(pane.active) : null)
 
   function pathOf(id: string): string | undefined {
-    return lookup(id)?.pathOf(id)
+    return parseFileTab(id)?.path ?? lookup(id)?.pathOf(id)
+  }
+  /** What a tab says: a note's name, or a file's name with its extension — that is its name. */
+  function tabLabel(id: string): string {
+    if (isBlank(id)) return 'New tab'
+    const f = parseFileTab(id)
+    if (f) return baseName(f.path)
+    return displayName(pathOf(id) ?? '') || '…'
   }
   let session = $derived(pane.active ? lookup(pane.active) : undefined)
   let activePath = $derived(pane.active ? (pathOf(pane.active) ?? unnamedNote(session)) : '')
@@ -186,7 +209,8 @@
   function tabMenu(id: string, e: MouseEvent) {
     const isPinned = pinned.includes(id)
     const about = [
-      ...(onDetach && !isBlank(id) ? [{ label: 'Move to new window', run: () => onDetach(id) }] : []),
+      // A window is opened on a note; a file stays among the tabs of this one.
+      ...(onDetach && !isBlank(id) && !parseFileTab(id) ? [{ label: 'Move to new window', run: () => onDetach(id) }] : []),
       ...(onPin && !isBlank(id) ? [{ label: isPinned ? 'Unpin tab' : 'Pin tab', run: () => onPin(id) }] : []),
     ]
     menu = menuAt(e, [
@@ -341,7 +365,7 @@
         {:else if pinned.includes(id)}
           <span class="dot pinned" title="Pinned"></span>
         {/if}
-        <span class="label">{isBlank(id) ? 'New tab' : (displayName(pathOf(id) ?? '') || '…')}{isHistory ? ' · history' : isRender ? ' · rendered' : ''}</span>
+        <span class="label">{tabLabel(id)}{isHistory ? ' · history' : isRender ? ' · rendered' : ''}</span>
         {#if aside}
           <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
         {:else if !pinned.includes(id)}
@@ -357,7 +381,7 @@
     {/if}
     <span class="spacer"></span>
     <div class="cluster">
-      {#if !aside && pane.active && session && !isBlank(pane.active)}
+      {#if !aside && !file && pane.active && session && !isBlank(pane.active)}
         <span class="modes fold" role="group" aria-label="View mode">
           {#each VIEW_MODES as m (m.id)}
             <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
@@ -385,7 +409,7 @@
       {#if onClosePane && !aside}
         <button class="icon" onclick={onClosePane} title="Close pane" aria-label="Close pane"><Icon name="closepane" size={15} /></button>
       {/if}
-      {#if !aside}
+      {#if !aside && !file}
         <button class="icon more" onclick={(e) => (menu = menuAt(e, moreItems))} title="History, bookmark, rename, delete" aria-label="More actions">···</button>
       {/if}
     </div>
@@ -399,6 +423,21 @@
       <span>{displayName(activePath)}</span>
       <span class="spacer"></span>
       <span>version history</span>
+    </div>
+  {:else if file && pane.active && session}
+    {#key pane.active}
+      <FileView
+        {session}
+        path={file.path}
+        onOpenNote={onOpen}
+        onRename={(e) => onRenameFile?.(file!.vault, e)}
+        onDelete={(e) => onDeleteFile?.(file!.vault, e)}
+      />
+    {/key}
+    <div class="note-foot">
+      <span>{file.path}</span>
+      <span class="spacer"></span>
+      <span>File</span>
     </div>
   {:else if isRender && pane.active && session}
     {#key pane.active}
@@ -434,6 +473,8 @@
             noteId={pane.active}
             {onOpen}
             {trail}
+            {onOpenFile}
+            {onUploadFiles}
             onHeadings={(h) => (headings = h)}
             onHere={(p) => (here = p)}
             {onTag}

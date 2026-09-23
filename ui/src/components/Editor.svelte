@@ -13,6 +13,9 @@
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
   import { embedUrlFor } from '../lib/attachments.ts'
   import { addTagToFrontMatter, cleanTag } from '../lib/tagedit.ts'
+  import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
+  import { baseName, extension, fileKind, folderOf } from '../lib/filetree.ts'
+  import type { PageFile } from '../lib/editor/page.ts'
 
   let {
     session,
@@ -26,6 +29,8 @@
     onPresence,
     onStats,
     trail = [],
+    onOpenFile,
+    onUploadFiles,
     mode = 'live',
     jumpTo = $bindable(),
   }: {
@@ -50,6 +55,10 @@
     onStats?: (stats: { lines: number; words: number }) => void
     /** Where the note lives, folder by folder — drawn on the page above its first line. */
     trail?: string[]
+    /** Open one of the note's files in a tab (SPEC §9). Without it there is no Files shelf. */
+    onOpenFile?: (vault: string, path: string) => void
+    /** Upload into `folder` (`null`: let the dialog ask). */
+    onUploadFiles?: (vault: string, folder: string | null) => void
     /** SPEC §8: live preview, plain source, or rendered and read-only. */
     mode?: ViewMode
     jumpTo?: (pos: number) => void
@@ -67,8 +76,35 @@
   let tags: string[] = $state([])
   let backlinks: Backlink[] = $state([])
   $effect(() => renderPageHead(head, trail))
+  // The files this note uses, as the file manager lists them; kept current as the note is
+  // edited (a new link, a theme named in the front matter) by `filesChanged` below.
+  $effect(() => {
+    if (onOpenFile) session.watchFiles()
+  })
+  let files: PageFile[] = $derived(
+    session.files
+      .filter((f) => f.used_by.includes(noteId))
+      .map((f) => ({
+        path: f.path,
+        name: baseName(f.path),
+        thumb: fileKind(f.path) === 'image' ? api.attachmentUrl(session.id, f.hash) : undefined,
+        badge: extension(f.path).slice(0, 4).toUpperCase() || 'FILE',
+      })),
+  )
+  let uploadMenu: MenuState | null = $state(null)
+  function uploadChoices(e: MouseEvent) {
+    const dir = folderOf(session.pathOf(noteId) ?? '')
+    uploadMenu = menuAt(e, [
+      { label: `Next to this note — ${dir ? `${dir}/` : 'the vault root'}`, run: () => onUploadFiles?.(session.id, dir) },
+      { label: 'In attachments/', run: () => onUploadFiles?.(session.id, 'attachments') },
+      { label: 'In another folder…', run: () => onUploadFiles?.(session.id, null) },
+    ])
+  }
   $effect(() =>
     renderPageFoot(foot, {
+      files: onOpenFile ? files : undefined,
+      onOpenFile: onOpenFile && ((path) => onOpenFile(session.id, path)),
+      onUpload: onUploadFiles && uploadChoices,
       tags,
       backlinks,
       onOpen,
@@ -219,6 +255,8 @@
   }
   const headingWatcher = EditorView.updateListener.of((u) => {
     if (u.docChanged) reportHeadings(u.view)
+    // A link or a front-matter path may have changed which files the note uses.
+    if (u.docChanged && onOpenFile) session.filesChanged()
     // Headings move when the text does, and when a fold or a widget resizes around them.
     if (u.docChanged || u.geometryChanged) reportHere()
   })
@@ -321,6 +359,10 @@
     release?.()
   })
 </script>
+
+{#if uploadMenu}
+  <ContextMenu menu={uploadMenu} onClose={() => (uploadMenu = null)} />
+{/if}
 
 <div class="frame">
   <!-- A phone keyboard has no Tab, and nesting a list item is the one edit that needs one. The

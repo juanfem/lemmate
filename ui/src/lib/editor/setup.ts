@@ -1,13 +1,13 @@
 // CodeMirror 6 editor bound to a Y.Text (SPEC §8): markdown + our syntax extensions, live
 // preview, collaborative cursors, and the usual keymaps.
 
-import { EditorView, ViewPlugin, keymap, drawSelection, highlightActiveLine, rectangularSelection } from '@codemirror/view'
+import { EditorView, ViewPlugin, keymap, drawSelection, highlightActiveLine, rectangularSelection, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, codeFolding } from '@codemirror/language'
+import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, codeFolding, LanguageDescription } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
 import { tags as t } from '@lezer/highlight'
 import { yCollab } from 'y-codemirror.next'
@@ -156,6 +156,11 @@ const theme = EditorView.theme({
   '.cm-table th': { fontWeight: '600', background: 'var(--panel)' },
   '.cm-table code': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', borderRadius: '3px', padding: '0 0.2em' },
   '.cm-table a:not(.cm-wikilink)': { color: 'var(--accent)' },
+  // A vault file open for editing (SPEC §9): code, the whole width of the pane, numbered.
+  '&.cm-file .cm-scroller': { fontFamily: 'var(--mono)', fontSize: '0.88em', lineHeight: '1.6', padding: '0.75rem 0' },
+  '&.cm-file .cm-content': { maxWidth: 'none', margin: '0', padding: '0 1rem 0 0.25rem' },
+  '&.cm-file .cm-gutters': { color: 'var(--faint)', paddingLeft: '0.5rem' },
+  '&.cm-file .cm-activeLineGutter': { background: 'transparent', color: 'var(--muted)' },
   // Source mode drops the prose face along with the decorations: it is code, so it looks it.
   '&.cm-mode-source .cm-scroller': { fontFamily: 'var(--mono)', fontSize: '0.92em' },
   // Nothing in reading mode is editable, so the caret, the active line and the fold gutter
@@ -212,6 +217,9 @@ const theme = EditorView.theme({
     padding: 'calc(0.1875rem - 1px) calc(0.625rem - 1px)',
   },
   '.cm-page-tag-add:hover': { color: 'var(--accent)', borderColor: 'var(--accent)' },
+  '.cm-page-file': { display: 'inline-flex', alignItems: 'center', gap: '0.35rem', paddingLeft: '0.35rem' },
+  '.cm-page-file-thumb': { width: '1.1rem', height: '0.8rem', objectFit: 'cover', borderRadius: '2px' },
+  '.cm-page-file-badge': { fontSize: '0.55rem', fontWeight: '700', color: 'var(--muted)', letterSpacing: '0.02em' },
   '.cm-page-none': { margin: '0', fontSize: '0.75rem', lineHeight: '1.45', color: 'var(--faint)' },
   // The hint under an empty shelf is about the row above it, not crowding it. Padding, not a
   // margin: a vertical margin inside `.cm-content` desynchronises the height map (theme.test).
@@ -462,4 +470,65 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
     ],
   })
   return new EditorView({ state, parent })
+}
+
+const fileLanguage = new Compartment()
+const fileLook = EditorView.editorAttributes.of({ class: 'cm-file' })
+
+/**
+ * An editor for a vault file that is not a note (SPEC §9) — a stylesheet, `_quarto.yml`, a
+ * bibliography. Plain text, not a CRDT: the caller saves the whole file (`save`, also on
+ * Mod-S) and hears every change through `onChange`. The language comes from the file's name
+ * and loads the first time one is opened, as a fenced block's does.
+ */
+export function createFileEditor(
+  parent: HTMLElement,
+  doc: string,
+  name: string,
+  opts: { onChange: (text: string) => void; save: () => void; readOnly?: boolean },
+): EditorView {
+  const view = new EditorView({
+    parent,
+    state: EditorState.create({
+      doc,
+      extensions: [
+        lineNumbers(),
+        highlightActiveLineGutter(),
+        history(),
+        drawSelection(),
+        highlightActiveLine(),
+        highlightSelectionMatches(),
+        indentOnInput(),
+        bracketMatching(),
+        closeBrackets(),
+        EditorView.lineWrapping,
+        syntaxHighlighting(highlight),
+        theme,
+        fileLook,
+        fileLanguage.of([]),
+        EditorState.readOnly.of(!!opts.readOnly),
+        keymap.of([
+          { key: 'Mod-s', preventDefault: true, run: () => (opts.save(), true) },
+          ...closeBracketsKeymap,
+          ...defaultKeymap,
+          ...searchKeymap,
+          ...historyKeymap,
+          indentWithTab,
+        ]),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) opts.onChange(u.state.doc.toString())
+        }),
+      ],
+    }),
+  })
+  const found = LanguageDescription.matchFilename(languages, name)
+  if (found) {
+    void found.load().then(
+      (support) => view.dom.isConnected && view.dispatch({ effects: fileLanguage.reconfigure(support) }),
+      () => {
+        /* offline and never loaded: plain text it is */
+      },
+    )
+  }
+  return view
 }

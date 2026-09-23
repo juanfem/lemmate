@@ -41,6 +41,9 @@
     onOpen,
     trash = $bindable(false),
     trashView,
+    attachments = $bindable(false),
+    attachmentsView,
+    attachmentsTools,
     actions = {},
     revealFolder = $bindable(),
   }: {
@@ -52,6 +55,12 @@
      *  palette can open it. Never remembered — a reload lands on the files, not on the trash. */
     trash?: boolean
     trashView?: Snippet
+    /** The files that are not notes (SPEC §9), a view of its own beside the notes' two. Bound
+     *  out like `trash`, so the palette can open it. */
+    attachments?: boolean
+    attachmentsView?: Snippet
+    /** What the toolbar's right end holds while the attachments view is up. */
+    attachmentsTools?: Snippet
     actions?: TreeActions
     /** Bound out for the palette: picking a folder there has to reach the selection in here,
      *  which outlives a switch between the two layouts and so cannot live in either view. */
@@ -191,6 +200,7 @@
 
   revealFolder = (vault: string, folder: string) => {
     trash = false
+    attachments = false
     setMode('split')
     select(vault, folder)
     for (const a of ancestors(folder)) collapsed[folderKey(vault, a)] = false
@@ -396,20 +406,27 @@
 >
   <div class="toolbar">
     <div class="modes">
-      <button class:on={!trash && mode === 'tree'} onclick={() => ((trash = false), setMode('tree'))} title="Single tree" aria-label="Single tree">
+      <button class:on={!trash && !attachments && mode === 'tree'} onclick={() => ((trash = false), (attachments = false), setMode('tree'))} title="Single tree" aria-label="Single tree">
         <Icon name="tree" />
       </button>
-      <button class:on={!trash && mode === 'split'} onclick={() => ((trash = false), setMode('split'))} title="Folders and notes" aria-label="Folders and notes">
+      <button class:on={!trash && !attachments && mode === 'split'} onclick={() => ((trash = false), (attachments = false), setMode('split'))} title="Folders and notes" aria-label="Folders and notes">
         <Icon name="split" />
       </button>
+      {#if attachmentsView}
+        <button class:on={attachments && !trash} onclick={() => ((attachments = true), (trash = false))} title="Attachments — the files that are not notes" aria-label="Attachments">
+          <Icon name="attach" />
+        </button>
+      {/if}
       {#if trashView}
-        <button class:on={trash} onclick={() => (trash = true)} title="Trash — deleted notes, and restoring them" aria-label="Trash">
+        <button class:on={trash} onclick={() => ((trash = true), (attachments = false))} title="Trash — deleted notes, and restoring them" aria-label="Trash">
           <Icon name="trash" />
         </button>
       {/if}
     </div>
-    <span class="gap">{#if !trash && picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
-    {#if !trash}
+    <span class="gap">{#if !trash && !attachments && picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
+    {#if attachments && !trash && attachmentsTools}
+      {@render attachmentsTools()}
+    {:else if !trash && !attachments}
       <button onclick={expandAll} title="Expand all" aria-label="Expand all"><Icon name="expand" /></button>
       <button onclick={collapseAll} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
       <button onclick={reveal} disabled={!activeId} title="Reveal the open note" aria-label="Reveal the open note">
@@ -420,6 +437,8 @@
 
   {#if trash && trashView}
     {@render trashView()}
+  {:else if attachments && attachmentsView}
+    {@render attachmentsView()}
   {:else if mode === 'tree'}
     <Tree {vaults} {activeId} {activeVault} {collapsed} onToggle={toggle} {browser} {actions} />
   {:else}
@@ -536,7 +555,7 @@
     gap: 0.1rem;
     margin-right: 0.2rem;
   }
-  .toolbar button,
+  .toolbar :global(button),
   .list-head button {
     display: grid;
     place-items: center;
@@ -547,16 +566,16 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  .toolbar button:hover:not(:disabled),
+  .toolbar :global(button):hover:not(:disabled),
   .list-head button:hover:not(:disabled) {
     background: var(--hover);
     color: var(--fg);
   }
-  .toolbar button:disabled {
+  .toolbar :global(button):disabled {
     opacity: 0.4;
     cursor: default;
   }
-  .toolbar button.on,
+  .toolbar :global(button).on,
   .list-head button.on {
     color: var(--accent);
     background: var(--accent-bg);
@@ -646,7 +665,7 @@
       gap: 0.25rem;
       padding: 0.4rem;
     }
-    .toolbar button,
+    .toolbar :global(button),
     .list-head button {
       padding: 0.45rem;
     }

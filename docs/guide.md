@@ -496,6 +496,32 @@ Without a template, a new note starts as `# <title>`. There is no scripting.
 unreferenced files in the folder are ignored. Deleting an attachment that is still referenced
 restores it — drop the reference to drop the file.
 
+**Managing files.** The Files tab's paper-clip view lists every file in your vaults that is not
+a note — images, stylesheets, `_quarto.yml`, bibliographies, PDFs — as a tree of the folders
+that hold them, so a `Slides/` folder with one sub-folder per deck stays tidy. A folder shows
+how many files are inside; a file shows how many notes use it, or *vault* for the vault-wide
+ones, *kept* for one you put there yourself that nothing uses yet. The chips filter to images,
+styles or everything else; the target button opens the folders holding the files of the note
+you are reading.
+
+- **Open** a file by clicking it. Text files — `.scss`, `.css`, `.yml`, `.bib`, `.lua`, `.json`
+  and friends — open in an editor; **Save** (or `Ctrl+S`) writes the whole file for everyone.
+  Files are not edited live the way notes are: if someone else saved it after you opened it,
+  Save stops and asks whether to save yours over theirs or load theirs. Images open as a
+  preview; anything else offers a download. **Replace…** puts a new version in place.
+- **Rename / move…** takes any path in the vault, and rewrites the notes that use the file —
+  their links, embeds and front matter — to point at the new one.
+- **Delete…** removes the file for everyone, and tells you first which notes still use it.
+- **Upload** from the toolbar, from a folder's upload button (hover it, or right-click), or
+  from the *Files* shelf at the foot of a note. You choose where the files go: next to the open
+  note, in `attachments/`, or in any folder. If a name is taken, choose per file whether to
+  replace that file or keep both (the new one gets a `-2` name). Uploaded files are **kept** even
+  while no note uses them — upload a theme first, name it in the front matter after.
+
+Each note's page lists the files it uses under **Files**, above its tags — images, a theme
+and the partials that theme imports — and its **+ Upload** asks only whether they go next to
+the note or in `attachments/`.
+
 **One tab, unless you ask for another.** Clicking a note — in the tree, in search, in the
 quick switcher, a `[[link]]`, a backlink — opens it **in the tab you are already on**, so
 browsing does not pile up tabs to close afterwards. The tab it displaces goes on the reopen

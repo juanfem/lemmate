@@ -95,9 +95,48 @@ export function renderPageFoot(
     onAddTag?: () => void
     /** Right-click, or a long press: what else can be done to this tag. */
     onTagMenu?: (tag: string, e: MouseEvent) => void
+    /** The files this note uses (SPEC §9): its images, its theme, what that imports. Absent
+     *  where there is no file manager to open them in. */
+    files?: PageFile[]
+    onOpenFile?: (path: string) => void
+    /** The shelf's "+ Upload": where to put the files is asked from here. */
+    onUpload?: (e: MouseEvent) => void
   },
 ) {
   el.replaceChildren()
+
+  if (data.files && data.onOpenFile) {
+    const box = shelf(el, data.files.length ? `Files · ${data.files.length}` : 'Files')
+    const row = box.appendChild(document.createElement('div'))
+    row.className = 'cm-page-tags'
+    for (const f of data.files) {
+      const chip = row.appendChild(document.createElement('button'))
+      chip.className = 'cm-page-tag cm-page-file'
+      chip.type = 'button'
+      chip.title = `Open ${f.path}`
+      chip.addEventListener('click', () => data.onOpenFile?.(f.path))
+      if (f.thumb) {
+        const img = chip.appendChild(document.createElement('img'))
+        img.className = 'cm-page-file-thumb'
+        img.src = f.thumb
+        img.alt = ''
+        img.loading = 'lazy'
+      } else {
+        const badge = chip.appendChild(document.createElement('span'))
+        badge.className = 'cm-page-file-badge'
+        badge.textContent = f.badge
+      }
+      chip.append(f.name)
+    }
+    if (data.onUpload) {
+      const add = row.appendChild(document.createElement('button'))
+      add.className = 'cm-page-tag cm-page-tag-add'
+      add.type = 'button'
+      add.title = 'Upload files for this note'
+      add.textContent = data.files.length ? '+ Upload' : '+ Upload a file'
+      add.addEventListener('click', (e) => data.onUpload?.(e))
+    }
+  }
 
   const tags = shelf(el, 'Tags')
   const row = tags.appendChild(document.createElement('div'))
@@ -161,6 +200,15 @@ export function renderPageFoot(
     where.className = 'cm-page-backlink-where'
     where.textContent = b.path
   }
+}
+
+/** One chip of the Files shelf. */
+export interface PageFile {
+  path: string
+  name: string
+  /** An image's own URL, drawn small; everything else gets `badge`, its extension. */
+  thumb?: string
+  badge: string
 }
 
 function shelf(parent: HTMLElement, title: string): HTMLElement {

@@ -25,6 +25,10 @@
   import TagsPane from './components/TagsPane.svelte'
   import Palette, { type Command } from './components/Palette.svelte'
   import TrashPane from './components/TrashPane.svelte'
+  import AttachmentsPane from './components/AttachmentsPane.svelte'
+  import UploadDialog from './components/UploadDialog.svelte'
+  import { fileTab, isFileTab, parseFileTab } from './lib/filetabs.ts'
+  import type { FileEntry } from './lib/api.ts'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
   import ImportDialog from './components/ImportDialog.svelte'
@@ -167,6 +171,8 @@
   /** Whichever right-click / drop-down menu is open: the account's, or a tag chip's. */
   let menu = $state<MenuState | null>(null)
   let importInto = $state<string | null | undefined>(undefined)
+  /** Files picked for the upload dialog, and where they were asked to go (SPEC §9). */
+  let uploading = $state<{ vault: string; folder: string | null; files: File[] } | null>(null)
 
   // The single-note view stands alone: one session, one pane, its own socket.
   $effect(() => {
@@ -242,6 +248,9 @@
   let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' = $state('files')
   /** The Files tab's third view, beside its two layouts (FilesPane). */
   let trashOpen = $state(false)
+  /** The Files tab's attachments view (SPEC §9). */
+  let attachmentsOpen = $state(false)
+  let attachmentsPane: AttachmentsPane | undefined = $state()
   /** The tag the Tags pane is listing. Here rather than in the pane: a tag chip at the foot of
    *  a note picks one too, and the pane is unmounted whenever another tab is showing. */
   let tagFilter: string | null = $state(null)
@@ -372,13 +381,20 @@
   let active = $derived(focused.active)
   let presence = $derived(presenceByPane[focused.id] ?? [])
 
-  /** The session behind a note id, whichever vault holds it. */
+  /** The session behind a note id, whichever vault holds it. A file's tab is not a note, and
+   *  has none: the commands that act on "the note" pass it by. */
   function sessionOf(noteId: string | null | undefined): VaultSession | undefined {
     if (solo) return solo
+    if (noteId && isFileTab(noteId)) return undefined
     return workspace?.sessionForNote(noteId) ?? undefined
   }
-  /** What the sidebar acts on: the focused note's vault, else the one you last touched. */
-  let session = $derived(solo ?? sessionOf(active) ?? workspace?.get(focusVault) ?? workspace?.sessions[0])
+  /** The session behind any tab: a note's, or the vault a file's tab names. */
+  function tabSession(tab: string): VaultSession | undefined {
+    const f = parseFileTab(tab)
+    return f ? (workspace?.get(f.vault) ?? undefined) : sessionOf(tab)
+  }
+  /** What the sidebar acts on: the focused tab's vault, else the one you last touched. */
+  let session = $derived(solo ?? (active ? tabSession(active) : undefined) ?? workspace?.get(focusVault) ?? workspace?.sessions[0])
   let vaults: VaultNode[] = $derived(
     (workspace?.sessions ?? []).map((s) => ({ id: s.id, label: s.label, notes: s.notes })),
   )
@@ -738,7 +754,9 @@
     { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
     { id: 'history', label: 'Show version history', shortcut: 'Ctrl+Shift+R', run: () => openHistory() },
-    { id: 'trash', label: 'Show trash', run: () => ((sidebar = 'files'), (trashOpen = true)) },
+    { id: 'trash', label: 'Show trash', run: () => ((sidebar = 'files'), (trashOpen = false), (attachmentsOpen = false), (trashOpen = true)) },
+    { id: 'attachments', label: 'Show attachments', run: () => ((sidebar = 'files'), (trashOpen = false), (attachmentsOpen = true)) },
+    { id: 'upload', label: 'Upload files…', run: () => session && startUpload(session.id, null) },
     { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
@@ -922,6 +940,72 @@
     for (const n of inside) {
       close(n.id, true)
       s.deleteNote(n.id)
+    }
+  }
+
+  // ---- files that are not notes (SPEC §9)
+
+  function openFile(vault: string, path: string) {
+    open(fileTab(vault, path))
+  }
+
+  let uploadTarget = $derived(uploading ? workspace?.get(uploading.vault) : undefined)
+  /** The note the upload dialog offers "next to": the focused one, when it is in that vault. */
+  let uploadNote = $derived(
+    uploadTarget && active && !isFileTab(active) && sessionOf(active)?.id === uploadTarget.id
+      ? { id: active, path: uploadTarget.pathOf(active) ?? '' }
+      : null,
+  )
+
+  /** Pick files, then ask where they go. `folder`: a folder's "upload here", else `null`. */
+  function startUpload(vault: string, folder: string | null) {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = true
+    input.onchange = () => {
+      const files = [...(input.files ?? [])]
+      if (files.length) uploading = { vault, folder, files }
+    }
+    input.click()
+  }
+
+  /** Every open tab of `from` now shows `to`: a file renamed under its own tab stays open. */
+  function retargetTabs(from: string, to: string | null) {
+    for (const p of panes) {
+      if (!p.tabs.includes(from)) continue
+      p.tabs = to === null ? p.tabs.filter((t) => t !== from) : p.tabs.map((t) => (t === from ? to : t))
+      if (p.active === from) p.active = to ?? p.tabs[0] ?? null
+    }
+  }
+
+  async function renameFile(vault: string, entry: FileEntry) {
+    const to = (await ask({ kind: 'prompt', title: 'Rename / move file', initial: entry.path, confirmLabel: 'Move' }))?.trim()
+    if (!to || to === entry.path) return
+    try {
+      const moved = await api.moveFile(vault, entry.path, to)
+      retargetTabs(fileTab(vault, entry.path), fileTab(vault, moved.path))
+      workspace?.get(vault)?.filesChanged(0)
+    } catch (e) {
+      await ask({ kind: 'confirm', title: `Not moved: ${e instanceof Error ? e.message : String(e)}`, confirmLabel: 'OK' })
+    }
+  }
+
+  async function deleteFile(vault: string, entry: FileEntry) {
+    const s = workspace?.get(vault)
+    const users = entry.used_by.map((id) => displayName(s?.pathOf(id) ?? '')).filter(Boolean)
+    const body = users.length
+      ? `${users.join(', ')} ${users.length === 1 ? 'uses' : 'use'} it, and will show a broken link.`
+      : entry.vault
+        ? 'It is part of the vault\'s own settings.'
+        : ''
+    const ok = await ask({ kind: 'confirm', title: `Delete ${entry.path}?`, body, confirmLabel: 'Delete', danger: true })
+    if (ok === null) return
+    try {
+      await api.deleteFile(vault, entry.path)
+      retargetTabs(fileTab(vault, entry.path), null)
+      s?.filesChanged(0)
+    } catch (e) {
+      await ask({ kind: 'confirm', title: `Not deleted: ${e instanceof Error ? e.message : String(e)}`, confirmLabel: 'OK' })
     }
   }
 
@@ -1142,6 +1226,7 @@
             activeVault={session?.id ?? null}
             onOpen={open}
             bind:trash={trashOpen}
+            bind:attachments={attachmentsOpen}
             actions={{
               onCreateIn: createInFolder,
               onRenameFolder: renameFolder,
@@ -1159,6 +1244,24 @@
               onMove: moveDropped,
             }}
           >
+            {#snippet attachmentsTools()}
+              <button onclick={() => attachmentsPane?.collapseAll()} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
+              <button onclick={() => attachmentsPane?.locate()} disabled={!attachmentsPane?.canLocate()} title="Show the files the open note uses" aria-label="Show the files the open note uses"><Icon name="locate" /></button>
+              <button onclick={() => session && startUpload(session.id, null)} disabled={!session} title="Upload files…" aria-label="Upload files"><Icon name="upload" /></button>
+            {/snippet}
+            {#snippet attachmentsView()}
+              <AttachmentsPane
+                bind:this={attachmentsPane}
+                vaults={(workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id, session: v }))}
+                activeVault={session?.id ?? null}
+                activeNoteId={active && !isFileTab(active) && !isBlank(active) ? active : null}
+                activeFile={active ? parseFileTab(active) : null}
+                onOpenFile={openFile}
+                onUpload={startUpload}
+                onRename={renameFile}
+                onDelete={deleteFile}
+              />
+            {/snippet}
             {#snippet trashView()}
               {#if session}
                 <TrashPane
@@ -1267,7 +1370,7 @@
     <section class="main">
       {#each panes as p, i (p.id)}
         <Pane
-          lookup={sessionOf}
+          lookup={tabSession}
           vaultLabel={labelOfNote}
           pane={p}
           focused={i === focusedPane}
@@ -1297,6 +1400,10 @@
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
           onRender={solo ? undefined : () => openRender(i)}
           renderOpen={panes.some((q) => q.kind === 'render' && q.active === p.active)}
+          onRenameFile={renameFile}
+          onDeleteFile={deleteFile}
+          onOpenFile={openFile}
+          onUploadFiles={(vault, folder) => startUpload(vault, folder)}
           onSeq={(seq) => { focusedPane = i; p.seq = seq }}
           onAsk={(title, initial, opts) => ask({ kind: 'prompt', title, initial, ...opts })}
         />
@@ -1334,6 +1441,21 @@
   {/if}
   {#if shareOpen && active && session}
     <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />
+  {/if}
+  {#if uploading && uploadTarget}
+    <UploadDialog
+      session={uploadTarget}
+      files={uploading.files}
+      folder={uploading.folder}
+      note={uploadNote}
+      vaultLabel={manyVaults ? workspace?.label(uploadTarget.id) : undefined}
+      onClose={() => (uploading = null)}
+      onDone={(paths) => {
+        const vault = uploadTarget!.id
+        uploading = null
+        if (paths.length === 1) openFile(vault, paths[0]!)
+      }}
+    />
   {/if}
   {#if importInto !== undefined && workspace}
     <ImportDialog

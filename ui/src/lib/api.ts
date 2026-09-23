@@ -99,10 +99,60 @@ async function del(path: string): Promise<void> {
   if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for ${path}`)
 }
 
+/** A vault file that is not a note, as the file manager lists it (SPEC §9). */
+export interface FileEntry {
+  path: string
+  hash: string
+  size: number | null
+  /** Ids of the notes that depend on it — link, embed, name it in front matter, or import it. */
+  used_by: string[]
+  /** Put in the vault on purpose: kept though no note uses it. */
+  kept: boolean
+  /** `_quarto.yml`, `_metadata.yml`, `export/`: kept for the whole vault. */
+  vault: boolean
+}
+
+/** What a write through the file manager came back with. */
+export type FileWrite =
+  | { ok: true; path: string; hash: string; created: boolean }
+  /** Something is at that path already — `current` is its hash — or changed since `base`. */
+  | { ok: false; conflict: string }
+
+const filesUrl = (vault: string, path?: string) =>
+  `/api/v1/vaults/${vault}/files${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`
+
 /** What a note can be rendered to through Quarto (SPEC §5.6). */
 export type RenderFormat = 'html' | 'pdf' | 'docx' | 'revealjs'
 
 export const api = {
+  files: (vault: string) => get<FileEntry[]>(`/vaults/${vault}/files`),
+  /**
+   * Put bytes at `path`. A path that is taken is a conflict unless `replace`; with `base` (the
+   * hash the caller last saw) it is one too when the file changed since.
+   */
+  putFile: async (vault: string, path: string, bytes: Uint8Array, opts: { replace?: boolean; base?: string } = {}): Promise<FileWrite> => {
+    const headers: Record<string, string> = { 'content-type': 'application/octet-stream' }
+    if (opts.replace) headers['x-replace'] = 'true'
+    if (opts.base) headers['x-base-hash'] = opts.base
+    const r = await fetch(filesUrl(vault, path), { method: 'PUT', headers, body: bytes as unknown as BodyInit })
+    if (r.status === 401) authState.onUnauthorized()
+    if (r.status === 409) return { ok: false, conflict: ((await r.json()) as { current: string }).current }
+    if (!r.ok) throw new ApiError(r.status, `${r.status} saving ${path}`)
+    const body = (await r.json()) as { path: string; hash: string }
+    return { ok: true, ...body, created: r.status === 201 }
+  },
+  /** Move or rename a file; the notes using it are rewritten. Throws 409 when `to` is taken. */
+  moveFile: async (vault: string, from: string, to: string) => {
+    const r = await fetch(`/api/v1/vaults/${vault}/files/move`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ from, to }) })
+    if (r.status === 401) authState.onUnauthorized()
+    if (!r.ok) throw new ApiError(r.status, r.status === 409 ? `${to} is taken` : `${r.status} moving ${from}`)
+    return (await r.json()) as { path: string; rewritten: number }
+  },
+  deleteFile: async (vault: string, path: string) => {
+    const r = await fetch(filesUrl(vault, path), { method: 'DELETE' })
+    if (r.status === 401) authState.onUnauthorized()
+    if (!r.ok && r.status !== 404) throw new ApiError(r.status, `${r.status} deleting ${path}`)
+  },
   /**
    * A Quarto render of a note, as the raw response: the body is a page or a file, and the
    * status says why there is none — 501 no quarto (or switched off), 422 Quarto's own error.
