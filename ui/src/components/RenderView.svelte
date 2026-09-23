@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import { api } from '../lib/api.ts'
-  import type { VaultSession } from '../lib/vault.svelte.ts'
+  import { api, type RenderFormat } from '../lib/api.ts'
+  import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
 
   /**
    * A note rendered through Quarto (SPEC §5.6), in a pane beside it. Quarto's page is its own
@@ -9,6 +9,10 @@
    * this origin: it can run the scripts that draw it, and cannot reach the app, its session or
    * its API. A render takes seconds, so it runs when asked; an edit since the last one only
    * marks it stale.
+   *
+   * It renders what the note asks for — the first format its front matter declares — unless
+   * the picker says otherwise. A page (HTML, slides) shows here; a file (PDF, Word) downloads,
+   * and the pane says so.
    */
   let { session, noteId }: { session: VaultSession; noteId: string } = $props()
 
@@ -20,6 +24,29 @@
   let renderedFrom: string | null = $state(null)
   let stale = $derived(html !== null && text !== null && renderedFrom !== null && text !== renderedFrom)
   let stop: (() => void) | undefined
+
+  const CHOICES: { id: RenderFormat | 'auto'; label: string }[] = [
+    { id: 'auto', label: 'As the note says' },
+    { id: 'html', label: 'Page (HTML)' },
+    { id: 'revealjs', label: 'Slides (reveal.js)' },
+    { id: 'pdf', label: 'PDF — download' },
+    { id: 'docx', label: 'Word — download' },
+  ]
+  let choice: RenderFormat | 'auto' = $state('auto')
+  /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
+  let made = $state('')
+  /** A render that was a file rather than a page: what was saved. */
+  let saved: { name: string; url: string } | null = $state(null)
+  const KINDS: Record<string, string> = { 'text/html': 'page', 'application/pdf': 'PDF', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word file' }
+
+  function save(blob: Blob, name: string) {
+    if (saved) URL.revokeObjectURL(saved.url)
+    saved = { name, url: URL.createObjectURL(blob) }
+    const a = document.createElement('a')
+    a.href = saved.url
+    a.download = name
+    a.click()
+  }
 
   /**
    * Links leave the frame: one to another site opens a tab of its own rather than trying to
@@ -33,14 +60,24 @@
     busy = true
     const from = text
     try {
-      const r = await api.render(session.id, noteId, 'preview')
+      const r = await api.render(session.id, noteId, choice)
+      const type = (r.headers.get('content-type') ?? '').split(';')[0]!.trim()
       if (r.status === 501) {
         error = 'Rendering needs Quarto, and there is none here — or the server has it switched off.'
       } else if (!r.ok) {
         error = (await r.text()).trim() || `Rendering failed (${r.status}).`
-      } else {
+      } else if (type === 'text/html') {
         const page = await r.text()
         html = page.includes('</body>') ? page.replace('</body>', `${LINKS_OUT}</body>`) : page + LINKS_OUT
+        made = /class="reveal"|reveal\.js/u.test(page.slice(0, 20000)) ? 'slides' : 'page'
+        saved = null
+        renderedFrom = from
+        error = null
+      } else {
+        // A file, not a page: it goes to the downloads, and the pane keeps what it showed.
+        const ext = r.headers.get('content-disposition')?.match(/filename="[^"]*\.([^".]+)"/u)?.[1] ?? 'bin'
+        save(await r.blob(), `${displayName(session.pathOf(noteId) ?? 'note')}.${ext}`)
+        made = KINDS[type] ?? 'file'
         renderedFrom = from
         error = null
       }
@@ -59,11 +96,17 @@
       if (first) void render()
     })
   })
-  onDestroy(() => stop?.())
+  onDestroy(() => {
+    stop?.()
+    if (saved) URL.revokeObjectURL(saved.url)
+  })
 </script>
 
 <div class="render">
   <div class="bar">
+    <select bind:value={choice} onchange={render} disabled={busy} aria-label="Render as">
+      {#each CHOICES as c (c.id)}<option value={c.id}>{c.label}</option>{/each}
+    </select>
     <span class="state">
       {#if busy}
         Rendering with Quarto…
@@ -71,17 +114,26 @@
         Not rendered
       {:else if stale}
         Changed since this render
-      {:else if html !== null}
-        Rendered with Quarto
+      {:else if made}
+        Rendered as {made === 'slides' ? 'slides' : `a ${made}`}
       {/if}
     </span>
     <span class="spacer"></span>
-    <button onclick={render} disabled={busy} title="Render the note again">{html === null ? 'Render' : 'Re-render'}</button>
+    <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
   </div>
   {#if error}
     <pre class="error">{error}</pre>
   {/if}
-  {#if html !== null}
+  {#if saved}
+    <div class="saved">
+      <p>Saved <strong>{saved.name}</strong> to your downloads.</p>
+      <p class="muted">
+        <a href={saved.url} download={saved.name}>Save it again</a> · or pick <em>Page</em> or <em>Slides</em> above to see
+        the note here.
+      </p>
+    </div>
+  {/if}
+  {#if html !== null && !saved}
     <iframe class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
@@ -132,6 +184,28 @@
     white-space: pre-wrap;
     color: var(--danger);
     border-bottom: 1px solid var(--border-soft);
+  }
+  .bar select {
+    font: inherit;
+    color: var(--fg);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1rem 0.3rem;
+  }
+  .saved {
+    padding: 1.2rem 1rem;
+    font-family: var(--ui);
+    font-size: 0.85rem;
+  }
+  .saved p {
+    margin: 0 0 0.4rem;
+  }
+  .saved .muted {
+    color: var(--muted);
+  }
+  .saved a {
+    color: var(--accent);
   }
   .wait {
     margin: 0;

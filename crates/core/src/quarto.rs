@@ -64,25 +64,42 @@ impl Format {
     }
 }
 
-/// What the preview pane renders a note as: the first page-like format its front matter
-/// declares — so a deck (`format: revealjs`, or a `revealjs:` block ahead of `pdf:`) previews
-/// as slides, with the theme and options written for it — else a plain page. A render asked
-/// for as `"preview"` resolves through here.
-pub fn preview_format(text: &str) -> Format {
+/// The formats a note's front matter declares, in its order, base names only
+/// (`revealjs+code` → `revealjs`): `format: x`, `format: [x, y]`, or a `format:` block's keys.
+fn declared_formats(text: &str) -> Vec<String> {
     use serde_yaml_ng::Value;
-    let Some((yaml, _)) = crate::frontmatter::block(text) else { return Format::Html };
-    let Ok(Value::Mapping(front)) = serde_yaml_ng::from_str::<Value>(&text[yaml]) else {
-        return Format::Html;
-    };
-    let declared: Vec<String> = match front.get("format") {
+    let Some((yaml, _)) = crate::frontmatter::block(text) else { return Vec::new() };
+    let Ok(Value::Mapping(front)) = serde_yaml_ng::from_str::<Value>(&text[yaml]) else { return Vec::new() };
+    let names: Vec<String> = match front.get("format") {
         Some(Value::String(f)) => vec![f.clone()],
         Some(Value::Sequence(fs)) => fs.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect(),
         Some(Value::Mapping(m)) => m.keys().filter_map(|k| k.as_str().map(str::to_owned)).collect(),
         _ => Vec::new(),
     };
-    declared
+    names.into_iter().map(|f| f.split('+').next().unwrap_or(&f).to_owned()).collect()
+}
+
+/// What "Render with Quarto" makes of a note when nobody says otherwise (`"auto"`): the first
+/// format its front matter declares that a render can produce — a deck as slides, `pdf` or
+/// `typst` as a PDF, `docx` as a Word file — else a plain page.
+pub fn declared_format(text: &str) -> Format {
+    declared_formats(text)
         .iter()
-        .find_map(|f| match f.split('+').next().unwrap_or(f) {
+        .find_map(|f| match f.as_str() {
+            "revealjs" => Some(Format::RevealJs),
+            "html" => Some(Format::Html),
+            "pdf" | "typst" => Some(Format::Pdf),
+            "docx" => Some(Format::Docx),
+            _ => None,
+        })
+        .unwrap_or(Format::Html)
+}
+
+/// The first *page* the note declares (`"preview"`): slides or HTML, never a file to save.
+pub fn preview_format(text: &str) -> Format {
+    declared_formats(text)
+        .iter()
+        .find_map(|f| match f.as_str() {
             "revealjs" => Some(Format::RevealJs),
             "html" => Some(Format::Html),
             _ => None,
@@ -511,6 +528,30 @@ mod tests {
         assert_eq!(preview_format("---\nformat: docx\n---\n"), Format::Html, "not a page: a plain one then");
         assert_eq!(preview_format("# no front matter"), Format::Html);
         assert_eq!(preview_format("---\nformat: [\n---\n"), Format::Html);
+    }
+
+    #[test]
+    fn auto_renders_the_first_format_the_note_declares() {
+        assert_eq!(
+            declared_format("---\nformat:\n  pdf:\n    toc: true\n  revealjs: default\n---\n"),
+            Format::Pdf
+        );
+        assert_eq!(declared_format("---\nformat: docx\n---\n"), Format::Docx);
+        assert_eq!(
+            declared_format("---\nformat: [beamer, typst]\n---\n"),
+            Format::Pdf,
+            "beamer is not ours to make"
+        );
+        assert_eq!(
+            declared_format("---\nformat:\n  revealjs:\n    theme: [default, cern.scss]\n---\n"),
+            Format::RevealJs
+        );
+        assert_eq!(declared_format("---\ntitle: x\n---\n"), Format::Html);
+        assert_eq!(
+            preview_format("---\nformat: [pdf, revealjs]\n---\n"),
+            Format::RevealJs,
+            "a preview is a page"
+        );
     }
 
     #[test]

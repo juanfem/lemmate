@@ -748,14 +748,19 @@ The local relay (desktop app, `lemmate serve`) passes its vault folder, so there
 ### Rendering with Quarto
 
 **Render with Quarto** — in the command palette, in a note's `···` menu, or the page icon on
-the strip of a `.qmd` note — opens the note as Quarto renders it, in a pane beside it. Quarto's
+the strip of a `.qmd` note — renders the note **the way its front matter says**: the first
+format it declares that a render can make. A deck (`format: revealjs`) or a page (`html`) opens
+in a pane beside the note; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
+the pane says so. The picker on the pane's bar renders it another way — as a plain page, as
+slides, or as a PDF or Word file to download — whatever the note declares. Quarto's
 page runs in a sandboxed frame: its own scripts and styles work, and nothing in it can reach the
 app or your session. Links to other sites open in a new tab. A render takes a few seconds, so
 it runs when you ask: an edit afterwards marks the pane *Changed since this render*, and
 **Re-render** brings it up to date. If Quarto refuses the note, the pane shows its message.
 
-The palette also renders straight to a file: **as PDF** (through the Typst that Quarto bundles —
-no LaTeX needed), **as Word document**, and **as slides** (a self-contained reveal.js page).
+PDFs are made through the Typst that Quarto bundles — no LaTeX needed — so a note's `pdf:`
+options that only LaTeX understands (a `documentclass`, say) do not apply; Typst's do. The
+palette's **Render with Quarto as PDF / Word document / slides** save a file directly.
 
 What goes in:
 

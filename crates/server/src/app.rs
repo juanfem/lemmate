@@ -1112,7 +1112,8 @@ async fn render_note(
     if auth::note_role(&state, &user, vault, id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let preview = body.format == "preview";
+    // `"auto"`: what the note declares; `"preview"`: the page it declares (`quarto.rs`).
+    let preview = body.format == "preview" || body.format == "auto";
     let format = if preview {
         lemmate_core::quarto::Format::Html
     } else {
@@ -1126,7 +1127,11 @@ async fn render_note(
         RoomDoc::Note(d) => d.text(),
         RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
     };
-    let format = if preview { lemmate_core::quarto::preview_format(&text) } else { format };
+    let format = match body.format.as_str() {
+        "auto" => lemmate_core::quarto::declared_format(&text),
+        "preview" => lemmate_core::quarto::preview_format(&text),
+        _ => format,
+    };
     let entries: HashMap<String, String> = match &*vault_room(&state, vault).await?.doc.lock().await {
         RoomDoc::Vault(v) => v.attachment_entries().into_iter().collect(),
         RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),

@@ -954,7 +954,8 @@ async fn render_note(
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     // `"preview"`: whatever page the note itself declares (`quarto::preview_format`).
-    let preview = body.format == "preview";
+    // `"auto"`: what the note declares; `"preview"`: the page it declares (`quarto.rs`).
+    let preview = body.format == "preview" || body.format == "auto";
     let format = if preview {
         crate::quarto::Format::Html
     } else {
@@ -965,7 +966,11 @@ async fn render_note(
     else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let format = if preview { crate::quarto::preview_format(&text) } else { format };
+    let format = match body.format.as_str() {
+        "auto" => crate::quarto::declared_format(&text),
+        "preview" => crate::quarto::preview_format(&text),
+        _ => format,
+    };
     let rendered = tokio::task::spawn_blocking(move || {
         if !crate::quarto::quarto_available(None) {
             return Ok(None);

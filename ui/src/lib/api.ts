@@ -122,8 +122,9 @@ const filesUrl = (vault: string, path?: string) =>
   `/api/v1/vaults/${vault}/files${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`
 
 /** What a note can be rendered to through Quarto (SPEC §5.6). */
-/** `preview`: the page the note itself declares — slides for a revealjs deck, else HTML. */
-export type RenderFormat = 'preview' | 'html' | 'pdf' | 'docx' | 'revealjs'
+/** `auto`: the first format the note declares (a PDF or Word file, or a page); `preview`: the
+ *  first page it declares — slides for a revealjs deck, else HTML. */
+export type RenderFormat = 'auto' | 'preview' | 'html' | 'pdf' | 'docx' | 'revealjs'
 
 export const api = {
   files: (vault: string) => get<FileEntry[]>(`/vaults/${vault}/files`),
