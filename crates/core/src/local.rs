@@ -843,6 +843,9 @@ async fn restore(
 #[derive(Deserialize)]
 struct ExportIn {
     format: String,
+    /// A render to look at in the app rather than to save (`quarto::RenderOptions::viewing`).
+    #[serde(default)]
+    view: bool,
 }
 
 /// Export through pandoc with the vault's `export/` folder as resources (SPEC §12).
@@ -878,7 +881,8 @@ async fn render_page(
     path: Path<(String, String)>,
     Query(q): Query<ExportIn>,
 ) -> std::result::Result<axum::response::Response, StatusCode> {
-    let mut response = render_note(state, path, axum::Json(q)).await?.into_response();
+    let mut response =
+        render_note(state, path, axum::Json(ExportIn { view: true, ..q })).await?.into_response();
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static(crate::quarto::PAGE_SANDBOX),
@@ -985,14 +989,14 @@ async fn render_note(
         "preview" => crate::quarto::preview_format(&text),
         _ => format,
     };
+    let opts = crate::quarto::RenderOptions { viewing: body.view, ..Default::default() };
     let rendered = tokio::task::spawn_blocking(move || {
         if !crate::quarto::quarto_available(None) {
             return Ok(None);
         }
         let proj = crate::projection::Projection::new(root);
         let read = |p: &str| proj.read_bytes(p).ok();
-        crate::quarto::render(&path, &text, format, &attachments, read, &Default::default())
-            .map(|r| Some((r, path)))
+        crate::quarto::render(&path, &text, format, &attachments, read, &opts).map(|r| Some((r, path)))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -131,11 +131,17 @@ pub struct RenderOptions {
     /// A render that takes longer is killed. Quarto starts in about a second and a note renders
     /// in a few; this is for the one that never finishes.
     pub timeout: Duration,
+    /// Made to be looked at in the app — the render pane, or a tab of its own — rather than
+    /// saved. Such a page is sandboxed, and a sandboxed document may not rewrite its own URL
+    /// the way reveal.js does on every slide (`hash`, `history`): WebKit refuses, and on an
+    /// iPhone the slide then turned without the screen showing it. So a deck made for viewing
+    /// keeps its URL alone; one saved to a file keeps its slide links.
+    pub viewing: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { quarto: None, timeout: Duration::from_secs(120) }
+        Self { quarto: None, timeout: Duration::from_secs(120), viewing: false }
     }
 }
 
@@ -225,6 +231,12 @@ fn render_in(
         // Not `--quiet`: that silences the error along with the progress, and the error is
         // the one part of the log a failed render is read for.
         .args(["--to", format.quarto_name(), "--no-execute"])
+        // Command-line metadata wins over the note's own front matter.
+        .args(if opts.viewing && format == Format::RevealJs {
+            &["-M", "hash:false", "-M", "history:false"][..]
+        } else {
+            &[][..]
+        })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log)?)

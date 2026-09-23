@@ -159,11 +159,12 @@ export const api = {
    * A Quarto render of a note, as the raw response: the body is a page or a file, and the
    * status says why there is none — 501 no quarto (or switched off), 422 Quarto's own error.
    */
-  render: async (vault: string, id: string, format: RenderFormat) => {
+  render: async (vault: string, id: string, format: RenderFormat, opts: { view?: boolean } = {}) => {
     const r = await fetch(`/api/v1/vaults/${vault}/notes/${id}/render`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ format }),
+      // `view`: to be looked at here, not saved — a deck then leaves its URL alone.
+      body: JSON.stringify({ format, view: !!opts.view }),
     })
     if (r.status === 401) authState.onUnauthorized()
     return r

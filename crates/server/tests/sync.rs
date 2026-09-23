@@ -495,6 +495,9 @@ async fn render_uses_quarto_unless_switched_off() {
                 .unwrap();
                 assert!(csp.starts_with("sandbox allow-scripts"), "{csp}");
                 assert!(page.contains("reveal"));
+                // Made for viewing: the deck does not rewrite its URL, which WebKit refuses a
+                // sandboxed page (and which left an iPhone's screen behind the slide).
+                assert!(page.contains("history: false") && page.contains("hash: false"), "URL writes off");
             }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");

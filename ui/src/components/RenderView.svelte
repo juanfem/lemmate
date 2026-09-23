@@ -88,7 +88,7 @@
     busy = true
     const from = text
     try {
-      const r = await api.render(session.id, noteId, choice)
+      const r = await api.render(session.id, noteId, choice, { view: true })
       const type = (r.headers.get('content-type') ?? '').split(';')[0]!.trim()
       if (r.status === 501) {
         error = 'Rendering needs Quarto, and there is none here — or the server has it switched off.'

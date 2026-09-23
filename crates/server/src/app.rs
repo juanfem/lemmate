@@ -1055,6 +1055,9 @@ async fn backlinks(
 #[derive(Deserialize)]
 struct ExportIn {
     format: String,
+    /// A render to look at in the app rather than to save (`quarto::RenderOptions::viewing`).
+    #[serde(default)]
+    view: bool,
 }
 
 /// Render a note through pandoc (SPEC §12). Attachments resolve against the server's blob
@@ -1139,13 +1142,15 @@ async fn render_note(
     let blobs = state.attachments.clone();
     let bin = state.options.quarto.clone();
     let path = row.path.clone();
+    let view = body.view;
     let rendered = tokio::task::spawn_blocking(move || {
         if !lemmate_core::quarto::quarto_available(bin.as_deref()) {
             return Ok(None);
         }
         let paths: Vec<String> = entries.keys().cloned().collect();
         let read = |p: &str| entries.get(p).and_then(|hash| blobs.get(vault, hash).ok().flatten());
-        let opts = lemmate_core::quarto::RenderOptions { quarto: bin.clone(), ..Default::default() };
+        let opts =
+            lemmate_core::quarto::RenderOptions { quarto: bin.clone(), viewing: view, ..Default::default() };
         lemmate_core::quarto::render(&path, &text, format, &paths, read, &opts).map(Some)
     })
     .await
@@ -1182,7 +1187,7 @@ async fn render_page(
     path: Path<(String, String)>,
     Query(q): Query<ExportIn>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let mut response = render_note(state, user, path, Json(q)).await?;
+    let mut response = render_note(state, user, path, Json(ExportIn { view: true, ..q })).await?;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(lemmate_core::quarto::PAGE_SANDBOX),
