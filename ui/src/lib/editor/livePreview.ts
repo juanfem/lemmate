@@ -7,6 +7,7 @@ import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
 import { codeLanguageName } from './syntax.ts'
+import { parseEmbed, type EmbedTarget } from './transclude.ts'
 
 export interface LivePreviewOptions {
   /** Never reveal markup (read-only views have no meaningful cursor). */
@@ -15,6 +16,21 @@ export interface LivePreviewOptions {
   openLink: (target: string) => void
   /** Resolve an embed target to a URL (attachments) or undefined. */
   embedUrl: (target: string) => string | undefined
+  /**
+   * The note an `![[embed]]` names, to draw in place of it (SPEC §5, tier 3). Undefined — or
+   * left out, as views with no vault behind them do — keeps the embed a link.
+   */
+  embedNote?: (target: EmbedTarget) => EmbeddedNote | undefined
+}
+
+/** A transcluded note, as the widget that frames it needs it. */
+export interface EmbeddedNote {
+  /** What is shown — note and section. The widget, and what it follows, live while it holds. */
+  key: string
+  /** The frame's caption: the note's name, and the section when there is one. */
+  title: string
+  /** Draw the note into `host` and keep it current; the function returned stops and cleans up. */
+  mount: (host: HTMLElement) => () => void
 }
 
 class MathWidget extends WidgetType {
@@ -89,6 +105,71 @@ class ImageWidget extends WidgetType {
     img.src = this.url
     img.alt = this.alt
     return img
+  }
+}
+
+/** What each drawn embed must undo when CodeMirror drops its DOM. */
+const unmounts = new WeakMap<HTMLElement, () => void>()
+
+/**
+ * `![[note]]` on a line of its own: the note, read-only and live, in a frame captioned with its
+ * name. The caption opens it; a press anywhere else on the frame puts the caret on the embed,
+ * which reveals the source — the same bargain a rendered table makes.
+ */
+class TranscludeWidget extends WidgetType {
+  readonly embed: EmbeddedNote
+  readonly note: string
+  readonly open: (t: string) => void
+  constructor(embed: EmbeddedNote, note: string, open: (t: string) => void) {
+    super()
+    this.embed = embed
+    this.note = note
+    this.open = open
+  }
+  eq(other: TranscludeWidget) {
+    return other.embed.key === this.embed.key
+  }
+  get estimatedHeight() {
+    return 120
+  }
+  toDOM(view: EditorView) {
+    // The wrapper carries the gap around the frame as padding, for the reason `.cm-table` does.
+    const wrap = document.createElement('div')
+    wrap.className = 'cm-transclusion'
+    const box = document.createElement('div')
+    box.className = 'cm-transclusion-box'
+    const caption = document.createElement('div')
+    caption.className = 'cm-transclusion-caption'
+    const title = document.createElement('a')
+    title.className = 'cm-wikilink'
+    title.href = '#'
+    title.textContent = this.embed.title
+    title.title = 'Open the note'
+    title.onclick = (e) => {
+      e.preventDefault()
+      this.open(this.note)
+    }
+    caption.append(title)
+    const body = document.createElement('div')
+    body.className = 'cm-transclusion-body'
+    box.append(caption, body)
+    wrap.append(box)
+    unmounts.set(wrap, this.embed.mount(body))
+    wrap.addEventListener('mousedown', (e) => {
+      const target = e.target as HTMLElement
+      if (target.closest('a, .cm-transclusion-body .cm-content') || !view.state.facet(EditorView.editable)) return
+      e.preventDefault()
+      view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } })
+      view.focus()
+    })
+    return wrap
+  }
+  destroy(dom: HTMLElement) {
+    unmounts.get(dom)?.()
+    unmounts.delete(dom)
+  }
+  ignoreEvent() {
+    return true
   }
 }
 
@@ -573,13 +654,24 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             break
           }
           case 'WikiEmbed': {
+            if (revealed(state, node.from, node.to)) break
             const text = state.sliceDoc(node.from + 3, node.to - 2)
             const target = text.split('|')[0]!.trim()
             const url = opts.embedUrl(target)
-            if (url && !revealed(state, node.from, node.to)) {
+            if (url) {
               push(node.from, node.to, Decoration.replace({ widget: new ImageWidget(url, target) }))
-            } else if (!revealed(state, node.from, node.to)) {
-              push(node.from, node.to, Decoration.replace({ widget: new LinkWidget(`![[${target}]]`, target, opts.openLink) }))
+              break
+            }
+            // A note is a block of its own, so only an embed alone on its line becomes one;
+            // one in the middle of a sentence stays a link. A block widget covers whole lines.
+            const line = state.doc.lineAt(node.from)
+            const alone = line.text.trim() === state.sliceDoc(node.from, node.to)
+            const parsed = parseEmbed(text)
+            const embed = alone ? opts.embedNote?.(parsed) : undefined
+            if (embed) {
+              push(line.from, line.to, Decoration.replace({ widget: new TranscludeWidget(embed, parsed.note, opts.openLink), block: true }))
+            } else {
+              push(node.from, node.to, Decoration.replace({ widget: new LinkWidget(`![[${target}]]`, parsed.note, opts.openLink) }))
             }
             break
           }

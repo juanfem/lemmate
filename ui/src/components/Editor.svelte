@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { EditorView } from '@codemirror/view'
-  import { createEditor, setViewMode, type ViewMode } from '../lib/editor/setup.ts'
+  import { createEditor, setViewMode, type NoteSource, type ViewMode } from '../lib/editor/setup.ts'
   import { listIndent } from '../lib/editor/lists.ts'
   import Icon from './Icon.svelte'
   import type { VaultSession } from '../lib/vault.svelte.ts'
@@ -120,6 +120,16 @@
   }
 
   const embedUrl = (target: string) => embedUrlFor(session, session.pathOf(noteId) ?? '', target)
+
+  /** Where `![[note]]` embeds read from: this vault, live. */
+  const notes: NoteSource = {
+    resolve: (target) => {
+      const hit = session.resolveLink(target)
+      return hit && { id: hit.id, title: displayName(hit.path) }
+    },
+    follow: (id, onText) => session.watchNote(id, onText),
+    embedUrl: (id, target) => embedUrlFor(session, session.pathOf(id) ?? '', target),
+  }
 
   function openLink(target: string) {
     const hit = session.resolveLink(target)
@@ -250,6 +260,8 @@
     view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
       openLink,
       embedUrl,
+      notes,
+      noteId,
       mode,
       extra: [fileHandlers, headingWatcher, pageFurniture(head, foot)],
       complete: {
@@ -289,7 +301,7 @@
   // position, the undo history and the collaborative binding all survive the switch.
   $effect(() => {
     const m = mode
-    if (view) setViewMode(view, m, { openLink, embedUrl })
+    if (view) setViewMode(view, m, { openLink, embedUrl, notes, noteId })
   })
 
   /** A press on the bar must not take the focus off the text it is about to indent. */

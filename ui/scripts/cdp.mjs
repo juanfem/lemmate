@@ -3,6 +3,8 @@
 //   shot:<name>      screenshot -> <outdir>/<name>.png
 //   eval:<js>        Runtime.evaluate (awaits promises), prints result JSON
 //   click:<selector> querySelector(sel).click(), errors if missing
+//   mouse:<x>,<y>    a real left press and release at viewport coordinates — what CodeMirror's
+//                    own mousedown handling (posAtCoords, the height map) needs to see
 //   type:<text>      Input.insertText
 //   key:<key>        keyDown+keyUp, e.g. Enter, Escape, ArrowDown, Ctrl+o
 //   wait:<ms>        sleep
@@ -92,6 +94,13 @@ async function runStep(cdp, step, outdir) {
         if (!el) throw new Error('no element for selector: ' + ${JSON.stringify(arg)});
         el.scrollIntoView({ block: 'center' }); el.click(); return true; })()`);
       return;
+    case 'mouse': {
+      const [x, y] = arg.split(',').map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) die(`bad mouse (expected x,y): ${arg}`);
+      for (const type of ['mousePressed', 'mouseReleased'])
+        await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+      return;
+    }
     case 'type':
       await cdp.send('Input.insertText', { text: arg });
       return;

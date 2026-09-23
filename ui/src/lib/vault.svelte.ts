@@ -453,6 +453,28 @@ export class VaultSession {
     }
   }
 
+  /**
+   * Follow a note that is only being read — an `![[embed]]` of it. `onText` gets its markdown
+   * once it has loaded, then again on every change, whoever makes it. Returns what stops it.
+   */
+  watchNote(id: string, onText: (text: string) => void): () => void {
+    const { doc, release } = this.acquire(id)
+    const text = doc.getText('content')
+    const send = () => onText(text.toString())
+    let state: 'loading' | 'watching' | 'stopped' = 'loading'
+    void this.whenLoaded(id, doc).then(() => {
+      if (state !== 'loading') return
+      state = 'watching'
+      send()
+      text.observe(send)
+    })
+    return () => {
+      if (state === 'watching') text.unobserve(send)
+      state = 'stopped'
+      release()
+    }
+  }
+
   /** Fetch an attachment's bytes, to hand to another vault's `uploadAttachment`. */
   async attachmentBytes(hash: string): Promise<Uint8Array> {
     const r = await fetch(`/api/v1/vaults/${this.id}/attachments/${hash}`)

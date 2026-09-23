@@ -14,7 +14,8 @@ import { yCollab } from 'y-codemirror.next'
 import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { codeLanguage, noteSyntax } from './syntax.ts'
-import { livePreview, type LivePreviewOptions } from './livePreview.ts'
+import { livePreview, type EmbeddedNote, type LivePreviewOptions } from './livePreview.ts'
+import { embeddedSection, type EmbedTarget } from './transclude.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
 
@@ -100,6 +101,16 @@ const theme = EditorView.theme({
   '.cm-wikilink-src': { color: 'var(--accent)' },
   '.cm-math-block': { display: 'block', textAlign: 'center', padding: '0.5em 0' },
   '.cm-embed-image': { maxWidth: '100%', display: 'block', padding: '0.5em 0' },
+  // A transcluded note: a frame with its name on top, and the note itself — another editor, in
+  // reading mode — inside. That inner editor matches every rule here too, so it is taken back
+  // down to a plain block: no height of its own, no page padding, no centred measure.
+  '.cm-transclusion': { padding: '0.4em 0' },
+  '.cm-transclusion-box': { borderLeft: '3px solid var(--border)', paddingLeft: '0.9em', cursor: 'text' },
+  '.cm-transclusion-caption': { fontFamily: 'var(--ui)', fontSize: '0.72em', lineHeight: '1.6', color: 'var(--faint)' },
+  '.cm-transclusion-note': { margin: '0', fontFamily: 'var(--ui)', fontSize: '0.8em', color: 'var(--faint)', fontStyle: 'italic' },
+  '&.cm-embedded': { height: 'auto', fontSize: 'inherit', background: 'transparent' },
+  '&.cm-embedded .cm-scroller': { padding: '0', overflow: 'visible' },
+  '&.cm-embedded .cm-content': { maxWidth: 'none', margin: '0', padding: '0' },
   // A fixed width for every shape, so the text after the marker lines up whatever the level's
   // bullet is — and so the widget takes the same room the `-` it replaces did.
   '.cm-list-bullet': { display: 'inline-block', width: '1ch', textAlign: 'center', color: 'var(--muted)' },
@@ -264,14 +275,102 @@ export const VIEW_MODES: { id: ViewMode; label: string; hint: string }[] = [
 // order the stylesheets happened to mount in. The rules live in `theme` below, behind `&.…`.
 const sourceLook = EditorView.editorAttributes.of({ class: 'cm-mode-source' })
 const readingLook = EditorView.editorAttributes.of({ class: 'cm-mode-reading' })
+const embeddedLook = EditorView.editorAttributes.of({ class: 'cm-embedded' })
 
-function modeExtensions(mode: ViewMode, opts: LivePreviewOptions): Extension {
-  if (mode === 'source') return [sourceLook]
-  if (mode === 'reading') return [livePreview({ ...opts, alwaysFolded: true }), EditorView.editable.of(false), readingLook]
-  return [livePreview(opts)]
+/** What an editor needs from its vault to draw `![[note]]` in place (SPEC §5, tier 3). */
+export interface NoteSource {
+  /** The note a wikilink target names, and what to call it. */
+  resolve: (target: string) => { id: string; title: string } | undefined
+  /** Call `onText` with the note's markdown once it has loaded and on every change after it;
+   *  the function returned stops. */
+  follow: (id: string, onText: (text: string) => void) => () => void
+  /** `embedUrl`, for an attachment named inside note `id` — its folder is where it looks first. */
+  embedUrl: (id: string, target: string) => string | undefined
 }
 
-export interface EditorOptions extends LivePreviewOptions {
+export interface PreviewOptions extends LivePreviewOptions {
+  /** Where transcluded notes come from. Without one, a note embed is drawn as a link. */
+  notes?: NoteSource
+  /** The note being shown, so that it is never drawn inside itself. */
+  noteId?: string
+}
+
+/** How deep embeds nest before the next one is a link: a note in a note in a note is plenty. */
+const MAX_EMBED_DEPTH = 3
+
+/**
+ * The embeds a view draws. `chain` is the notes already on screen around it — the view's own
+ * and each one it sits inside — so a note that embeds itself, or two that embed each other,
+ * stop at a link instead of recursing.
+ */
+function noteEmbeds(notes: NoteSource, openLink: (t: string) => void, chain: string[]) {
+  return (target: EmbedTarget): EmbeddedNote | undefined => {
+    const hit = notes.resolve(target.note)
+    if (!hit || chain.includes(hit.id) || chain.length > MAX_EMBED_DEPTH) return undefined
+    const section = target.heading ?? (target.block === undefined ? undefined : `^${target.block}`)
+    return {
+      key: `${hit.id}#${section ?? ''}`,
+      title: section === undefined ? hit.title : `${hit.title} › ${section}`,
+      mount: (host) => {
+        const view = new EditorView({
+          parent: host,
+          state: EditorState.create({
+            extensions: embeddedExtensions({
+              openLink,
+              embedUrl: (t) => notes.embedUrl(hit.id, t),
+              embedNote: noteEmbeds(notes, openLink, [...chain, hit.id]),
+            }),
+          }),
+        })
+        // Said in place of the text whenever there is none to show: before the note has
+        // loaded, when the heading or block it names is gone, and when it is simply empty.
+        const note = document.createElement('p')
+        note.className = 'cm-transclusion-note'
+        note.textContent = 'Loading…'
+        host.append(note)
+        const stop = notes.follow(hit.id, (text) => {
+          const shown = embeddedSection(text, target)
+          note.textContent =
+            shown === null ? `${target.heading === undefined ? 'No block' : 'No heading'} “${section}” in ${hit.title}.` : 'Empty note.'
+          note.hidden = !!shown
+          view.dom.hidden = !shown
+          const doc = shown ?? ''
+          if (doc !== view.state.doc.toString()) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } })
+        })
+        view.dom.hidden = true
+        return () => {
+          stop()
+          view.destroy()
+        }
+      },
+    }
+  }
+}
+
+/** The inner editor of a transclusion: the reading mode's rendering, and nothing to edit. */
+function embeddedExtensions(opts: LivePreviewOptions): Extension {
+  return [
+    EditorView.lineWrapping,
+    markdown({ base: markdownLanguage, extensions: noteSyntax, codeLanguages: (info) => codeLanguage(languages, info) }),
+    syntaxHighlighting(highlight),
+    theme,
+    livePreview({ ...opts, alwaysFolded: true }),
+    EditorView.editable.of(false),
+    EditorState.readOnly.of(true),
+    readingLook,
+    embeddedLook,
+  ]
+}
+
+function modeExtensions(mode: ViewMode, opts: PreviewOptions): Extension {
+  if (mode === 'source') return [sourceLook]
+  const { notes, noteId, ...preview } = opts
+  if (notes) preview.embedNote = noteEmbeds(notes, opts.openLink, noteId === undefined ? [] : [noteId])
+  if (mode === 'reading') return [livePreview({ ...preview, alwaysFolded: true }), EditorView.editable.of(false), readingLook]
+  return [livePreview(preview)]
+}
+
+export interface EditorOptions extends PreviewOptions {
   extra?: Extension[]
   complete?: CompletionSources
   mode?: ViewMode
@@ -280,7 +379,7 @@ export interface EditorOptions extends LivePreviewOptions {
 const modeCompartment = new Compartment()
 
 /** Swap the view mode in place — the doc, the scroll position and the collab binding all stay. */
-export function setViewMode(view: EditorView, mode: ViewMode, opts: LivePreviewOptions) {
+export function setViewMode(view: EditorView, mode: ViewMode, opts: PreviewOptions) {
   view.dispatch({ effects: modeCompartment.reconfigure(modeExtensions(mode, opts)) })
 }
 

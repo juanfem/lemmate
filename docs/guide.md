@@ -231,7 +231,8 @@ through untouched.
 [[Other Note]]                  wikilink; resolves by path, then basename
 [[Other Note#Section|label]]    heading fragment and a custom label
 ![[diagram.png]]                embedded image
-![[Other Note]]                 note transclusion — parsed, but not yet rendered
+![[Other Note]]                 note transclusion: the note, drawn in place
+![[Other Note#Section]]         …just that section, or #^id for one marked block
 [label](relative/path.md)       ordinary links work too
 #tag and #nested/tag            not inside code or maths; case-insensitive
 
@@ -273,10 +274,20 @@ the file holds. An ordered item is numbered by its position, as every markdown r
 it, so a file full of `1.` still reads 1, 2, 3 and a gap left by an item you indented away
 closes by itself. A task line shows its checkbox and no bullet.
 
+**Note embeds** — `![[Other Note]]` on a line of its own — draw that note in place, in a frame
+captioned with its name: read-only, rendered as reading mode renders it, and live, so an edit
+to the other note (from any window, or to its file) shows up here as it happens. Front matter
+is left out. `![[Other Note#Section]]` shows only that heading's section, down to the next
+heading at its level or above; `![[Other Note#^id]]` shows the paragraph or list item that
+ends in `^id` (a `^id` on a line of its own marks the table, quote or list above it). Click
+the caption to open the note, or anywhere else on the frame to edit the embed's own markdown.
+An embed in the middle of a sentence stays a link, as does one naming a note that does not
+exist, the note it sits in, or a note already being shown around it — so a note that embeds
+itself, or two that embed each other, stop at a link — and embeds nest three deep at most.
+
 Recognised by the indexer and handled by pandoc **on export only**, with no editor decoration
 today: footnotes, citations, definition lists, superscript/subscript, bracketed spans, header
-and link attributes. `![[note]]`
-transclusion is parsed but shown as a plain link; only attachment embeds render inline.
+and link attributes. The `^id` block markers stay visible in the text.
 Callout `collapse="true"` is not implemented.
 
 ### Editing behaviour
