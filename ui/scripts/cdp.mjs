@@ -5,6 +5,8 @@
 //   click:<selector> querySelector(sel).click(), errors if missing
 //   files:<p>[,<p>]  answer the next file picker the page opens with these local files
 //                    (absolute paths); the picker never shows
+//   swipe:<x>,<y>,<dx>,<dy>  a finger dragged from (x, y) by (dx, dy): a touch scroll gesture,
+//                    which is how a phone scrolls a page or turns a slide
 //   mouse:<x>,<y>    a real left press and release at viewport coordinates — what CodeMirror's
 //                    own mousedown handling (posAtCoords, the height map) needs to see
 //   type:<text>      Input.insertText
@@ -104,6 +106,13 @@ async function runStep(cdp, step, outdir) {
       if (!paths.length) die('files: needs at least one path');
       pendingFiles = paths;
       await cdp.send('Page.setInterceptFileChooserDialog', { enabled: true });
+      return;
+    }
+    case 'swipe': {
+      const [x, y, dx, dy] = arg.split(',').map(Number);
+      if ([x, y, dx, dy].some((n) => !Number.isFinite(n))) die(`bad swipe (expected x,y,dx,dy): ${arg}`);
+      await cdp.send('Input.synthesizeScrollGesture',
+        { x, y, xDistance: dx, yDistance: dy, gestureSourceType: 'touch', speed: 800 });
       return;
     }
     case 'mouse': {

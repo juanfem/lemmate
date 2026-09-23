@@ -43,6 +43,16 @@
     { id: 'docx', label: 'Word — download' },
   ]
   let choice: RenderFormat | 'auto' = $state('auto')
+
+  /**
+   * Turn a deck's slide from outside its frame. reveal.js takes commands by `postMessage` — the
+   * one way in through the sandbox — so the bar can offer buttons where a phone's swipe or a
+   * keyboard's arrows are not to hand, or not obvious.
+   */
+  let frame: HTMLIFrameElement | undefined = $state()
+  function slide(method: 'prev' | 'next') {
+    frame?.contentWindow?.postMessage(JSON.stringify({ method, args: [] }), '*')
+  }
   /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
   let made = $state('')
   /** A render that was a file rather than a page: what was saved. */
@@ -133,6 +143,12 @@
       {/if}
     </span>
     <span class="spacer"></span>
+    {#if made === 'slides' && html !== null && !saved}
+      <span class="turn" role="group" aria-label="Slides">
+        <button onclick={() => slide('prev')} title="Previous slide" aria-label="Previous slide">‹</button>
+        <button onclick={() => slide('next')} title="Next slide" aria-label="Next slide">›</button>
+      </span>
+    {/if}
     <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
   </div>
   {#if error}
@@ -148,7 +164,7 @@
     </div>
   {/if}
   {#if html !== null && !saved}
-    <iframe class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
+    <iframe bind:this={frame} class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
@@ -198,6 +214,25 @@
     white-space: pre-wrap;
     color: var(--danger);
     border-bottom: 1px solid var(--border-soft);
+  }
+  .turn {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .turn button {
+    min-width: 2.2rem;
+    font-size: 1rem;
+    line-height: 1;
+  }
+  /* A finger needs a target, and a phone's bar has no room for the status beside them. */
+  @media (pointer: coarse) {
+    .turn button {
+      min-width: 2.75rem;
+      min-height: 2.25rem;
+    }
+    .state {
+      display: none;
+    }
   }
   .bar select {
     font: inherit;
