@@ -212,7 +212,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
-        .route("/api/v1/vaults/{vault}/notes/{id}/render", axum::routing::post(render_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
@@ -1170,6 +1170,24 @@ async fn render_note(
             Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
         }
     }
+}
+
+/// A render opened as a page of its own — a browser tab rather than the app's frame, which some
+/// browsers (WebKit on iOS) will not repaint as a deck turns its slides. `?format=` as for the
+/// POST; the page is sandboxed by its headers (`quarto::PAGE_SANDBOX`) as the frame is by its
+/// attribute.
+async fn render_page(
+    state: State<Arc<AppState>>,
+    user: AuthUser,
+    path: Path<(String, String)>,
+    Query(q): Query<ExportIn>,
+) -> Result<axum::response::Response, StatusCode> {
+    let mut response = render_note(state, user, path, Json(q)).await?;
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(lemmate_core::quarto::PAGE_SANDBOX),
+    );
+    Ok(response)
 }
 
 #[derive(Serialize)]

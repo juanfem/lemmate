@@ -107,6 +107,12 @@ pub fn preview_format(text: &str) -> Format {
         .unwrap_or(Format::Html)
 }
 
+/// The `Content-Security-Policy` a render opened as a page of its own is served with. Quarto's
+/// page runs its own scripts — and a note's author wrote what is in it — so, as in the app's
+/// sandboxed frame, it gets an origin of its own: its scripts run, and cannot reach the app,
+/// the session or the API of the site it came from.
+pub const PAGE_SANDBOX: &str = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox";
+
 /// The `Content-Disposition` a render is served with: inline, so HTML can be shown in place,
 /// and named after the note for whoever saves it.
 pub fn disposition(note_path: &str, format: Format) -> String {

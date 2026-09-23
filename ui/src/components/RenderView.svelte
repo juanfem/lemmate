@@ -55,6 +55,14 @@
   }
   /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
   let made = $state('')
+  /**
+   * The same render as a tab of its own — for presenting, and for browsers that will not repaint
+   * a deck in a frame (WebKit on iOS turns the slide and shows it only after leaving the app).
+   * The server sandboxes that page by its headers as the frame is by its attribute.
+   */
+  let tabUrl = $derived(
+    `/api/v1/vaults/${session.id}/notes/${noteId}/render?format=${made === 'slides' ? 'revealjs' : 'html'}`,
+  )
   /** A render that was a file rather than a page: what was saved. */
   let saved: { name: string; url: string } | null = $state(null)
   const KINDS: Record<string, string> = { 'text/html': 'page', 'application/pdf': 'PDF', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word file' }
@@ -149,6 +157,9 @@
         <button onclick={() => slide('next')} title="Next slide" aria-label="Next slide">›</button>
       </span>
     {/if}
+    {#if (made === 'slides' || made === 'page') && html !== null && !saved}
+      <a class="out" href={tabUrl} target="_blank" rel="noopener" title="Open this render in a tab of its own — to present it, or where slides will not turn here">Open in a new tab ↗</a>
+    {/if}
     <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
   </div>
   {#if error}
@@ -214,6 +225,14 @@
     white-space: pre-wrap;
     color: var(--danger);
     border-bottom: 1px solid var(--border-soft);
+  }
+  .out {
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .out:hover {
+    text-decoration: underline;
   }
   .turn {
     display: flex;

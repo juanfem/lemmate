@@ -505,7 +505,7 @@ pub(crate) async fn serve(
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
-        .route("/api/v1/vaults/{vault}/notes/{id}/render", axum::routing::post(render_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
         .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
         .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
         .route("/api/v1/vaults/{vault}/trash", get(trash))
@@ -870,6 +870,20 @@ async fn export_note(
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::UNPROCESSABLE_ENTITY),
     }
+}
+
+/// A render as a page of its own, sandboxed by its headers (see the server's `render_page`).
+async fn render_page(
+    state: State<Arc<LocalState>>,
+    path: Path<(String, String)>,
+    Query(q): Query<ExportIn>,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    let mut response = render_note(state, path, axum::Json(q)).await?.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(crate::quarto::PAGE_SANDBOX),
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]

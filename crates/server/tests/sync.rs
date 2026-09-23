@@ -463,6 +463,38 @@ async fn render_uses_quarto_unless_switched_off() {
                 .unwrap();
                 assert_eq!(code, 200);
                 assert!(deck.contains("reveal"), "rendered as slides");
+                // The same, opened as a tab of its own: sandboxed by its headers.
+                let (csp, page) = tokio::task::spawn_blocking({
+                    let base = base_for_preview.clone();
+                    move || {
+                        let mut r = ureq::post(format!("{base}/notes"))
+                            .header("content-type", "application/json")
+                            .send(
+                                r##"{"path":"Deck2.qmd","content":"---\nformat: revealjs\n---\n## One\n"}"##
+                                    .as_bytes(),
+                            )
+                            .unwrap();
+                        let n: serde_json::Value =
+                            serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+                        let mut r = ureq::get(format!(
+                            "{base}/notes/{}/render?format=revealjs",
+                            n["id"].as_str().unwrap()
+                        ))
+                        .call()
+                        .unwrap();
+                        let csp = r
+                            .headers()
+                            .get("content-security-policy")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_owned();
+                        (csp, r.body_mut().read_to_string().unwrap())
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(csp.starts_with("sandbox allow-scripts"), "{csp}");
+                assert!(page.contains("reveal"));
             }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");
