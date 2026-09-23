@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, moveTab, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, moveTab, notePane, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
@@ -101,4 +101,23 @@ test('render panes are neither sources nor targets either', () => {
   const panes = [pane(1, ['a', 'b']), pane(2, ['a'], 'a', 'render')]
   assert.equal(moveTab(panes, { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
   assert.equal(moveTab(panes, { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
+})
+
+test('a note opened while a render pane is focused never opens in it', () => {
+  const blank = (): TabPane => ({ id: 99, tabs: [], active: null })
+  const note = pane(1, ['a'])
+  const render = pane(2, ['a'], 'a', 'render')
+  const history = pane(3, ['b'], 'b', 'history')
+  // A pane of notes is there: the focus goes to it.
+  assert.deepEqual(notePane([note, render], 1, 3, blank), { panes: [note, render], focused: 0 })
+  // Already on one: nothing moves.
+  assert.deepEqual(notePane([note, render], 0, 3, blank), { panes: [note, render], focused: 0 })
+  // The last one was closed: a new one, to the left.
+  const made = notePane([render], 0, 3, blank)
+  assert.equal(made.focused, 0)
+  assert.deepEqual(made.panes.map((p) => p.kind ?? 'note'), ['note', 'render'])
+  // No room for one: the focused aside pane gives up its place.
+  const full = notePane([render, history, pane(4, ['c'], 'c', 'render')], 1, 3, blank)
+  assert.equal(full.focused, 1)
+  assert.deepEqual(full.panes.map((p) => p.kind ?? 'note'), ['render', 'note', 'render'])
 })

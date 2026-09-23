@@ -19,7 +19,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { moveTab, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { moveTab, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -544,11 +544,12 @@
    * showing the note. `openInNewTab` is the deliberate opposite, from the ＋ button and the
    * right-click menu.
    */
-  /** Move the focus off a history or render pane before opening a note into it. */
+  /** Move the focus off a history or render pane before opening a note — into a pane of
+   *  notes, made for it if the last one was closed (`notePane`). */
   function noteFocus() {
-    if ((focused.kind ?? 'note') === 'note') return
-    const i = panes.findIndex((p) => (p.kind ?? 'note') === 'note')
-    if (i >= 0) focusedPane = i
+    const next = notePane(panes, focusedPane, MAX_PANES, blankPane)
+    if (next.panes !== panes) panes = next.panes
+    focusedPane = next.focused
   }
   function open(id: string) {
     noteFocus()

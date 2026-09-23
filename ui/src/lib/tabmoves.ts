@@ -125,3 +125,18 @@ export function removeTab<P extends TabPane>(panes: P[], drag: TabDrag): P[] {
   const emptied = out.find((p) => p.id === src.id)!
   return emptied.tabs.length === 0 && out.length > 1 ? out.filter((p) => p !== emptied) : out
 }
+
+/**
+ * Where a note opened from outside the panes goes, when the focused pane is a history or render
+ * pane — which only ever shows what it was opened for. The focus moves to a pane of notes; when
+ * none is left (the last was closed beside a render pane), a new one is made, to the left while
+ * there is room and in the focused pane's place when there is not. `fresh` makes the new pane.
+ */
+export function notePane<P extends TabPane>(panes: P[], focused: number, max: number, fresh: () => P): { panes: P[]; focused: number } {
+  const current = panes[focused]
+  if (!current || isNotes(current)) return { panes, focused }
+  const i = panes.findIndex(isNotes)
+  if (i >= 0) return { panes, focused: i }
+  if (panes.length < max) return { panes: [fresh(), ...panes], focused: 0 }
+  return { panes: panes.map((p, j) => (j === focused ? fresh() : p)), focused }
+}
