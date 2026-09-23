@@ -284,10 +284,13 @@ the caption to open the note, or anywhere else on the frame to edit the embed's 
 An embed in the middle of a sentence stays a link, as does one naming a note that does not
 exist, the note it sits in, or a note already being shown around it — so a note that embeds
 itself, or two that embed each other, stop at a link — and embeds nest three deep at most.
+The `^id` markers themselves are hidden like any other markup, and come back on the cursor's
+line; one on a line of its own needs a blank line between it and a table, or the table takes
+it for another row.
 
 Recognised by the indexer and handled by pandoc **on export only**, with no editor decoration
 today: footnotes, citations, definition lists, superscript/subscript, bracketed spans, header
-and link attributes. The `^id` block markers stay visible in the text.
+and link attributes.
 Callout `collapse="true"` is not implemented.
 
 ### Editing behaviour

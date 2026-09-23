@@ -89,6 +89,19 @@ function headingSection(body: string, heading: string): string | null {
   return start === -1 ? null : lines.slice(start).join('\n').replace(/\s+$/u, '')
 }
 
+/**
+ * The `^id` block marker a line ends with, as offsets into it: from the space before it (or the
+ * start, on a line that is only the marker) to the end of the line. `alone` when the marker is
+ * the whole line — the one that names the table, quote or list above it. Obsidian's ids are
+ * letters, digits and dashes; anything else after a `^` is just text.
+ */
+export function blockMarker(line: string): { from: number; to: number; alone: boolean } | null {
+  const m = /(^|\s+)\^[A-Za-z0-9-]+\s*$/u.exec(line)
+  if (!m) return null
+  const alone = line.slice(0, m.index).trim() === ''
+  return { from: alone ? 0 : m.index, to: line.length, alone }
+}
+
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/u
 
 function blockSection(body: string, id: string): string | null {

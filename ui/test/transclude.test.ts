@@ -2,7 +2,7 @@
 // heading, or the block a `^id` marks.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { embeddedSection, parseEmbed, stripFrontMatter } from '../src/lib/editor/transclude.ts'
+import { blockMarker, embeddedSection, parseEmbed, stripFrontMatter } from '../src/lib/editor/transclude.ts'
 
 const note = [
   '---',
@@ -78,4 +78,15 @@ test('a block id embeds its paragraph, its list item, or the block above a marke
   assert.equal(embeddedSection(note, { note: 'Plan', block: 'table' }), '| a | b |\n|---|---|\n| 1 | 2 |')
   assert.equal(embeddedSection('first line\nsecond line ^p\n', { note: 'x', block: 'p' }), 'first line\nsecond line')
   assert.equal(embeddedSection(note, { note: 'Plan', block: 'nope' }), null)
+})
+
+test('the block marker a line ends with is found, with the space before it', () => {
+  assert.deepEqual(blockMarker('Ship it. ^goal'), { from: 8, to: 14, alone: false })
+  assert.deepEqual(blockMarker('- two ^second  '), { from: 5, to: 15, alone: false })
+  assert.deepEqual(blockMarker('^table'), { from: 0, to: 6, alone: true })
+  assert.deepEqual(blockMarker('  ^table '), { from: 0, to: 9, alone: true })
+  assert.equal(blockMarker('x^2 is not one'), null)
+  assert.equal(blockMarker('2^10'), null)
+  assert.equal(blockMarker('ends in ^not_an_id'), null)
+  assert.equal(blockMarker('^id then more'), null)
 })

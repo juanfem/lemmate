@@ -7,7 +7,7 @@ import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
 import { codeLanguageName } from './syntax.ts'
-import { parseEmbed, type EmbedTarget } from './transclude.ts'
+import { blockMarker, parseEmbed, type EmbedTarget } from './transclude.ts'
 
 export interface LivePreviewOptions {
   /** Never reveal markup (read-only views have no meaningful cursor). */
@@ -594,6 +594,23 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
   const fm = frontMatterRange(state)
   if (fm && !revealed(state, fm.from, fm.to)) {
     push(fm.from, fm.to, Decoration.replace({ widget: new FrontMatterWidget(frontMatterSummary(fm.body)), block: true }))
+  }
+
+  // `^id` block markers are addresses for `![[note#^id]]`, not prose: off the cursor they go.
+  // One at the end of a line takes the space before it along; one alone on its line — naming
+  // the block above — takes the whole line, or an empty line would be left where it stood.
+  const tree = syntaxTree(state)
+  for (let ln = fm ? state.doc.lineAt(fm.to).number + 1 : 1; ln <= state.doc.lines; ln++) {
+    const line = state.doc.line(ln)
+    const mark = blockMarker(line.text)
+    if (!mark || revealed(state, line.from, line.to)) continue
+    let code = false
+    for (let n: SyntaxNode | null = tree.resolveInner(line.from + mark.to - 1, -1); n; n = n.parent) {
+      if (/Code|Math|HTML|Comment/u.test(n.name)) code = true
+    }
+    if (code) continue
+    if (mark.alone && ln > 1) push(state.doc.line(ln - 1).to, line.to, hide)
+    else push(line.from + mark.from, line.from + mark.to, hide)
   }
 
   {
