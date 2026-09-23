@@ -48,6 +48,14 @@ struct Config {
     /// pandoc binary for exports (default: `pandoc` on PATH).
     #[arg(long, env = "LEMMATE_PANDOC")]
     pandoc: Option<PathBuf>,
+    /// quarto binary for "Render with Quarto" (default: `quarto` on PATH).
+    #[arg(long, env = "LEMMATE_QUARTO")]
+    quarto: Option<PathBuf>,
+    /// Refuse Quarto renders even when quarto is installed. A render honours the note's front
+    /// matter, which can run Lua filters and read files on this host; turn it off if everyone
+    /// who can edit a note should not be able to do that.
+    #[arg(long, env = "LEMMATE_DISABLE_QUARTO", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    disable_quarto: bool,
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "LEMMATE_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
@@ -73,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
         attachments_dir: cfg.data_dir.join("attachments"),
         web_dir: cfg.web_dir.clone(),
         pandoc: cfg.pandoc.clone(),
+        quarto: cfg.quarto.clone(),
+        quarto_enabled: !cfg.disable_quarto,
         auth: if cfg.no_auth {
             AuthMode::Disabled
         } else {

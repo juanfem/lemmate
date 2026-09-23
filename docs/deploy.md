@@ -23,13 +23,15 @@ either way. From `crates/server/src/main.rs`:
 | `--no-auth` | `LEMMATE_NO_AUTH` | off |
 | `--allow-registration` | `LEMMATE_ALLOW_REGISTRATION` | off |
 | `--pandoc PATH` | `LEMMATE_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
+| `--quarto PATH` | `LEMMATE_QUARTO` | quarto binary for *Render with Quarto* (default: on `PATH`; renders answer 501 without it) |
+| `--disable-quarto` | `LEMMATE_DISABLE_QUARTO` | off — set it to refuse renders even with quarto installed |
 | `--secure-cookies` | `LEMMATE_SECURE_COOKIES` | off |
 | `--snapshot-every-updates <N>` | `LEMMATE_SNAPSHOT_EVERY_UPDATES` | `500` |
 | `--snapshot-every-minutes <N>` | `LEMMATE_SNAPSHOT_EVERY_MINUTES` | `10` |
 | `--retain-days <N>` | `LEMMATE_RETAIN_DAYS` | `90` |
 | `--attachment-grace-days <N>` | `LEMMATE_ATTACHMENT_GRACE_DAYS` | `30` |
 
-The four boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
+The five boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
 
 ```
 error: invalid value '1' for '--no-auth'
@@ -78,6 +80,14 @@ HTTPS. It marks the browser session cookie `Secure`; without it a proxy-terminat
 still works, but the cookie is also allowed to travel over plain HTTP. Do not set it if you are
 genuinely serving over `http://` — the browser will refuse to store the cookie and login will
 appear to silently fail.
+
+**What is in the image.** The server, the `lemmate` CLI, the web client, and
+[Quarto](https://quarto.org) — for *Render with Quarto* (HTML, PDF through Typst, DOCX, slides)
+and for its bundled pandoc, which is linked onto `PATH` so the plain exports work too. Quarto
+is most of the image's size (about 450 MB unpacked); `docker build --build-arg WITH_QUARTO=0 .`
+leaves it out, and rendering and export then answer 501. `--build-arg QUARTO_VERSION=…` picks
+another release. PDF export through pandoc still needs a LaTeX engine, which is not included;
+Quarto's PDF does not.
 
 **Volume ownership.** The container runs as uid `10001`. A *named* volume (as above) inherits
 `/data`'s ownership from the image, so it just works. A *bind mount* does not — the host
@@ -292,6 +302,13 @@ the account outright (an admin's `POST /api/v1/auth/register` creates the user w
 the admin out of their own session) or with an invite (§d above). Turn the flag on only behind
 something else that restricts who can reach the server. The only validation on a new account is
 that the email contains `@` and the password is at least 8 characters.
+
+**Quarto renders run what a note's front matter asks for.** Code cells never run — every
+render passes `--no-execute` — but front matter can name Lua filters, and files to include in
+the output, and Quarto honours both. On a shared server that means anyone who can edit a note
+can run Lua and read files as the server's user, inside the container. If that is more than
+you want to allow, set `LEMMATE_DISABLE_QUARTO=true` (or build without Quarto, above): renders
+then answer 501 and the app says rendering is unavailable.
 
 **Other things worth doing:**
 

@@ -1811,6 +1811,15 @@ impl Engine {
                         Err(e) => LocalReply::Error(e.to_string()),
                     }
                 }
+                LocalQuery::RenderSource(id) => match (self.notes.get(&id), self.doc_for(id)) {
+                    (Some(n), Some(doc)) => LocalReply::RenderSource {
+                        path: n.path.clone(),
+                        text: doc.text(),
+                        attachments: self.vault.attachment_entries().into_iter().map(|(p, _)| p).collect(),
+                        root: self.proj.root().to_path_buf(),
+                    },
+                    _ => LocalReply::Written(None),
+                },
                 LocalQuery::Trash => LocalReply::Trash(self.store.trashed_notes(self.vault_id)?),
                 LocalQuery::Restore(id) => match self.store.restore_note(id)? {
                     Some(row) => {

@@ -75,6 +75,9 @@ pub enum LocalQuery {
         id: NoteId,
         format: crate::pandoc::Format,
     },
+    /// What a Quarto render of a note reads. The render itself runs outside the engine: it
+    /// takes seconds, and the engine has sync to keep up meanwhile.
+    RenderSource(NoteId),
     /// Store uploaded bytes under `attachments/<name>` (deduplicated) and return the path.
     StoreAttachment {
         name: String,
@@ -119,6 +122,13 @@ pub enum LocalReply {
     Conflict(String),
     Done,
     Exported(Vec<u8>, &'static str),
+    RenderSource {
+        path: String,
+        text: String,
+        attachments: Vec<String>,
+        /// The vault's folder, where the attachments (and `export/`) are read from.
+        root: PathBuf,
+    },
     Trash(Vec<(NoteRow, String)>),
     Stored {
         path: String,
@@ -467,6 +477,7 @@ pub(crate) async fn serve(
         )
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render", axum::routing::post(render_note))
         .route("/api/v1/vaults/{vault}/trash", get(trash))
         .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
@@ -828,6 +839,53 @@ async fn export_note(
         )),
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::UNPROCESSABLE_ENTITY),
+    }
+}
+
+/// Render through Quarto (SPEC §5.6), from the vault's own folder. This machine is the user's
+/// own, so unlike the server there is no switch to turn it off: it is `quarto` run by hand.
+async fn render_note(
+    State(s): State<Arc<LocalState>>,
+    Path((vault, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<ExportIn>,
+) -> std::result::Result<impl IntoResponse, StatusCode> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let format = crate::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    let LocalReply::RenderSource { path, text, attachments, root } =
+        ask(&s, &vault, LocalQuery::RenderSource(id)).await?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let rendered = tokio::task::spawn_blocking(move || {
+        if !crate::quarto::quarto_available(None) {
+            return Ok(None);
+        }
+        let proj = crate::projection::Projection::new(root);
+        let read = |p: &str| proj.read_bytes(p).ok();
+        crate::quarto::render(&path, &text, format, &attachments, read, &Default::default())
+            .map(|r| Some((r, path)))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match rendered {
+        Ok(Some(((bytes, mime), path))) => Ok((
+            [
+                (header::CONTENT_TYPE, mime.to_owned()),
+                (header::CONTENT_DISPOSITION, crate::quarto::disposition(&path, format)),
+            ],
+            bytes,
+        )
+            .into_response()),
+        Ok(None) => Err(StatusCode::NOT_IMPLEMENTED),
+        Err(e) => {
+            tracing::warn!(%e, "quarto render");
+            // Quarto's own words, not wrapped in ours: the pane shows them as they are.
+            let msg = match e {
+                crate::error::Error::Export(m) => m,
+                other => other.to_string(),
+            };
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
+        }
     }
 }
 

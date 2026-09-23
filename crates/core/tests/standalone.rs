@@ -181,6 +181,66 @@ async fn attachments_are_recorded_without_an_upload() {
     handle.abort();
 }
 
+/// "Render with Quarto" reads the vault's own folder: an image the note embeds from another
+/// folder ends up inside the rendered page. With no quarto on this machine, a 501 says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_renders_through_quarto_with_its_images() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id.to_string();
+
+    // A 1×1 PNG, so Quarto has a real image to embed.
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0,
+        0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 13, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c,
+        0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 0x05, 0, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0, 0, 0, 0, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let hash = lemmate_core::attachments::hash_bytes(&png);
+    let url = format!("{base}/api/v1/vaults/{vault}/attachments/{hash}");
+    tokio::task::spawn_blocking({
+        let url = url.clone();
+        move || ureq::put(&url).header("x-filename", "dot.png").send(&png[..]).unwrap()
+    })
+    .await
+    .unwrap();
+    let (code, note) = call(
+        "POST",
+        format!("{base}/api/v1/vaults/{vault}/notes"),
+        Some(serde_json::json!({
+            "path": "Talks/dot.qmd",
+            "content": "---\ntitle: A dot\n---\n\n![[dot.png]]\n\n```{python}\nprint(6 * 7)\n```\n",
+        })),
+    )
+    .await;
+    assert_eq!(code, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    until("the attachment to be recorded", async || get(url.clone()).await.0 == 200).await;
+
+    let (code, html) = post_text(
+        format!("{base}/api/v1/vaults/{vault}/notes/{id}/render"),
+        serde_json::json!({ "format": "html" }),
+    )
+    .await;
+    if lemmate_core::quarto::quarto_available(None) {
+        assert_eq!(code, 200, "{html}");
+        assert!(html.contains("A dot"), "the title");
+        assert!(html.contains("data:image/png"), "the image from attachments/ is embedded");
+        assert!(!html.contains(">42<"), "code cells are not executed");
+    } else {
+        assert_eq!(code, 501, "no quarto here, and the relay says so");
+    }
+    let (code, _) = post_text(
+        format!("{base}/api/v1/vaults/{vault}/notes/{id}/render"),
+        serde_json::json!({ "format": "odt" }),
+    )
+    .await;
+    assert_eq!(code, 400, "an unknown format is the caller's mistake");
+
+    handle.abort();
+}
+
 /// Connecting a standalone app to a server (SPEC §3.2). The relay only carries the request: the
 /// shell signs in, writes the configuration and restarts, and the HTTP answer is the shell's, so
 /// the dialog can say what went wrong.

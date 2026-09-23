@@ -52,6 +52,32 @@ pub fn resolve_reference(
     None
 }
 
+/// The attachments a note references — its `![[embeds]]` and its markdown links and images —
+/// as vault paths from `attachments`, each once, in the order the note first names them.
+pub fn referenced(note_path: &str, text: &str, attachments: &[String]) -> Result<Vec<String>> {
+    let ix = crate::markdown::index(text)?;
+    let mut paths: Vec<String> = Vec::new();
+    let targets = ix
+        .wikilinks
+        .iter()
+        .filter(|w| w.embed)
+        .map(|w| (w.target.clone(), true))
+        .chain(ix.links.iter().map(|l| (l.clone(), false)));
+    for (target, wiki) in targets {
+        if let Some(p) = resolve_reference(
+            note_path,
+            &target,
+            wiki,
+            |c| attachments.iter().any(|e| e == c),
+            || attachments.to_vec(),
+        ) && !paths.contains(&p)
+        {
+            paths.push(p);
+        }
+    }
+    Ok(paths)
+}
+
 /// Server-side blob store: `<root>/<vault>/<hh>/<hash>`.
 #[derive(Debug, Clone)]
 pub struct AttachmentStore {

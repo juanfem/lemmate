@@ -390,3 +390,59 @@ async fn one_note_changing_does_not_restamp_the_whole_vault() {
     assert_eq!(after[&ids[1]], before[&ids[1]], "its neighbour did not");
     assert_eq!(after[&ids[2]], before[&ids[2]], "nor did the other one");
 }
+
+/// Quarto renders answer 200 with the page when quarto is reachable and rendering is on, and
+/// 501 both when it is switched off and when there is no quarto — never a 500.
+#[tokio::test]
+async fn render_uses_quarto_unless_switched_off() {
+    let quarto = std::env::var_os("LEMMATE_TEST_QUARTO").map(std::path::PathBuf::from);
+    // As with pandoc above: with no binary named the server falls back to `quarto` on PATH, so
+    // whether it renders is whatever the server's own availability check says.
+    let reachable = lemmate_core::quarto::quarto_available(quarto.as_deref());
+    let cases = [
+        (quarto.clone(), true, reachable),
+        (quarto.clone(), false, false),
+        (Some(std::path::PathBuf::from("/nonexistent/quarto")), true, false),
+    ];
+    for (bin, enabled, renders) in cases {
+        let options = ServerOptions { quarto: bin, quarto_enabled: enabled, ..ServerOptions::default() };
+        let state = build_state(Store::open_in_memory().unwrap(), options);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{addr}/api/v1/vaults/{}", VaultId::new());
+        let (status, body, ctype) = tokio::task::spawn_blocking(move || {
+            let mut r = ureq::post(format!("{base}/notes"))
+                .header("content-type", "application/json")
+                .send(
+                    r##"{"path":"Talk.qmd","content":"---\ntitle: Rendered talk\n---\n\nSee [[Other|the other]].\n\n```{python}\nprint(6 * 7)\n```\n"}"##
+                        .as_bytes(),
+                )
+                .unwrap();
+            let created: serde_json::Value = serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+            let id = created["id"].as_str().unwrap().to_owned();
+            match ureq::post(format!("{base}/notes/{id}/render"))
+                .header("content-type", "application/json")
+                .send(r#"{"format":"html"}"#.as_bytes())
+            {
+                Ok(mut r) => {
+                    let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+                    (r.status().as_u16(), r.body_mut().read_to_string().unwrap_or_default(), ct)
+                }
+                Err(ureq::Error::StatusCode(c)) => (c, String::new(), String::new()),
+                Err(e) => panic!("{e}"),
+            }
+        })
+        .await
+        .unwrap();
+        if renders {
+            assert_eq!(status, 200);
+            assert!(ctype.starts_with("text/html"), "{ctype}");
+            assert!(body.contains("Rendered talk") && body.contains("the other"), "title and link label");
+            assert!(!body.contains(">42<"), "code cells are not executed");
+        } else {
+            assert_eq!(status, 501, "enabled: {enabled}");
+        }
+    }
+}

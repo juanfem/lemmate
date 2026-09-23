@@ -4,7 +4,7 @@ import { clampIndex, endedOutside, moveTab, removeTab, type TabPane } from '../s
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
-const pane = (id: number, tabs: string[], active: string | null = tabs[0] ?? null, kind?: 'history'): TabPane => ({ id, tabs, active, kind })
+const pane = (id: number, tabs: string[], active: string | null = tabs[0] ?? null, kind?: 'history' | 'render'): TabPane => ({ id, tabs, active, kind })
 const shape = (r: { panes: TabPane[]; focused: number } | null) =>
   r && { panes: r.panes.map((p) => `${p.tabs.map((t) => (t === p.active ? `[${t}]` : t)).join(' ')}`), focused: r.focused }
 
@@ -95,4 +95,10 @@ test('endedOutside: where a drag nobody took was let go', () => {
   assert.equal(at(500, 800), true)
   // No position at all (an engine that does not report one): not outside, so no window opens.
   assert.equal(at(-200, -200, 0, 0), false)
+})
+
+test('render panes are neither sources nor targets either', () => {
+  const panes = [pane(1, ['a', 'b']), pane(2, ['a'], 'a', 'render')]
+  assert.equal(moveTab(panes, { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
+  assert.equal(moveTab(panes, { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
 })

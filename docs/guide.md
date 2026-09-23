@@ -717,7 +717,45 @@ A vault-level `export/` folder is consulted when the exporter knows the vault di
 `style.csl` next to it (`--csl`). Note that the **server-side** export path does not currently
 pass a vault directory, so today `export/` and image resource paths only apply where the
 exporter is given one — server exports render the note text alone, with links left relative.
-The local relay has no export endpoint at all yet, so exporting requires the server.
+The local relay (desktop app, `lemmate serve`) passes its vault folder, so there they apply.
+
+### Rendering with Quarto
+
+**Render with Quarto** — in the command palette, in a note's `···` menu, or the page icon on
+the strip of a `.qmd` note — opens the note as Quarto renders it, in a pane beside it. Quarto's
+page runs in a sandboxed frame: its own scripts and styles work, and nothing in it can reach the
+app or your session. Links to other sites open in a new tab. A render takes a few seconds, so
+it runs when you ask: an edit afterwards marks the pane *Changed since this render*, and
+**Re-render** brings it up to date. If Quarto refuses the note, the pane shows its message.
+
+The palette also renders straight to a file: **as PDF** (through the Typst that Quarto bundles —
+no LaTeX needed), **as Word document**, and **as slides** (a self-contained reveal.js page).
+
+What goes in:
+
+- **The note's front matter, as Quarto reads it** — `title`, `author`, `format:` options,
+  `toc`, and so on. That is what makes it a Quarto render rather than an export.
+- **No code runs.** Every render passes `--no-execute`: a `{python}` or `{r}` cell is shown
+  with its source, never executed, whatever the front matter says.
+- **Images come along.** The note is rendered at its own path with the attachments it
+  references laid out around it, so `![](../attachments/x.png)` and `![[x.png]]` both resolve,
+  and an Obsidian width (`![[x.png|300]]`) is kept. HTML and slides embed them.
+- **Wikilinks become their labels.** Another note is not part of the rendered document, so
+  `[[Plan|the plan]]` renders as *the plan* (marked `.wikilink` for a stylesheet to find).
+- **The vault's bibliography** — `export/references.bib`, and `export/style.csl` — is used
+  unless the note's front matter names its own `bibliography:`.
+
+`quarto` is found through `--quarto PATH` / `LEMMATE_QUARTO` on the server, `LEMMATE_QUARTO` for
+the desktop app and `lemmate serve`, and `PATH` otherwise; without one, rendering answers
+**501** and the pane says so. The Docker image includes it. `POST
+/api/v1/vaults/{vault}/notes/{id}/render` with `{"format": "html" | "pdf" | "docx" |
+"revealjs"}` is the endpoint behind all of it; a render Quarto rejects answers **422** with its
+message.
+
+**On a shared server**, a note's front matter can name Lua filters and files to include, and
+those run and are read on the server when the note is rendered — by anyone who can edit a note.
+In a container that reaches only the container, but if that is still more than you want, set
+`--disable-quarto` / `LEMMATE_DISABLE_QUARTO=true` and renders answer 501.
 
 Whole-vault export never needs pandoc: `lemmate export zip <vault> <out.zip>` writes the markdown
 and attachments as they are. And because the vault is already a folder of files, `pandoc` or

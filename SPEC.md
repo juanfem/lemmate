@@ -2,7 +2,7 @@
 
 Status: draft v0.5 (2026-09-03) — M0–M2 implemented, accounts through single-use invites and
 password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI, the installable
-offline web client of §6.4), with the keyboard toolbar and Quarto render outstanding; the native
+offline web client of §6.4, transclusion, Quarto render), with the keyboard toolbar outstanding; the native
 mobile shell was dropped (§14); see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
@@ -295,6 +295,15 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 `.qmd` files are first-class notes: same editor, same links, same search. The app does
 **not** execute code cells. "Render with Quarto" is an export action that shells out to a
 `quarto` binary on the server or desktop when present.
+
+- Always `--no-execute`; the note's own front matter is honoured otherwise. Front matter can
+  name Lua filters and files to include, so a server can switch rendering off
+  (`--disable-quarto`); the local relay cannot, being the user's own machine.
+- The note is rendered at its vault path in a temporary project, with the attachments it
+  references at theirs and the vault's `export/references.bib` / `style.csl` as defaults.
+  Wikilinks render as their labels; attachment embeds as images.
+- HTML is shown in a pane beside the note, in a sandboxed frame with no access to the app's
+  origin; PDF (through Typst), DOCX and reveal.js download.
 
 ---
 

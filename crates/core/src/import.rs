@@ -325,7 +325,7 @@ fn strip_quote(line: &str) -> Option<&str> {
     Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
-fn fence_marker(line: &str) -> Option<(char, usize)> {
+pub(crate) fn fence_marker(line: &str) -> Option<(char, usize)> {
     let t = line.trim_start();
     let ch = t.chars().next()?;
     if ch != '`' && ch != '~' {
@@ -335,7 +335,7 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
     if n < 3 { None } else { Some((ch, n)) }
 }
 
-fn closes_fence(line: &str, ch: char, opened: usize) -> bool {
+pub(crate) fn closes_fence(line: &str, ch: char, opened: usize) -> bool {
     match fence_marker(line) {
         Some((c, n)) => c == ch && n >= opened && line.trim_start()[n..].trim().is_empty(),
         None => false,

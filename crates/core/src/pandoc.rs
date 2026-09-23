@@ -147,7 +147,7 @@ pub fn render(markdown: &str, format: Format, opts: &ExportOptions) -> Result<(V
     Ok((bytes, format.mime()))
 }
 
-fn tempdir() -> Result<PathBuf> {
+pub(crate) fn tempdir() -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!("notes-export-{}", crate::ids::NoteId::new()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)

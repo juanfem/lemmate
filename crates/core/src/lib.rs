@@ -26,6 +26,7 @@ pub mod merge;
 pub mod pandoc;
 pub mod paths;
 pub mod projection;
+pub mod quarto;
 pub mod store;
 pub mod sync;
 pub mod tls;

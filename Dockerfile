@@ -72,6 +72,25 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Quarto, for "Render with Quarto" (SPEC §5.6): HTML, PDF through the Typst it bundles (no
+# LaTeX), DOCX and reveal.js. It also bundles pandoc, which is linked onto PATH so the plain
+# exports (SPEC §12) work too. About 450 MB unpacked; build with `--build-arg WITH_QUARTO=0` to
+# leave it out, and both answer 501. To keep it in the image but refuse renders — they honour a
+# note's front matter, Lua filters included — set LEMMATE_DISABLE_QUARTO=true instead.
+ARG WITH_QUARTO=1
+ARG QUARTO_VERSION=1.10.18
+RUN if [ "$WITH_QUARTO" = 1 ]; then \
+        arch="$(dpkg --print-architecture)" \
+        && curl -fsSL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${arch}.tar.gz" \
+           | tar -xz -C /opt \
+        && ln -s "/opt/quarto-${QUARTO_VERSION}/bin/quarto" /usr/local/bin/quarto \
+        && ln -s "$(find "/opt/quarto-${QUARTO_VERSION}/bin/tools" -type f -name pandoc | head -n1)" /usr/local/bin/pandoc \
+        && quarto --version && pandoc --version | head -n1; \
+    fi
+# Quarto keeps caches under the user's home, and the container may run as a uid with none
+# (docker-compose `user:`); /tmp is writable by any of them.
+ENV XDG_CACHE_HOME=/tmp/cache XDG_DATA_HOME=/tmp/share
+
 # Fixed uid so a host bind mount can be chowned deterministically: chown -R 10001:10001 ./data
 RUN groupadd --gid 10001 lemmate \
     && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home --shell /usr/sbin/nologin lemmate

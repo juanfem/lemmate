@@ -16,8 +16,9 @@ specification; this README covers the repository and the current milestone.
 
 M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
 `docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server,
-remote CLI, the all-vaults workspace, Obsidian import from the UI, note transclusion, and an installable web
-client that works offline; the on-screen keyboard toolbar and Quarto rendering remain. The
+remote CLI, the all-vaults workspace, Obsidian import from the UI, note transclusion, rendering
+with Quarto, and an installable web client that works offline; the on-screen keyboard toolbar
+remains. The
 native mobile shell was dropped — see [Still to come](#still-to-come).
 
 Verification: `cargo test --workspace --exclude lemmate-desktop`
@@ -157,6 +158,14 @@ absent) with the SPEC §5 reader extensions, wikilinks included; a vault `export
 provide `defaults.yaml`, `references.bib`, `style.csl`. PDF/Beamer need a LaTeX engine next to
 pandoc.
 
+**Render with Quarto** (SPEC §5.6) is `POST …/notes/{id}/render {"format": "html"|"pdf"|"docx"|"revealjs"}`,
+on the server and the local relay alike: the note with its own front matter and the attachments
+it references, through `quarto render --no-execute` (`--quarto PATH` / `LEMMATE_QUARTO`, default
+on `PATH`; 501 when absent). The UI shows the HTML in a sandboxed pane beside the note. PDF goes
+through Typst, so it needs no LaTeX. A server can refuse renders with `--disable-quarto` /
+`LEMMATE_DISABLE_QUARTO` — front matter can name Lua filters, and those would run on the host.
+The Docker image ships Quarto (and uses its pandoc for export).
+
 ## Desktop
 
 `lemmate-desktop` reads `desktop.toml` from the per-user configuration directory
@@ -233,7 +242,7 @@ as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
 ## Still to come
 
 Everything in the table above exists today. What M3 still owes: the on-screen keyboard
-toolbar and Quarto rendering.
+toolbar.
 
 **The native mobile shell is gone.** There was a `crates/mobile` — a Tauri 2 shell that got as
 far as an unsigned Android APK that assembled but had never run on a device, with iOS untried

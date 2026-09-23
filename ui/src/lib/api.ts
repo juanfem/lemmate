@@ -99,7 +99,23 @@ async function del(path: string): Promise<void> {
   if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for ${path}`)
 }
 
+/** What a note can be rendered to through Quarto (SPEC §5.6). */
+export type RenderFormat = 'html' | 'pdf' | 'docx' | 'revealjs'
+
 export const api = {
+  /**
+   * A Quarto render of a note, as the raw response: the body is a page or a file, and the
+   * status says why there is none — 501 no quarto (or switched off), 422 Quarto's own error.
+   */
+  render: async (vault: string, id: string, format: RenderFormat) => {
+    const r = await fetch(`/api/v1/vaults/${vault}/notes/${id}/render`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ format }),
+    })
+    if (r.status === 401) authState.onUnauthorized()
+    return r
+  },
   me: () => get<User>('/auth/me'),
   login: (email: string, password: string) => post<{ token: string; user: User }>('/auth/login', { email, password, device: navigator.userAgent.slice(0, 40) }),
   register: (email: string, password: string, display_name: string, invite?: string) =>

@@ -37,6 +37,12 @@ pub struct ServerOptions {
     pub auth: AuthMode,
     /// `pandoc` binary for exports (default: on PATH); exports answer 501 when it is missing.
     pub pandoc: Option<std::path::PathBuf>,
+    /// `quarto` binary for renders (default: `$LEMMATE_QUARTO`, then on PATH).
+    pub quarto: Option<std::path::PathBuf>,
+    /// Whether notes may be rendered through Quarto at all. A render honours the note's front
+    /// matter, which can run Lua filters and pull files into the output — on this host, at the
+    /// say-so of anyone who can edit a note. Off, renders answer 501 as if quarto were missing.
+    pub quarto_enabled: bool,
 }
 
 impl Default for ServerOptions {
@@ -48,6 +54,8 @@ impl Default for ServerOptions {
             web_dir: None,
             auth: AuthMode::Disabled,
             pandoc: None,
+            quarto: None,
+            quarto_enabled: true,
         }
     }
 }
@@ -199,6 +207,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render", axum::routing::post(render_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
@@ -517,25 +526,7 @@ fn index_note_text(
     } else {
         store.reindex_note(id, &ix)?;
     }
-    let mut paths: Vec<String> = Vec::new();
-    let targets = ix
-        .wikilinks
-        .iter()
-        .filter(|w| w.embed)
-        .map(|w| (w.target.clone(), true))
-        .chain(ix.links.iter().map(|l| (l.clone(), false)));
-    for (target, wiki) in targets {
-        if let Some(p) = lemmate_core::attachments::resolve_reference(
-            path,
-            &target,
-            wiki,
-            |c| attachment_paths.iter().any(|e| e == c),
-            || attachment_paths.to_vec(),
-        ) && !paths.contains(&p)
-        {
-            paths.push(p);
-        }
-    }
+    let paths = lemmate_core::attachments::referenced(path, text, attachment_paths)?;
     store.set_note_attachments(id, &paths)
 }
 
@@ -1045,6 +1036,69 @@ async fn export_note(
         .unwrap_or_else(|| "note".into());
     let disposition = format!("attachment; filename=\"{}.{}\"", stem.replace('"', ""), format.extension());
     Ok(([(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)], bytes))
+}
+
+/// Render a note through Quarto (SPEC §5.6): the attachments it references are laid out
+/// beside it from the blob store, and so is the vault's `export/references.bib` when there is
+/// one. 501 when rendering is switched off or quarto is missing; 422 carries Quarto's message.
+async fn render_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id)): Path<(String, String)>,
+    Json(body): Json<ExportIn>,
+) -> Result<axum::response::Response, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::note_role(&state, &user, vault, id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let format = lemmate_core::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    if !state.options.quarto_enabled {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    let row = state.store.lock().await.note_by_id(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let text = match &*note_room(&state, id).await?.doc.lock().await {
+        RoomDoc::Note(d) => d.text(),
+        RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let entries: HashMap<String, String> = match &*vault_room(&state, vault).await?.doc.lock().await {
+        RoomDoc::Vault(v) => v.attachment_entries().into_iter().collect(),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let blobs = state.attachments.clone();
+    let bin = state.options.quarto.clone();
+    let path = row.path.clone();
+    let rendered = tokio::task::spawn_blocking(move || {
+        if !lemmate_core::quarto::quarto_available(bin.as_deref()) {
+            return Ok(None);
+        }
+        let paths: Vec<String> = entries.keys().cloned().collect();
+        let read = |p: &str| entries.get(p).and_then(|hash| blobs.get(vault, hash).ok().flatten());
+        let opts = lemmate_core::quarto::RenderOptions { quarto: bin.clone(), ..Default::default() };
+        lemmate_core::quarto::render(&path, &text, format, &paths, read, &opts).map(Some)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match rendered {
+        Ok(Some((bytes, mime))) => Ok((
+            [
+                (header::CONTENT_TYPE, mime.to_owned()),
+                (header::CONTENT_DISPOSITION, lemmate_core::quarto::disposition(&row.path, format)),
+            ],
+            bytes,
+        )
+            .into_response()),
+        Ok(None) => Err(StatusCode::NOT_IMPLEMENTED),
+        Err(e) => {
+            warn!(%e, "quarto render");
+            // Quarto's own words, not wrapped in ours: the pane shows them as they are.
+            let msg = match e {
+                lemmate_core::Error::Export(m) => m,
+                other => other.to_string(),
+            };
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
+        }
+    }
 }
 
 #[derive(Serialize)]

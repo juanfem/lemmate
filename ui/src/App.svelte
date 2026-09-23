@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte'
-  import { api, authState, type User } from './lib/api.ts'
+  import { api, authState, type RenderFormat, type User } from './lib/api.ts'
   import Login from './components/Login.svelte'
   import AccountDialog from './components/AccountDialog.svelte'
   import ContextMenu, { menuAt, type MenuState } from './components/ContextMenu.svelte'
@@ -437,7 +437,7 @@
         .slice(0, MAX_PANES)
         .map((p) => {
           const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string')
-          const kind = p.kind === 'history' ? 'history' : 'note'
+          const kind = p.kind === 'history' || p.kind === 'render' ? p.kind : 'note'
           const seq = kind === 'history' && typeof p.seq === 'number' ? p.seq : 0
           return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null), mode: asMode(p.mode), kind, seq } as PaneState
         })
@@ -528,10 +528,10 @@
    * showing the note. `openInNewTab` is the deliberate opposite, from the ＋ button and the
    * right-click menu.
    */
-  /** Move the focus off a history pane before opening a note into it. */
+  /** Move the focus off a history or render pane before opening a note into it. */
   function noteFocus() {
-    if (focused.kind !== 'history') return
-    const i = panes.findIndex((p) => p.kind !== 'history')
+    if ((focused.kind ?? 'note') === 'note') return
+    const i = panes.findIndex((p) => (p.kind ?? 'note') === 'note')
     if (i >= 0) focusedPane = i
   }
   function open(id: string) {
@@ -602,15 +602,22 @@
    * press goes back to the pane already showing it rather than opening another.
    */
   function openHistory(at = focusedPane) {
+    openAside('history', at)
+  }
+  /** What Quarto makes of the note (SPEC §5.6), beside it — placed like its history. */
+  function openRender(at = focusedPane) {
+    openAside('render', at)
+  }
+  function openAside(kind: 'history' | 'render', at: number) {
     const p = panes[at]
     const id = p?.active
     if (!p || !id || isBlank(id) || solo) return
-    const seen = panes.findIndex((q) => q.kind === 'history' && q.active === id)
+    const seen = panes.findIndex((q) => q.kind === kind && q.active === id)
     if (seen >= 0) {
       focusedPane = seen
       return
     }
-    const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind: 'history', seq: 0 }
+    const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind, seq: 0 }
     if (panes.length < MAX_PANES) {
       panes = [...panes.slice(0, at + 1), entry, ...panes.slice(at + 1)]
       focusedPane = at + 1
@@ -745,6 +752,10 @@
     { id: 'export-docx', label: 'Export note as DOCX', run: () => exportActive('docx') },
     { id: 'export-pdf', label: 'Export note as PDF', run: () => exportActive('pdf') },
     { id: 'export-slides', label: 'Export note as slides (reveal.js)', run: () => exportActive('revealjs') },
+    { id: 'render', label: 'Render with Quarto', run: () => openRender() },
+    { id: 'render-pdf', label: 'Render with Quarto as PDF', run: () => renderActive('pdf') },
+    { id: 'render-docx', label: 'Render with Quarto as Word document', run: () => renderActive('docx') },
+    { id: 'render-slides', label: 'Render with Quarto as slides (reveal.js)', run: () => renderActive('revealjs') },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
@@ -926,12 +937,29 @@
     })
     if (r.status === 501) return void ask({ kind: 'confirm', title: 'Export needs pandoc on the server (see the deployment guide).', confirmLabel: 'OK' })
     if (!r.ok) return void ask({ kind: 'confirm', title: `Export failed (${r.status}).`, confirmLabel: 'OK' })
-    const blob = await r.blob()
-    const name = (r.headers.get('content-disposition')?.match(/filename="([^"]+)"/u)?.[1] ?? `${displayName(s.pathOf(id) ?? 'note')}.${format}`).replace(/[/\\]/gu, '-')
-    const url = URL.createObjectURL(blob)
+    const ext = r.headers.get('content-disposition')?.match(/filename="[^"]*\.([^".]+)"/u)?.[1] ?? format
+    await saveResponse(r, `${displayName(s.pathOf(id) ?? 'note')}.${ext}`)
+  }
+
+  /** A Quarto render to a file (SPEC §5.6) — the page itself has a pane, `openRender`. */
+  async function renderActive(format: RenderFormat) {
+    const s = sessionOf(active)
+    if (!s || !active) return
+    const id = active
+    const r = await api.render(s.id, id, format)
+    if (r.status === 501) return void ask({ kind: 'confirm', title: 'Rendering needs Quarto, and there is none here — or the server has it switched off.', confirmLabel: 'OK' })
+    if (!r.ok) return void ask({ kind: 'confirm', title: `Rendering failed: ${(await r.text()).trim() || r.status}`, confirmLabel: 'OK' })
+    const ext = format === 'revealjs' ? 'html' : format
+    await saveResponse(r, `${displayName(s.pathOf(id) ?? 'note')}.${ext}`)
+  }
+
+  /** Hand a response to the browser as a download. Named from the note here rather than from
+   *  the header, which cannot carry a name outside ASCII intact. */
+  async function saveResponse(r: Response, name: string) {
+    const url = URL.createObjectURL(await r.blob())
     const a = document.createElement('a')
     a.href = url
-    a.download = name
+    a.download = name.replace(/[/\\]/gu, '-')
     a.click()
     setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
@@ -1267,6 +1295,8 @@
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
+          onRender={solo ? undefined : () => openRender(i)}
+          renderOpen={panes.some((q) => q.kind === 'render' && q.active === p.active)}
           onSeq={(seq) => { focusedPane = i; p.seq = seq }}
           onAsk={(title, initial, opts) => ask({ kind: 'prompt', title, initial, ...opts })}
         />

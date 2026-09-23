@@ -8,8 +8,9 @@
     active: string | null
     /** SPEC §8 view mode, per pane — a source pane can sit beside a reading one. */
     mode: ViewMode
-    /** A history pane shows a note's versions instead of its text; absent means the note. */
-    kind?: 'note' | 'history'
+    /** A history pane shows a note's versions instead of its text, a render pane what Quarto
+     *  makes of it (SPEC §5.6); absent means the note. */
+    kind?: 'note' | 'history' | 'render'
     /** Which version a history pane is showing; 0, or absent, is the log itself. */
     seq?: number
   }
@@ -28,6 +29,7 @@
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
   import Editor from './Editor.svelte'
   import HistoryPage from './HistoryPage.svelte'
+  import RenderView from './RenderView.svelte'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
   import Icon from './Icon.svelte'
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
@@ -65,6 +67,8 @@
     onTabOut,
     onHistory,
     historyOpen = false,
+    onRender,
+    renderOpen = false,
     onSeq,
     onAsk,
     jumpTo = $bindable(),
@@ -112,6 +116,9 @@
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
+    /** Render the note with Quarto, in a pane beside it; `renderOpen` when one already is. */
+    onRender?: () => void
+    renderOpen?: boolean
     onSeq?: (seq: number) => void
     onAsk?: (
       title: string,
@@ -137,6 +144,9 @@
   let current = $derived(index.reduce((best, h, i) => (h.pos <= here ? i : best), -1))
 
   let isHistory = $derived(pane.kind === 'history')
+  let isRender = $derived(pane.kind === 'render')
+  /** A pane *about* a note rather than the note: one tab, no editing chrome, closed as a whole. */
+  let aside = $derived(isHistory || isRender)
 
   function pathOf(id: string): string | undefined {
     return lookup(id)?.pathOf(id)
@@ -163,6 +173,7 @@
   let bookmarked = $derived(!!session?.isBookmarked('note', activePath))
   let moreItems = $derived([
     ...(onHistory ? [{ label: 'Version history', run: onHistory }] : []),
+    ...(onRender ? [{ label: 'Render with Quarto', run: onRender }] : []),
     ...(onDetach && pane.active && !isBlank(pane.active) ? [{ label: 'Move to new window', run: () => onDetach(pane.active!) }] : []),
     { label: bookmarked ? 'Remove bookmark' : 'Bookmark this note', run: onBookmark },
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
@@ -219,7 +230,7 @@
     if (!onTabDrop || !carriesTab(e)) return
     const drag = tabDrag.current ?? FOREIGN
     e.stopPropagation()
-    const at = isHistory ? null : dropAt(e, drag)
+    const at = aside ? null : dropAt(e, drag)
     hoverTab(at)
     if (!at) return
     e.preventDefault()
@@ -232,7 +243,7 @@
     const local = tabDrag.current
     if (local) {
       e.preventDefault()
-      const at = isHistory ? null : dropAt(e, local)
+      const at = aside ? null : dropAt(e, local)
       // Before the move: the tab's own element may not survive it to hear `dragend`.
       endTabDrag()
       if (at) onTabDrop(local, at)
@@ -240,7 +251,7 @@
     }
     hoverTab(null)
     const tab = droppedTab(e)
-    const at = tab && !isHistory ? dropAt(e, { tab, pane: null }) : null
+    const at = tab && !aside ? dropAt(e, { tab, pane: null }) : null
     // Taken only if it really lands: an unhandled drop reports `none` to the window it came
     // from, which then keeps its tab.
     if (tab && at && onTabDrop({ tab, pane: null }, at)) e.preventDefault()
@@ -314,15 +325,15 @@
         class:blank={isBlank(id)}
         class:dragging={tabDrag.current?.tab === id && tabDrag.current.pane === pane.id}
         data-tab={id}
-        draggable={onTabDrop && !isHistory ? 'true' : undefined}
+        draggable={onTabDrop && !aside ? 'true' : undefined}
         ondragstart={(e) => beginTabDrag(e, { tab: id, pane: pane.id })}
         ondragend={dragEnd}
         onclick={() => onActivate(id)}
-        oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)}
+        oncontextmenu={aside ? undefined : (e) => tabMenu(id, e)}
         title={pathOf(id)}
       >
-        {#if isHistory}
-          <Icon name="history" size={13} />
+        {#if aside}
+          <Icon name={isRender ? 'render' : 'history'} size={13} />
         {:else if id === pane.active}
           <!-- One dot, two meanings, never at once: on the active tab it marks where you are,
                and on the others it marks a pin. A pinned tab is also the one without a `×`. -->
@@ -330,8 +341,8 @@
         {:else if pinned.includes(id)}
           <span class="dot pinned" title="Pinned"></span>
         {/if}
-        <span class="label">{isBlank(id) ? 'New tab' : (displayName(pathOf(id) ?? '') || '…')}{isHistory ? ' · history' : ''}</span>
-        {#if isHistory}
+        <span class="label">{isBlank(id) ? 'New tab' : (displayName(pathOf(id) ?? '') || '…')}{isHistory ? ' · history' : isRender ? ' · rendered' : ''}</span>
+        {#if aside}
           <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
         {:else if !pinned.includes(id)}
           <span class="x" role="button" tabindex="-1" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
@@ -341,12 +352,12 @@
     {#if marker !== null}
       <span class="insert" style:left="{marker}px" aria-hidden="true"></span>
     {/if}
-    {#if onNewTab && !isHistory}
+    {#if onNewTab && !aside}
       <button class="newtab" onclick={onNewTab} title="New tab (Ctrl+T)" aria-label="New tab"><Icon name="plus" size={13} /></button>
     {/if}
     <span class="spacer"></span>
     <div class="cluster">
-      {#if !isHistory && pane.active && session && !isBlank(pane.active)}
+      {#if !aside && pane.active && session && !isBlank(pane.active)}
         <span class="modes fold" role="group" aria-label="View mode">
           {#each VIEW_MODES as m (m.id)}
             <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
@@ -355,21 +366,26 @@
         <button class="icon fold" class:on={bookmarked} onclick={onBookmark} title="Bookmark (Ctrl+Shift+B)" aria-label="Bookmark" aria-pressed={bookmarked}>
           <Icon name="star" size={15} filled={bookmarked} />
         </button>
+        {#if onRender && format === 'Quarto'}
+          <button class="icon fold" class:on={renderOpen} onclick={onRender} title="Render with Quarto" aria-label="Render with Quarto" aria-pressed={renderOpen}>
+            <Icon name="render" size={15} />
+          </button>
+        {/if}
         {#if onHistory}
           <button class="icon fold" class:on={historyOpen} onclick={onHistory} title="Version history" aria-label="Version history" aria-pressed={historyOpen}>
             <Icon name="history" size={15} />
           </button>
         {/if}
       {/if}
-      {#if onSplit && !isHistory}
+      {#if onSplit && !aside}
         <button class="icon" onclick={onSplit} disabled={splitFull} title={splitFull ? 'Three panes is the limit' : 'Split right (Ctrl+\\)'} aria-label="Split right">
           <Icon name="splitright" size={15} />
         </button>
       {/if}
-      {#if onClosePane && !isHistory}
+      {#if onClosePane && !aside}
         <button class="icon" onclick={onClosePane} title="Close pane" aria-label="Close pane"><Icon name="closepane" size={15} /></button>
       {/if}
-      {#if !isHistory}
+      {#if !aside}
         <button class="icon more" onclick={(e) => (menu = menuAt(e, moreItems))} title="History, bookmark, rename, delete" aria-label="More actions">···</button>
       {/if}
     </div>
@@ -383,6 +399,15 @@
       <span>{displayName(activePath)}</span>
       <span class="spacer"></span>
       <span>version history</span>
+    </div>
+  {:else if isRender && pane.active && session}
+    {#key pane.active}
+      <RenderView {session} noteId={pane.active} />
+    {/key}
+    <div class="note-foot">
+      <span>{displayName(activePath)}</span>
+      <span class="spacer"></span>
+      <span>rendered with Quarto</span>
     </div>
   {:else if pane.active && session && !isBlank(pane.active)}
     {#key pane.active}

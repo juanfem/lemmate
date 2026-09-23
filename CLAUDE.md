@@ -30,6 +30,7 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 cargo test --workspace --exclude lemmate-desktop   # the Tauri shell needs webkit2gtk
 cargo check -p lemmate-desktop                     # …which this machine has
 LEMMATE_TEST_PANDOC=/usr/bin/pandoc cargo test -p lemmate-core pandoc::    # skipped unless the var is set
+LEMMATE_TEST_QUARTO=~/.local/bin/quarto cargo test -p lemmate-core quarto::  # likewise; takes ~6 s
 cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings && cargo fmt --all --check
 cd ui && npm run check && npm test                     # svelte-check + tsc; corpus + codec tests
 LEMMATE_SERVER_BIN=<target>/debug/lemmate-server LEMMATE_CLI_BIN=<target>/debug/lemmate npm test   # live e2e too
@@ -97,7 +98,13 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   `pgrep -f "remote-debugging-por[t]"` patterns, never a `pkill -f` that can match your own shell.
 - pandoc 3.10.1 (`/usr/bin/pandoc`) and quarto 1.10.18 (`~/.local/bin/quarto`) are installed, so
   export and render can be exercised here. The pandoc tests still gate on `LEMMATE_TEST_PANDOC`
-  rather than on `PATH` — set it to `/usr/bin/pandoc` and all three run.
+  rather than on `PATH` — set it to `/usr/bin/pandoc` and all three run; the Quarto unit test
+  gates on `LEMMATE_TEST_QUARTO` the same way. The server and relay render tests ask the same
+  availability question the code does, so with quarto on `PATH` they render for real.
+- Quarto quirks, learned here: a `.md` with code cells is refused (the temp copy is always
+  `.qmd`); `--output NAME` quietly stops HTML embedding its resources (read the default output
+  instead); Typst will not read files outside the project root (hence the `_quarto.yml`); and
+  `--quiet` swallows the error message along with the progress.
 - **Two Rusts.** `/usr/bin/rustc` is Gentoo's `dev-lang/rust-bin` (1.95, host target only) and is
   what a fresh shell gets; `~/.cargo/bin` holds a rustup toolchain (1.98, left from the dropped
   Android work, `--profile minimal` plus `rustup component add rustfmt clippy`). rustup was

@@ -7,7 +7,7 @@ export interface TabPane {
   id: number
   tabs: string[]
   active: string | null
-  kind?: 'note' | 'history'
+  kind?: 'note' | 'history' | 'render'
 }
 
 /** The tab in flight, and the pane it left — `null` when that pane is in another window. */
@@ -34,6 +34,9 @@ export function clampIndex(strip: string[], tab: string, index: number, pinned: 
   return pinned.includes(tab) ? Math.min(Math.max(index, 0), pins) : Math.min(Math.max(index, pins), strip.length)
 }
 
+/** History and render panes are about one note; only a pane of notes takes or gives up tabs. */
+const isNotes = (p: TabPane) => (p.kind ?? 'note') === 'note'
+
 function without<P extends TabPane>(p: P, tab: string): P {
   const i = p.tabs.indexOf(tab)
   if (i < 0) return p
@@ -45,7 +48,8 @@ function without<P extends TabPane>(p: P, tab: string): P {
 
 /**
  * Move `drag.tab` to `drop`, or null when the move would change nothing or is not allowed:
- * history panes are neither sources nor targets, and a pane cannot be split off its own only tab.
+ * history and render panes are neither sources nor targets, and a pane cannot be split off its own
+ * only tab.
  * A split past `maxPanes` lands in the target pane instead, as dropping on its middle would.
  *
  * A tab from another window (`drag.pane` null) only arrives: taking it out of the pane it left is
@@ -66,8 +70,8 @@ export function moveTab<P extends TabPane>(
 ): { panes: P[]; focused: number } | null {
   const src = drag.pane === null ? undefined : panes.find((p) => p.id === drag.pane)
   const dst = panes.find((p) => p.id === drop.pane)
-  if (!dst || dst.kind === 'history') return null
-  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || src.kind === 'history')) return null
+  if (!dst || !isNotes(dst)) return null
+  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || !isNotes(src))) return null
   const split = 'split' in drop && panes.length < maxPanes ? drop.split : null
   if (split && src === dst && src.tabs.length === 1) return null
 
