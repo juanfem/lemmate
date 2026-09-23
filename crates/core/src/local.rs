@@ -953,12 +953,19 @@ async fn render_note(
     axum::Json(body): axum::Json<ExportIn>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let format = crate::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    // `"preview"`: whatever page the note itself declares (`quarto::preview_format`).
+    let preview = body.format == "preview";
+    let format = if preview {
+        crate::quarto::Format::Html
+    } else {
+        crate::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?
+    };
     let LocalReply::RenderSource { path, text, attachments, root } =
         ask(&s, &vault, LocalQuery::RenderSource(id)).await?
     else {
         return Err(StatusCode::NOT_FOUND);
     };
+    let format = if preview { crate::quarto::preview_format(&text) } else { format };
     let rendered = tokio::task::spawn_blocking(move || {
         if !crate::quarto::quarto_available(None) {
             return Ok(None);

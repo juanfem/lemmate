@@ -123,6 +123,10 @@ pub struct AppState {
     /// Note docs seen before their vault entry exists, bound to the vault the creating
     /// connection was working in (a UI writes the note text before the vault map entry).
     pub note_vault_claims: Mutex<HashMap<NoteId, VaultId>>,
+    /// Per vault, the files no note used when they were last looked for among the notes'
+    /// references (`claim_waiting_files`). Each is looked for once per process: a note that
+    /// names one later is indexed then anyway.
+    waiting_files: std::sync::Mutex<HashMap<VaultId, HashSet<String>>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
@@ -182,6 +186,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         options,
         attachments,
         note_vault_claims: Mutex::new(HashMap::new()),
+        waiting_files: std::sync::Mutex::new(HashMap::new()),
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
@@ -472,6 +477,7 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
                     }
                 }
             }
+            claim_waiting_files(state, &mut store, vault_id, &attachment_paths, &read)?;
         }
         (RoomDoc::Note(n), DocId::Note(id)) => {
             if let Some(row) = store.note_by_id(id)? {
@@ -511,6 +517,46 @@ pub fn reindex_if_stale(store: &mut Store) -> lemmate_core::Result<Option<usize>
     }
     store.mark_index_current()?;
     Ok(Some(count))
+}
+
+/// Files can arrive after the notes that name them — the theme saved once the front matter
+/// already says `theme: [default, cern.scss]`, the image copied in after its link — and a note
+/// is indexed when *it* changes, so it would never learn it uses them. Here each file no note
+/// uses yet, seen for the first time, is looked for in the vault's notes: the ones that mention
+/// its name are indexed again, and so, when it is a stylesheet or YAML (which can be imported
+/// by one a note uses), are the notes that use one of those.
+fn claim_waiting_files(
+    state: &AppState,
+    store: &mut Store,
+    vault: VaultId,
+    attachment_paths: &[String],
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> lemmate_core::Result<()> {
+    let pairs = store.note_attachment_paths_in(vault)?;
+    let used: HashSet<&str> = pairs.iter().map(|(_, p)| p.as_str()).collect();
+    let fresh: Vec<&String> = {
+        let mut waiting = state.waiting_files.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = waiting.entry(vault).or_default();
+        attachment_paths.iter().filter(|p| !used.contains(p.as_str()) && seen.insert((*p).clone())).collect()
+    };
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = fresh.iter().filter_map(|p| p.rsplit('/').next()).map(str::to_owned).collect();
+    let styled: HashSet<NoteId> = if fresh.iter().any(|p| lemmate_core::attachments::names_files(p)) {
+        pairs.iter().filter(|(_, p)| lemmate_core::attachments::names_files(p)).map(|(id, _)| *id).collect()
+    } else {
+        HashSet::new()
+    };
+    for row in store.list_notes(vault)? {
+        let text = store.load_doc(DocId::Note(row.id))?.text();
+        let mentions =
+            names.iter().any(|n| text.contains(n.as_str()) || text.contains(&n.replace(' ', "%20")));
+        if mentions || styled.contains(&row.id) {
+            index_note_text(store, row.id, &row.path, &text, attachment_paths, read, false)?;
+        }
+    }
+    Ok(())
 }
 
 /// Reads a vault file's bytes from the blob store by path, for following what a stylesheet
@@ -1066,7 +1112,12 @@ async fn render_note(
     if auth::note_role(&state, &user, vault, id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let format = lemmate_core::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?;
+    let preview = body.format == "preview";
+    let format = if preview {
+        lemmate_core::quarto::Format::Html
+    } else {
+        lemmate_core::quarto::Format::parse(&body.format).ok_or(StatusCode::BAD_REQUEST)?
+    };
     if !state.options.quarto_enabled {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
@@ -1075,6 +1126,7 @@ async fn render_note(
         RoomDoc::Note(d) => d.text(),
         RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
     };
+    let format = if preview { lemmate_core::quarto::preview_format(&text) } else { format };
     let entries: HashMap<String, String> = match &*vault_room(&state, vault).await?.doc.lock().await {
         RoomDoc::Vault(v) => v.attachment_entries().into_iter().collect(),
         RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
@@ -1398,7 +1450,15 @@ async fn list_files(
         RoomDoc::Vault(v) => (v.attachment_entries(), v.kept_files()),
         RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
     };
-    let store = state.store.lock().await;
+    let mut store = state.store.lock().await;
+    // The first listing after a start is also the first chance to notice a file that arrived
+    // after its note, before this process was there to see it arrive.
+    {
+        let files: HashMap<String, String> = entries.iter().cloned().collect();
+        let paths: Vec<String> = files.keys().cloned().collect();
+        let read = blob_reader(&state, vault, &files);
+        claim_waiting_files(&state, &mut store, vault, &paths, &read).map_err(internal)?;
+    }
     let users = store.note_attachment_paths_in(vault).map_err(internal)?;
     let list = lemmate_core::files::listing(entries, &kept, &users, |_, hash| {
         store.attachment(vault, hash).ok().flatten().map(|r| r.size)

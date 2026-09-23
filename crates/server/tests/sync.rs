@@ -412,6 +412,7 @@ async fn render_uses_quarto_unless_switched_off() {
         let app = router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base = format!("http://{addr}/api/v1/vaults/{}", VaultId::new());
+        let base_for_preview = base.clone();
         let (status, body, ctype) = tokio::task::spawn_blocking(move || {
             let mut r = ureq::post(format!("{base}/notes"))
                 .header("content-type", "application/json")
@@ -441,6 +442,28 @@ async fn render_uses_quarto_unless_switched_off() {
             assert!(ctype.starts_with("text/html"), "{ctype}");
             assert!(body.contains("Rendered talk") && body.contains("the other"), "title and link label");
             assert!(!body.contains(">42<"), "code cells are not executed");
+            if enabled {
+                // A deck previews as the slides it declares, not as a plain page.
+                let (code, deck) = tokio::task::spawn_blocking({
+                    let base = base_for_preview.clone();
+                    move || {
+                        let mut r = ureq::post(format!("{base}/notes"))
+                            .header("content-type", "application/json")
+                            .send(r##"{"path":"Deck.qmd","content":"---\nformat:\n  revealjs:\n    slide-number: true\n---\n## One\n"}"##.as_bytes())
+                            .unwrap();
+                        let n: serde_json::Value = serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+                        let mut r = ureq::post(format!("{base}/notes/{}/render", n["id"].as_str().unwrap()))
+                            .header("content-type", "application/json")
+                            .send(r#"{"format":"preview"}"#.as_bytes())
+                            .unwrap();
+                        (r.status().as_u16(), r.body_mut().read_to_string().unwrap())
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(code, 200);
+                assert!(deck.contains("reveal"), "rendered as slides");
+            }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");
         }

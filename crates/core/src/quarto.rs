@@ -64,6 +64,32 @@ impl Format {
     }
 }
 
+/// What the preview pane renders a note as: the first page-like format its front matter
+/// declares — so a deck (`format: revealjs`, or a `revealjs:` block ahead of `pdf:`) previews
+/// as slides, with the theme and options written for it — else a plain page. A render asked
+/// for as `"preview"` resolves through here.
+pub fn preview_format(text: &str) -> Format {
+    use serde_yaml_ng::Value;
+    let Some((yaml, _)) = crate::frontmatter::block(text) else { return Format::Html };
+    let Ok(Value::Mapping(front)) = serde_yaml_ng::from_str::<Value>(&text[yaml]) else {
+        return Format::Html;
+    };
+    let declared: Vec<String> = match front.get("format") {
+        Some(Value::String(f)) => vec![f.clone()],
+        Some(Value::Sequence(fs)) => fs.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect(),
+        Some(Value::Mapping(m)) => m.keys().filter_map(|k| k.as_str().map(str::to_owned)).collect(),
+        _ => Vec::new(),
+    };
+    declared
+        .iter()
+        .find_map(|f| match f.split('+').next().unwrap_or(f) {
+            "revealjs" => Some(Format::RevealJs),
+            "html" => Some(Format::Html),
+            _ => None,
+        })
+        .unwrap_or(Format::Html)
+}
+
 /// The `Content-Disposition` a render is served with: inline, so HTML can be shown in place,
 /// and named after the note for whoever saves it.
 pub fn disposition(note_path: &str, format: Format) -> String {
@@ -469,6 +495,22 @@ mod tests {
         assert_eq!(Format::parse("beamer"), None);
         assert_eq!(Format::Pdf.quarto_name(), "typst");
         assert_eq!(Format::RevealJs.extension(), "html");
+    }
+
+    #[test]
+    fn the_preview_renders_what_the_note_declares() {
+        let deck =
+            "---\ntitle: T\nformat:\n  revealjs:\n    theme: [default, cern.scss]\n  pdf: default\n---\nx";
+        assert_eq!(preview_format(deck), Format::RevealJs);
+        assert_eq!(preview_format("---\nformat: revealjs\n---\n"), Format::RevealJs);
+        assert_eq!(preview_format("---\nformat: [pdf, revealjs+code]\n---\n"), Format::RevealJs);
+        assert_eq!(
+            preview_format("---\nformat:\n  pdf: default\n  html: default\n  revealjs: default\n---\n"),
+            Format::Html
+        );
+        assert_eq!(preview_format("---\nformat: docx\n---\n"), Format::Html, "not a page: a plain one then");
+        assert_eq!(preview_format("# no front matter"), Format::Html);
+        assert_eq!(preview_format("---\nformat: [\n---\n"), Format::Html);
     }
 
     #[test]

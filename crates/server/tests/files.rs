@@ -118,6 +118,27 @@ async fn files_are_managed_by_path() {
     assert!(list(&base).await.iter().all(|f| f["path"] != "styles/deck.scss"));
 }
 
+/// A note that names a file before the file exists — the front matter written first, the theme
+/// saved after — lists as its user once the file arrives, without being edited again.
+#[tokio::test]
+async fn a_file_that_arrives_after_its_note_knows_its_user() {
+    let base = serve().await;
+    let body = serde_json::json!({
+        "path": "deck.qmd",
+        "content": "---\nformat:\n  revealjs:\n    theme: [default, cern.scss]\n---\nBody.\n",
+    });
+    let (code, note) = request("POST", format!("{base}/notes"), vec![], body.to_string().into_bytes()).await;
+    assert_eq!(code, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        request("PUT", format!("{base}/files?path=cern.scss"), vec![], b"$c: #0033a0;".to_vec()).await.0,
+        201
+    );
+    let files = list(&base).await;
+    let theme = files.iter().find(|f| f["path"] == "cern.scss").unwrap();
+    assert_eq!(theme["used_by"], serde_json::json!([id]));
+}
+
 async fn until(what: &str, mut f: impl AsyncFnMut() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {

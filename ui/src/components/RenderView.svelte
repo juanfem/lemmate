@@ -33,7 +33,7 @@
     busy = true
     const from = text
     try {
-      const r = await api.render(session.id, noteId, 'html')
+      const r = await api.render(session.id, noteId, 'preview')
       if (r.status === 501) {
         error = 'Rendering needs Quarto, and there is none here — or the server has it switched off.'
       } else if (!r.ok) {
