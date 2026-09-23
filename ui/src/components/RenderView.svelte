@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte'
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
+  import { beforeBodyEnd } from '../lib/render.ts'
 
   /**
    * A note rendered through Quarto (SPEC §5.6), in a pane beside it. Quarto's page is its own
@@ -68,8 +69,9 @@
         error = (await r.text()).trim() || `Rendering failed (${r.status}).`
       } else if (type === 'text/html') {
         const page = await r.text()
-        html = page.includes('</body>') ? page.replace('</body>', `${LINKS_OUT}</body>`) : page + LINKS_OUT
-        made = /class="reveal"|reveal\.js/u.test(page.slice(0, 20000)) ? 'slides' : 'page'
+        html = beforeBodyEnd(page, LINKS_OUT)
+        // A self-contained deck carries its scripts first; the markup that makes it one is late.
+        made = page.includes('<div class="reveal') ? 'slides' : 'page'
         saved = null
         renderedFrom = from
         error = null
