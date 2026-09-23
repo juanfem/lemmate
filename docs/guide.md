@@ -759,7 +759,10 @@ These files are ordinary attachments as far as sync goes: a file a note depends 
 recorded in the vault and synced like an image it embeds, and so are `_quarto.yml`, every
 `_metadata.yml` and everything under `export/`, whether or not a note mentions them. A
 stylesheet nothing depends on stays local. Editing a theme to import a new partial picks the
-partial up without touching the notes that use it.
+partial up without touching the notes that use it. Order does not matter either: a file that
+turns up after the note naming it — the image copied in once the link is written, the theme
+saved after the front matter names it — is found as it arrives, or at the next start of the
+desktop app if it was copied in while the app was closed.
 
 `quarto` is found through `--quarto PATH` / `LEMMATE_QUARTO` on the server, `LEMMATE_QUARTO` for
 the desktop app and `lemmate serve`, and `PATH` otherwise; without one, rendering answers

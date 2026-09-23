@@ -125,6 +125,27 @@ pub fn dependencies(
     out
 }
 
+/// The file names a note refers to — everything [`dependencies`] would try to resolve, cut to
+/// its last path segment. How a file that turns up later finds the notes that named it first:
+/// `![](img/pic.png)` and `theme: [cosmo, custom.scss]` are waiting for `pic.png` and
+/// `custom.scss`, whichever folder those land in.
+pub fn referred_names(text: &str, ix: &crate::markdown::NoteIndex) -> std::collections::HashSet<String> {
+    let mut targets: Vec<String> =
+        ix.wikilinks.iter().filter(|w| w.embed).map(|w| w.target.clone()).collect();
+    targets.extend(ix.links.iter().cloned());
+    if let Some((yaml, _)) = crate::frontmatter::block(text) {
+        targets.extend(yaml_paths(&text[yaml]));
+    }
+    targets
+        .iter()
+        .filter_map(|t| {
+            let t = t.split(['#', '?']).next()?.trim().replace("%20", " ");
+            let name = t.rsplit('/').next()?.to_owned();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 /// Files that belong to the vault rather than to a note: Quarto's project file and its
 /// per-folder `_metadata.yml`, and the `export/` folder (SPEC §12). They are kept and synced
 /// whether or not a note links to them, and a Quarto render has them all.
@@ -450,6 +471,16 @@ mod tests {
                 "theme/base/_index.scss",
             ]
         );
+    }
+
+    #[test]
+    fn the_names_a_note_is_waiting_for() {
+        let text = "---\ntheme: [cosmo, styles/custom.scss]\n---\n![](img/my%20pic.png#x) ![[diagram.svg|300]] \
+                    [doc](../files/report.pdf?v=2) [site](https://example.org/page.html) [[Other note]]\n";
+        let ix = crate::markdown::index(text).unwrap();
+        let mut got: Vec<String> = referred_names(text, &ix).into_iter().collect();
+        got.sort();
+        assert_eq!(got, ["custom.scss", "diagram.svg", "my pic.png", "page.html", "report.pdf"]);
     }
 
     #[test]

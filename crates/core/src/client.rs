@@ -695,8 +695,9 @@ pub struct Engine {
     /// Files kept for the vault rather than for a note (`attachments::vault_resources`):
     /// `_quarto.yml`, `_metadata.yml`, `export/`, and what they name.
     vault_resources: Vec<String>,
-    /// A stylesheet or a YAML resource changed on disk, so what depends on what may have too.
-    deps_dirty: bool,
+    /// Non-note files that appeared or changed on disk since the last `refresh_dependencies`:
+    /// one may be what a note was waiting for, or a stylesheet that now imports more.
+    touched_files: HashSet<String>,
     // Local relay (SPEC §3.2)
     peers: HashMap<u64, Peer>,
     /// Docs the server has refused, and the frame it refused them with, so a window opened
@@ -762,7 +763,7 @@ impl Engine {
             local_hashes: HashMap::new(),
             orphan_check_due: true,
             vault_resources: Vec::new(),
-            deps_dirty: false,
+            touched_files: HashSet::new(),
             peers: HashMap::new(),
             denied: HashMap::new(),
             pending_docs: HashMap::new(),
@@ -833,9 +834,10 @@ impl Engine {
         for id in ids {
             self.normalize_note(id)?;
         }
-        // A stylesheet or `_quarto.yml` may have changed while we were not running, and what it
-        // imports with it; nothing else would notice, since the notes themselves did not.
-        self.refresh_dependencies()?;
+        // Files may have arrived while we were not running — an image a note already linked to,
+        // a theme its front matter already named, a partial a theme now imports — and nothing
+        // else would notice, since the notes themselves did not change.
+        self.refresh_dependencies(None)?;
         // Referenced attachments whose upload never completed, or tracked attachments edited
         // while we were not running: the local file wins.
         for path in self.store.referenced_attachment_paths()? {
@@ -1294,26 +1296,64 @@ impl Engine {
         Ok(())
     }
 
-    /// Re-derive what is kept for its own sake — the vault's resources — and what the notes that
-    /// use a stylesheet or a YAML file depend on, after one of those files changed: a new
-    /// `@import` in `custom.scss` is a new dependency of every note using it, though none of
-    /// those notes changed.
-    fn refresh_dependencies(&mut self) -> Result<()> {
-        self.vault_resources = crate::attachments::vault_resources(
-            |p| self.is_attachment_file(p).unwrap_or(false),
-            || self.proj.walk_files().unwrap_or_default(),
-            |p| self.proj.read_bytes(p).ok(),
-        );
-        for path in self.vault_resources.clone() {
-            self.want_upload(&path)?;
+    /// Re-derive dependencies that can change without any note changing, after `touched` files
+    /// appeared or changed on disk (`None`: at startup, everything that may have while we were
+    /// not running).
+    ///
+    /// - A file no one has recorded may be what a note named before it existed — `![](pic.png)`
+    ///   written first, the image copied in after. The notes naming it are re-derived.
+    /// - A stylesheet or YAML file may now name more: a new `@import` in `custom.scss` is a new
+    ///   dependency of every note using it. Those notes are re-derived, and the vault's own
+    ///   resources (`_quarto.yml`, `_metadata.yml`, `export/`) are worked out again.
+    fn refresh_dependencies(&mut self, touched: Option<&HashSet<String>>) -> Result<()> {
+        let mut affected: HashSet<NoteId> = HashSet::new();
+        if touched.is_none_or(|t| t.iter().any(|p| crate::attachments::names_files(p))) {
+            self.vault_resources = crate::attachments::vault_resources(
+                |p| self.is_attachment_file(p).unwrap_or(false),
+                || self.proj.walk_files().unwrap_or_default(),
+                |p| self.proj.read_bytes(p).ok(),
+            );
+            for path in self.vault_resources.clone() {
+                self.want_upload(&path)?;
+            }
+            affected.extend(
+                self.store
+                    .note_attachment_paths()?
+                    .into_iter()
+                    .filter(|(_, p)| crate::attachments::names_files(p))
+                    .map(|(id, _)| id),
+            );
         }
-        let affected: HashSet<NoteId> = self
-            .store
-            .note_attachment_paths()?
-            .into_iter()
-            .filter(|(_, p)| crate::attachments::names_files(p))
-            .map(|(id, _)| id)
-            .collect();
+        let recorded: HashSet<String> = self.vault.attachment_entries().into_iter().map(|(p, _)| p).collect();
+        let new: Vec<String> = match touched {
+            Some(t) => t
+                .iter()
+                .filter(|p| !recorded.contains(*p) && self.is_attachment_file(p).unwrap_or(false))
+                .cloned()
+                .collect(),
+            None => self.proj.walk_files()?.into_iter().filter(|p| !recorded.contains(p)).collect(),
+        };
+        if !new.is_empty() {
+            let names: HashSet<String> =
+                new.iter().filter_map(|p| p.rsplit('/').next()).map(str::to_owned).collect();
+            // A few names are cheaper to look for in the text than to index every note for; a
+            // note that does not contain the name cannot be naming the file.
+            let prefilter = names.len() <= 32;
+            for (id, state) in &self.notes {
+                let text = state.doc.text();
+                if prefilter
+                    && !names
+                        .iter()
+                        .any(|n| text.contains(n.as_str()) || text.contains(&n.replace(' ', "%20")))
+                {
+                    continue;
+                }
+                let ix = markdown::index(&text)?;
+                if crate::attachments::referred_names(&text, &ix).iter().any(|n| names.contains(n)) {
+                    affected.insert(*id);
+                }
+            }
+        }
         for id in affected {
             let Some(state) = self.notes.get(&id) else { continue };
             let (path, text) = (state.path.clone(), state.doc.text());
@@ -1490,8 +1530,8 @@ impl Engine {
         self.local_hashes.remove(rel);
         // Before the early return below: a file nothing records yet — a new `_vars.scss` that
         // an existing theme imports, a first `_quarto.yml` — is exactly the case to look at.
-        if crate::attachments::names_files(rel) {
-            self.deps_dirty = true;
+        if crate::attachments::names_files(rel) || self.vault.attachment_hash(rel).is_none() {
+            self.touched_files.insert(rel.to_owned());
         }
         if self.vault.attachment_hash(rel).is_none() {
             return Ok(()); // unreferenced file; picked up when a note references it
@@ -2077,9 +2117,9 @@ impl Engine {
                 warn!(path = %rel, %e, "processing attachment");
             }
         }
-        if self.deps_dirty {
-            self.deps_dirty = false;
-            self.refresh_dependencies()?;
+        if !self.touched_files.is_empty() {
+            let touched = std::mem::take(&mut self.touched_files);
+            self.refresh_dependencies(Some(&touched))?;
         }
         self.flush_uploads()?;
 

@@ -297,6 +297,60 @@ async fn companion_files_are_recorded_with_the_note() {
     handle.abort();
 }
 
+/// A file that arrives after the note naming it — the image copied in once the link is written,
+/// the theme saved after the front matter names it — is still found: while the app runs, and,
+/// for one copied in while it was not running, on the next start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_arrives_after_its_note_is_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("notes");
+    let recorded = |base: String, vault: String, text: &'static str| {
+        let url = format!(
+            "{base}/api/v1/vaults/{vault}/attachments/{}",
+            lemmate_core::attachments::hash_bytes(text.as_bytes())
+        );
+        async move { get(url).await.0 == 200 }
+    };
+
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id.to_string();
+    let (code, _) = call(
+        "POST",
+        format!("{base}/api/v1/vaults/{vault}/notes"),
+        Some(serde_json::json!({
+            "path": "talks/deck.qmd",
+            "content": "---\ntitle: Deck\nformat:\n  html:\n    theme: [cosmo, custom.scss]\n---\n![](img/pic.png) and ![[later.png]]\n",
+        })),
+    )
+    .await;
+    assert_eq!(code, 201);
+    let note = dir.join("talks/deck.qmd");
+    until("the note on disk", async || note.is_file()).await;
+
+    // While running: the files land after the note, in the folders it named.
+    std::fs::create_dir_all(dir.join("talks/img")).unwrap();
+    std::fs::write(dir.join("talks/img/pic.png"), "pic").unwrap();
+    std::fs::write(dir.join("talks/custom.scss"), "a { b: c }").unwrap();
+    std::fs::write(dir.join("talks/unrelated.png"), "unrelated").unwrap();
+    until("the image", async || recorded(base.clone(), vault.clone(), "pic").await).await;
+    until("the theme", async || recorded(base.clone(), vault.clone(), "a { b: c }").await).await;
+    assert!(!recorded(base.clone(), vault.clone(), "unrelated").await, "a file no note names stays local");
+
+    // While stopped: a file copied in then is found at the next start.
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/later.png"), "later").unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    until("the file copied in while stopped", async || recorded(base.clone(), vault.clone(), "later").await)
+        .await;
+    assert!(!recorded(base.clone(), vault.clone(), "unrelated").await, "still local after a restart");
+
+    handle.abort();
+}
+
 /// Connecting a standalone app to a server (SPEC §3.2). The relay only carries the request: the
 /// shell signs in, writes the configuration and restarts, and the HTTP answer is the shell's, so
 /// the dialog can say what went wrong.
