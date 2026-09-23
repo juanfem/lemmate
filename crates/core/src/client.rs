@@ -692,6 +692,9 @@ pub struct Engine {
     local_hashes: HashMap<String, String>,
     /// Something changed that may have orphaned an attachment entry; checked once idle.
     orphan_check_due: bool,
+    /// The kept files (`VaultDoc::kept_files`) and their hashes as of the last reconcile: one
+    /// that has left the vault doc since was deleted or moved on purpose, somewhere.
+    known_kept: HashMap<String, String>,
     /// Files kept for the vault rather than for a note (`attachments::vault_resources`):
     /// `_quarto.yml`, `_metadata.yml`, `export/`, and what they name.
     vault_resources: Vec<String>,
@@ -762,6 +765,7 @@ impl Engine {
             pending_attachment_fs: HashMap::new(),
             local_hashes: HashMap::new(),
             orphan_check_due: true,
+            known_kept: HashMap::new(),
             vault_resources: Vec::new(),
             touched_files: HashSet::new(),
             peers: HashMap::new(),
@@ -834,6 +838,7 @@ impl Engine {
         for id in ids {
             self.normalize_note(id)?;
         }
+        self.known_kept = self.kept_now();
         // Files may have arrived while we were not running — an image a note already linked to,
         // a theme its front matter already named, a partial a theme now imports — and nothing
         // else would notice, since the notes themselves did not change.
@@ -1364,6 +1369,116 @@ impl Engine {
         Ok(())
     }
 
+    // ---- The file manager (SPEC §9) ------------------------------------------------------------
+
+    /// What is at `path` now, as a hash: the file on disk, else the vault doc's entry (a file
+    /// another replica has and this one has not fetched yet is still there).
+    fn current_file_hash(&mut self, path: &str) -> Result<Option<String>> {
+        if self.is_attachment_file(path)? {
+            return self.local_hash(path);
+        }
+        Ok(self.vault.attachment_hash(path))
+    }
+
+    /// Write a file at a path the user chose, and keep it. The mark goes into the vault doc at
+    /// once; the entry follows the way every attachment's does — at the next flush standalone,
+    /// once the server has the bytes otherwise — so no replica is told of bytes it cannot get.
+    fn put_file(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+        replace: bool,
+        base: Option<String>,
+    ) -> Result<LocalReply> {
+        let current = self.current_file_hash(path)?;
+        if let Some(current) = &current
+            && (!replace || base.as_ref().is_some_and(|b| b != current))
+        {
+            return Ok(LocalReply::FileConflict(current.clone()));
+        }
+        let hash = hash_bytes(bytes);
+        self.proj.write_bytes(path, bytes)?;
+        self.local_hashes.insert(path.to_owned(), hash.clone());
+        let u = self.vault.mark_kept(path);
+        self.persist_and_send(DocId::Vault(self.vault_id), u)?;
+        self.pending_uploads.insert(path.to_owned(), hash.clone());
+        self.flush_uploads()?;
+        self.touched_files.insert(path.to_owned());
+        Ok(LocalReply::FileWritten { path: path.to_owned(), hash, created: current.is_none() })
+    }
+
+    /// Delete a file from the vault and from this disk.
+    fn delete_file(&mut self, path: &str) -> Result<LocalReply> {
+        let on_disk = self.is_attachment_file(path)?;
+        let u = self.vault.delete_file(path);
+        if !on_disk && u.is_empty() {
+            return Ok(LocalReply::Written(None));
+        }
+        if on_disk {
+            self.proj.remove(path)?;
+        }
+        self.local_hashes.remove(path);
+        self.known_kept.remove(path);
+        self.pending_uploads.remove(path);
+        self.persist_and_send(DocId::Vault(self.vault_id), u)?;
+        self.orphan_check_due = true;
+        Ok(LocalReply::Done)
+    }
+
+    /// Move or rename a file, on disk and in the vault doc, and point the notes that use it at
+    /// the new path (`files::rewrite_references`).
+    fn move_file(&mut self, from: &str, to: &str) -> Result<LocalReply> {
+        if from == to {
+            return Ok(LocalReply::FileMoved { path: to.to_owned(), rewritten: 0 });
+        }
+        let on_disk = self.is_attachment_file(from)?;
+        if !on_disk && self.vault.attachment_hash(from).is_none() {
+            return Ok(LocalReply::Written(None));
+        }
+        if let Some(there) = self.current_file_hash(to)? {
+            return Ok(LocalReply::FileConflict(there));
+        }
+        // The vault as it was, for working out what each reference meant.
+        let mut files = self.proj.walk_files()?;
+        files.extend(self.vault.attachment_entries().into_iter().map(|(p, _)| p));
+        files.sort();
+        files.dedup();
+        let users: Vec<NoteId> = self
+            .store
+            .note_attachment_paths()?
+            .into_iter()
+            .filter(|(_, p)| p == from)
+            .map(|(id, _)| id)
+            .collect();
+        if on_disk {
+            let (a, b) = (self.proj.resolve(from)?, self.proj.resolve(to)?);
+            if let Some(parent) = b.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(a, b)?;
+            if let Some(h) = self.local_hashes.remove(from) {
+                self.local_hashes.insert(to.to_owned(), h);
+            }
+        }
+        if let Some(u) = self.vault.move_file(from, to) {
+            self.persist_and_send(DocId::Vault(self.vault_id), u)?;
+        }
+        if let Some(h) = self.known_kept.remove(from) {
+            self.known_kept.insert(to.to_owned(), h);
+        }
+        let mut rewritten = 0;
+        for id in users {
+            let Some(state) = self.notes.get(&id) else { continue };
+            let (path, text) = (state.path.clone(), state.doc.text());
+            if let Some(new) = crate::files::rewrite_references(&path, &text, from, to, &files) {
+                self.api_replace(id, &new)?;
+                rewritten += 1;
+            }
+        }
+        self.orphan_check_due = true;
+        Ok(LocalReply::FileMoved { path: to.to_owned(), rewritten })
+    }
+
     fn is_attachment_file(&self, rel: &str) -> Result<bool> {
         let Ok(abs) = self.proj.resolve(rel) else { return Ok(false) };
         Ok(abs.is_file() && !Projection::is_note_path(&abs) && !self.proj.is_ignored(&abs))
@@ -1474,7 +1589,10 @@ impl Engine {
         self.orphan_check_due = false;
         let referenced = self.store.referenced_attachment_paths()?;
         for (path, _) in self.vault.attachment_entries() {
-            if !referenced.contains(&path) && !self.vault_resources.contains(&path) {
+            if !referenced.contains(&path)
+                && !self.vault_resources.contains(&path)
+                && !self.vault.is_kept(&path)
+            {
                 info!(path = %path, "attachment no longer referenced; dropping from vault");
                 let u = self.vault.remove_attachment(&path);
                 self.persist_and_send(DocId::Vault(self.vault_id), u)?;
@@ -1661,7 +1779,37 @@ impl Engine {
             self.proj.remove(&path)?;
             self.forget(id, &path)?;
         }
+        self.drop_removed_kept_files()?;
         self.reconcile_attachments()
+    }
+
+    /// The kept files and their hashes, as the vault doc has them now.
+    fn kept_now(&self) -> HashMap<String, String> {
+        self.vault
+            .kept_files()
+            .into_iter()
+            .filter_map(|p| self.vault.attachment_hash(&p).map(|h| (p, h)))
+            .collect()
+    }
+
+    /// A kept file that left the vault doc was deleted or moved on purpose, on some replica: the
+    /// copy here goes too — but only while it is still the copy that was synced. One edited here
+    /// since is somebody's work, and stays. (Files a note merely used are left alone, as ever:
+    /// nobody chose to remove those.)
+    fn drop_removed_kept_files(&mut self) -> Result<()> {
+        let now = self.kept_now();
+        let before = std::mem::replace(&mut self.known_kept, now);
+        for (path, hash) in before {
+            if self.vault.attachment_hash(&path).is_some() {
+                continue;
+            }
+            if self.is_attachment_file(&path)? && self.local_hash(&path)?.as_deref() == Some(hash.as_str()) {
+                info!(path = %path, "kept file removed elsewhere; removing the copy here");
+                self.proj.remove(&path)?;
+                self.local_hashes.remove(&path);
+            }
+        }
+        Ok(())
     }
 
     /// Drop a trashed note from memory and bookkeeping (its update log stays in the store).
@@ -1762,6 +1910,11 @@ impl Engine {
         }
         self.store.append_update(doc, &update, None)?;
         self.send_update(doc, update);
+        // A kept file this replica recorded is one it knows, for `drop_removed_kept_files`: when
+        // it later leaves the vault doc, that is a delete from elsewhere, not news.
+        if doc == DocId::Vault(self.vault_id) {
+            self.known_kept = self.kept_now();
+        }
         Ok(())
     }
 
@@ -1877,6 +2030,21 @@ impl Engine {
                 LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
                 LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
                 LocalQuery::DeleteNote(id) => self.api_delete(id)?,
+                LocalQuery::Files => {
+                    let users = self.store.note_attachment_paths()?;
+                    let size = |p: &str, _: &str| self.proj.resolve(p).ok()?.metadata().ok().map(|m| m.len());
+                    LocalReply::Files(crate::files::listing(
+                        self.vault.attachment_entries(),
+                        &self.vault.kept_files(),
+                        &users,
+                        size,
+                    ))
+                }
+                LocalQuery::PutFile { path, bytes, replace, base } => {
+                    self.put_file(&path, &bytes, replace, base)?
+                }
+                LocalQuery::DeleteFile(path) => self.delete_file(&path)?,
+                LocalQuery::MoveFile { from, to } => self.move_file(&from, &to)?,
                 LocalQuery::Export { id, format } => {
                     let Some(doc) = self.doc_for(id) else { return Ok(LocalReply::Written(None)) };
                     let opts = crate::pandoc::ExportOptions {

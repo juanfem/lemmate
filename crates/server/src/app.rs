@@ -215,6 +215,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/search", get(search_vault))
         .route("/api/v1/search", get(search))
         .route("/api/v1/vaults/{vault}/attachments/{hash}", get(get_attachment).put(put_attachment))
+        .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
+        .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
         .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize));
     let router = match web_dir {
         // Single-page app: unknown paths fall back to index.html so `#/v/<id>` links work.
@@ -452,7 +454,9 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
                     store.trash_note(row.id)?;
                 }
             }
-            let attachment_paths: Vec<String> = v.attachment_entries().into_iter().map(|(p, _)| p).collect();
+            let files: HashMap<String, String> = v.attachment_entries().into_iter().collect();
+            let attachment_paths: Vec<String> = files.keys().cloned().collect();
+            let read = blob_reader(state, vault_id, &files);
             for (id, path) in entries {
                 let existing = store.note_by_id(id)?;
                 let title = existing.as_ref().and_then(|r| r.title.clone()).or_else(|| {
@@ -464,20 +468,18 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
                 if existing.is_none() {
                     let text = store.load_doc(DocId::Note(id))?.text();
                     if !text.is_empty() {
-                        index_note_text(&mut store, id, &path, &text, &attachment_paths, true)?;
+                        index_note_text(&mut store, id, &path, &text, &attachment_paths, &read, true)?;
                     }
                 }
             }
         }
         (RoomDoc::Note(n), DocId::Note(id)) => {
             if let Some(row) = store.note_by_id(id)? {
-                let attachment_paths: Vec<String> = store
-                    .load_vault_doc(row.vault_id)?
-                    .attachment_entries()
-                    .into_iter()
-                    .map(|(p, _)| p)
-                    .collect();
-                index_note_text(&mut store, id, &row.path, &n.text(), &attachment_paths, true)?;
+                let files: HashMap<String, String> =
+                    store.load_vault_doc(row.vault_id)?.attachment_entries().into_iter().collect();
+                let attachment_paths: Vec<String> = files.keys().cloned().collect();
+                let read = blob_reader(state, row.vault_id, &files);
+                index_note_text(&mut store, id, &row.path, &n.text(), &attachment_paths, &read, true)?;
             } else {
                 // No vault entry yet: keep the FTS/tags fresh; the title lands when the entry does.
                 store.index_note(id, &markdown::index(&n.text())?)?;
@@ -502,12 +504,23 @@ pub fn reindex_if_stale(store: &mut Store) -> lemmate_core::Result<Option<usize>
             store.load_vault_doc(vault_id)?.attachment_entries().into_iter().map(|(p, _)| p).collect();
         for row in store.list_notes(vault_id)? {
             let text = store.load_doc(DocId::Note(row.id))?.text();
-            index_note_text(store, row.id, &row.path, &text, &attachment_paths, false)?;
+            // No blob store here: what a stylesheet imports is filled in at the note's next edit.
+            index_note_text(store, row.id, &row.path, &text, &attachment_paths, &|_| None, false)?;
             count += 1;
         }
     }
     store.mark_index_current()?;
     Ok(Some(count))
+}
+
+/// Reads a vault file's bytes from the blob store by path, for following what a stylesheet
+/// imports: `files` maps the vault's paths to their hashes.
+fn blob_reader<'a>(
+    state: &'a AppState,
+    vault: VaultId,
+    files: &'a HashMap<String, String>,
+) -> impl Fn(&str) -> Option<Vec<u8>> + 'a {
+    move |p: &str| files.get(p).and_then(|hash| state.attachments.get(vault, hash).ok().flatten())
 }
 
 /// Index one note's text: tags, links, FTS, title, and which vault attachments it references.
@@ -518,6 +531,7 @@ fn index_note_text(
     path: &str,
     text: &str,
     attachment_paths: &[String],
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
     edited: bool,
 ) -> lemmate_core::Result<()> {
     let ix = markdown::index(text)?;
@@ -526,10 +540,7 @@ fn index_note_text(
     } else {
         store.reindex_note(id, &ix)?;
     }
-    // No reader: this list is what the note names itself, front matter included. What a
-    // stylesheet imports in turn is followed where the files are — by the engine that records
-    // them, and by a render, which reads the blob store.
-    let paths = lemmate_core::attachments::referenced(path, text, attachment_paths, |_| None)?;
+    let paths = lemmate_core::attachments::referenced(path, text, attachment_paths, read)?;
     store.set_note_attachments(id, &paths)
 }
 
@@ -1366,6 +1377,175 @@ async fn get_attachment(
         ],
         bytes,
     ))
+}
+
+// ---- Files that are not notes (SPEC §9) ---------------------------------------------------------
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// Every file of the vault that is not a note, with the notes that use it.
+async fn list_files(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+) -> Result<Json<Vec<lemmate_core::files::FileEntry>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Viewer).await?;
+    let (entries, kept) = match &*vault_room(&state, vault).await?.doc.lock().await {
+        RoomDoc::Vault(v) => (v.attachment_entries(), v.kept_files()),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let store = state.store.lock().await;
+    let users = store.note_attachment_paths_in(vault).map_err(internal)?;
+    let list = lemmate_core::files::listing(entries, &kept, &users, |_, hash| {
+        store.attachment(vault, hash).ok().flatten().map(|r| r.size)
+    });
+    Ok(Json(list))
+}
+
+#[derive(Serialize)]
+struct FileOut {
+    path: String,
+    hash: String,
+}
+
+/// Put a file at a path the caller chose (SPEC §9), kept whether or not a note uses it. A file
+/// already there is a 409 unless `x-replace: true`; with `x-base-hash`, it is a 409 too when the
+/// file changed since the caller read it — the answer carries the hash it has now, so a save
+/// that would overwrite someone else's can ask first.
+async fn put_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Query(q): Query<FileQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::response::Response, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let path = lemmate_core::files::file_path(&q.path).ok_or(StatusCode::BAD_REQUEST)?;
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let replace = header("x-replace").is_some_and(|v| v == "true" || v == "1");
+    let base = header("x-base-hash");
+    let vroom = vault_room(&state, vault).await?;
+    let current = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.attachment_hash(&path),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    if let Some(current) = &current
+        && (!replace || base.as_ref().is_some_and(|b| b != current))
+    {
+        return Ok((StatusCode::CONFLICT, Json(serde_json::json!({ "current": current }))).into_response());
+    }
+    let (hash, _) = state.attachments.put(vault, &body).map_err(internal)?;
+    let row = AttachmentRow {
+        hash: hash.clone(),
+        size: body.len() as u64,
+        mime: mime_for_path(&path),
+        filename_hint: path.rsplit('/').next().map(str::to_owned),
+    };
+    state.store.lock().await.upsert_attachment(vault, &row).map_err(internal)?;
+    let update = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.put_kept_file(&path, &hash),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    commit_change(&state, &vroom, update).await?;
+    let status = if current.is_some() { StatusCode::OK } else { StatusCode::CREATED };
+    Ok((status, Json(FileOut { path, hash })).into_response())
+}
+
+/// Take a file out of the vault. Its bytes stay in the blob store until the orphan purge, and a
+/// note that still links to it shows a broken link — the file manager warns before asking.
+async fn delete_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let vroom = vault_room(&state, vault).await?;
+    let update = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.delete_file(&q.path),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    if update.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    commit_change(&state, &vroom, update).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct MoveFile {
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize)]
+struct Moved {
+    path: String,
+    /// How many notes had their references rewritten.
+    rewritten: usize,
+}
+
+/// Rename or move a file, and point every note that uses it at the new path — links, embeds and
+/// front matter (`lemmate_core::files::rewrite_references`). 409 when `to` is taken.
+async fn move_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Json(body): Json<MoveFile>,
+) -> Result<Json<Moved>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    auth::require(&state, &user, vault, Role::Editor).await?;
+    let to = lemmate_core::files::file_path(&body.to).ok_or(StatusCode::BAD_REQUEST)?;
+    let from = body.from;
+    if from == to {
+        return Ok(Json(Moved { path: to, rewritten: 0 }));
+    }
+    let vroom = vault_room(&state, vault).await?;
+    let (files, update) = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => {
+            if v.attachment_hash(&to).is_some() {
+                return Err(StatusCode::CONFLICT);
+            }
+            let files: Vec<String> = v.attachment_entries().into_iter().map(|(p, _)| p).collect();
+            (files, v.move_file(&from, &to).ok_or(StatusCode::NOT_FOUND)?)
+        }
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let users: Vec<NoteId> = state
+        .store
+        .lock()
+        .await
+        .note_attachment_paths_in(vault)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|(_, p)| *p == from)
+        .map(|(id, _)| id)
+        .collect();
+    commit_change(&state, &vroom, update).await?;
+    let mut rewritten = 0;
+    for id in users {
+        let Some(row) = state.store.lock().await.note_by_id(id).map_err(internal)? else { continue };
+        let room = note_room(&state, id).await?;
+        let update = match &*room.doc.lock().await {
+            RoomDoc::Note(d) => {
+                match lemmate_core::files::rewrite_references(&row.path, &d.text(), &from, &to, &files) {
+                    Some(text) => d.set_text(&text),
+                    None => continue,
+                }
+            }
+            RoomDoc::Vault(_) => continue,
+        };
+        commit_change(&state, &room, update).await?;
+        rewritten += 1;
+    }
+    Ok(Json(Moved { path: to, rewritten }))
 }
 
 fn internal(e: lemmate_core::Error) -> StatusCode {

@@ -75,6 +75,21 @@ pub enum LocalQuery {
         id: NoteId,
         format: crate::pandoc::Format,
     },
+    /// The vault's files that are not notes, with the notes using each (SPEC §9).
+    Files,
+    /// Write a file at a chosen path, kept whether or not a note uses it.
+    PutFile {
+        path: String,
+        bytes: Vec<u8>,
+        replace: bool,
+        /// The hash the caller last saw there; a different one now is a conflict.
+        base: Option<String>,
+    },
+    DeleteFile(String),
+    MoveFile {
+        from: String,
+        to: String,
+    },
     /// What a Quarto render of a note reads. The render itself runs outside the engine: it
     /// takes seconds, and the engine has sync to keep up meanwhile.
     RenderSource(NoteId),
@@ -122,6 +137,19 @@ pub enum LocalReply {
     Conflict(String),
     Done,
     Exported(Vec<u8>, &'static str),
+    Files(Vec<crate::files::FileEntry>),
+    /// A file written: its path and hash, and whether it is new.
+    FileWritten {
+        path: String,
+        hash: String,
+        created: bool,
+    },
+    /// A file is already at that path: the hash it has.
+    FileConflict(String),
+    FileMoved {
+        path: String,
+        rewritten: usize,
+    },
     RenderSource {
         path: String,
         text: String,
@@ -478,6 +506,8 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render", axum::routing::post(render_note))
+        .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
+        .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
         .route("/api/v1/vaults/{vault}/trash", get(trash))
         .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
@@ -839,6 +869,79 @@ async fn export_note(
         )),
         LocalReply::Written(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::UNPROCESSABLE_ENTITY),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// The vault's files that are not notes — the same shape as the server's.
+async fn list_files(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+) -> std::result::Result<impl IntoResponse, StatusCode> {
+    match ask(&s, &vault, LocalQuery::Files).await? {
+        LocalReply::Files(list) => Ok(axum::Json(list)),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Write a file at a chosen path (same headers and answers as the server's `put_file`).
+async fn put_file(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+    Query(q): Query<FileQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    let path = crate::files::file_path(&q.path).ok_or(StatusCode::BAD_REQUEST)?;
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let replace = header("x-replace").is_some_and(|v| v == "true" || v == "1");
+    let query = LocalQuery::PutFile { path, bytes: body.to_vec(), replace, base: header("x-base-hash") };
+    Ok(match ask(&s, &vault, query).await? {
+        LocalReply::FileWritten { path, hash, created } => (
+            if created { StatusCode::CREATED } else { StatusCode::OK },
+            axum::Json(serde_json::json!({ "path": path, "hash": hash })),
+        )
+            .into_response(),
+        LocalReply::FileConflict(current) => {
+            (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "current": current }))).into_response()
+        }
+        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    })
+}
+
+async fn delete_file(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> std::result::Result<StatusCode, StatusCode> {
+    match ask(&s, &vault, LocalQuery::DeleteFile(q.path)).await? {
+        LocalReply::Done => Ok(StatusCode::NO_CONTENT),
+        _ => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+#[derive(Deserialize)]
+struct MoveIn {
+    from: String,
+    to: String,
+}
+
+async fn move_file(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+    axum::Json(body): axum::Json<MoveIn>,
+) -> std::result::Result<impl IntoResponse, StatusCode> {
+    let to = crate::files::file_path(&body.to).ok_or(StatusCode::BAD_REQUEST)?;
+    match ask(&s, &vault, LocalQuery::MoveFile { from: body.from, to }).await? {
+        LocalReply::FileMoved { path, rewritten } => {
+            Ok(axum::Json(serde_json::json!({ "path": path, "rewritten": rewritten })))
+        }
+        LocalReply::FileConflict(_) => Err(StatusCode::CONFLICT),
+        _ => Err(StatusCode::NOT_FOUND),
     }
 }
 

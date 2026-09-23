@@ -550,6 +550,25 @@ impl Store {
     }
 
     /// Every attachment path referenced by at least one live (non-trashed) note.
+    /// Every (live note, attachment path) pair of one vault — the server keeps many.
+    pub fn note_attachment_paths_in(&self, vault_id: VaultId) -> Result<Vec<(NoteId, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.note_id, a.path FROM note_attachments a JOIN notes n ON n.id = a.note_id \
+             WHERE n.deleted_at IS NULL AND n.vault_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![vault_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, path) = row?;
+            if let Ok(id) = id.parse() {
+                out.push((id, path));
+            }
+        }
+        Ok(out)
+    }
+
     /// Every (live note, attachment path) pair: which notes depend on which files.
     pub fn note_attachment_paths(&self) -> Result<Vec<(NoteId, String)>> {
         let mut stmt = self.conn.prepare(

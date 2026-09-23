@@ -20,6 +20,10 @@ pub const BOOKMARKS_FIELD: &str = "bookmarks";
 /// Vault-level settings shared by every replica. The web client owns this map; Rust only reads
 /// `name` from it, to label the vault's folder on a native client.
 pub const META_FIELD: &str = "meta";
+/// Attachment paths kept whether or not a note uses them: files put in the vault through the
+/// file manager rather than pasted into a note (path → `true`). Everything else in
+/// [`ATTACHMENTS_FIELD`] lives only as long as some note depends on it.
+pub const KEPT_FIELD: &str = "kept";
 
 /// One entry of the bookmark list. `kind` is `note`, `folder`, `search` or `heading`; the
 /// importer only produces `note`.
@@ -38,6 +42,7 @@ pub struct VaultDoc {
     attachments: MapRef,
     bookmarks: ArrayRef,
     meta: MapRef,
+    kept: MapRef,
 }
 
 impl Default for VaultDoc {
@@ -53,7 +58,8 @@ impl VaultDoc {
         let attachments = doc.get_or_insert_map(ATTACHMENTS_FIELD);
         let bookmarks = doc.get_or_insert_array(BOOKMARKS_FIELD);
         let meta = doc.get_or_insert_map(META_FIELD);
-        Self { doc, notes, attachments, bookmarks, meta }
+        let kept = doc.get_or_insert_map(KEPT_FIELD);
+        Self { doc, notes, attachments, bookmarks, meta, kept }
     }
 
     pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
@@ -206,6 +212,86 @@ impl VaultDoc {
         self.diff_since(&before)
     }
 
+    /// Whether `path` is kept regardless of use (see [`KEPT_FIELD`]).
+    pub fn is_kept(&self, path: &str) -> bool {
+        let txn = self.doc.transact();
+        matches!(self.kept.get(&txn, path), Some(Out::Any(Any::Bool(true))))
+    }
+
+    /// Every kept path, sorted.
+    pub fn kept_files(&self) -> Vec<String> {
+        let txn = self.doc.transact();
+        let mut v: Vec<String> = self
+            .kept
+            .iter(&txn)
+            .filter(|(_, out)| matches!(out, Out::Any(Any::Bool(true))))
+            .map(|(k, _)| k.to_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Record a file put in the vault on purpose: its entry, and the mark that keeps it.
+    pub fn put_kept_file(&self, path: &str, hash: &str) -> Vec<u8> {
+        if self.attachment_hash(path).as_deref() == Some(hash) && self.is_kept(path) {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            self.attachments.insert(&mut txn, path.to_owned(), Any::from(hash));
+            self.kept.insert(&mut txn, path.to_owned(), Any::Bool(true));
+        }
+        self.diff_since(&before)
+    }
+
+    /// Mark `path` as kept, without touching its entry — what a replica does while the bytes
+    /// are still on their way to the server, so the entry lands only once they are there.
+    pub fn mark_kept(&self, path: &str) -> Vec<u8> {
+        if self.is_kept(path) {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            self.kept.insert(&mut txn, path.to_owned(), Any::Bool(true));
+        }
+        self.diff_since(&before)
+    }
+
+    /// Forget a file: its entry and its mark, in one change.
+    pub fn delete_file(&self, path: &str) -> Vec<u8> {
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            let had = self.attachments.remove(&mut txn, path).is_some();
+            let marked = self.kept.remove(&mut txn, path).is_some();
+            if !had && !marked {
+                return Vec::new();
+            }
+        }
+        self.diff_since(&before)
+    }
+
+    /// Move a file's entry, and its mark if it has one, from `from` to `to` in one change —
+    /// so no replica ever sees the file at neither path, or at both. `None` when there is no
+    /// file at `from`.
+    pub fn move_file(&self, from: &str, to: &str) -> Option<Vec<u8>> {
+        let hash = self.attachment_hash(from)?;
+        let kept = self.is_kept(from);
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            self.attachments.remove(&mut txn, from);
+            self.kept.remove(&mut txn, from);
+            self.attachments.insert(&mut txn, to.to_owned(), Any::from(hash));
+            if kept {
+                self.kept.insert(&mut txn, to.to_owned(), Any::Bool(true));
+            }
+        }
+        Some(self.diff_since(&before))
+    }
+
     /// The bookmark list, in order. Entries the web client wrote that are not plain
     /// `{kind, target, label}` objects are skipped rather than guessed at.
     pub fn bookmarks(&self) -> Vec<Bookmark> {
@@ -317,5 +403,30 @@ mod tests {
         assert!(!b.remove_attachment("attachments/x.png").is_empty());
         assert!(b.remove_attachment("attachments/x.png").is_empty());
         assert!(b.attachment_entries().is_empty());
+    }
+
+    #[test]
+    fn kept_files_travel_with_their_entries() {
+        let a = VaultDoc::new();
+        assert!(!a.put_kept_file("styles/site.scss", "h1").is_empty());
+        assert!(a.put_kept_file("styles/site.scss", "h1").is_empty(), "nothing to change");
+        a.set_attachment("attachments/pic.png", "h2");
+        let b = VaultDoc::from_updates([a.encode_full().as_slice()]).unwrap();
+        assert_eq!(b.kept_files(), ["styles/site.scss"]);
+        assert!(!b.is_kept("attachments/pic.png"), "a pasted file is not kept");
+
+        let u = a.move_file("styles/site.scss", "theme/site.scss").unwrap();
+        b.apply_update(&u).unwrap();
+        assert_eq!(b.attachment_hash("theme/site.scss").as_deref(), Some("h1"));
+        assert_eq!(b.attachment_hash("styles/site.scss"), None);
+        assert_eq!(b.kept_files(), ["theme/site.scss"], "the mark moves with it");
+        let u = a.move_file("attachments/pic.png", "img/pic.png").unwrap();
+        b.apply_update(&u).unwrap();
+        assert!(!b.is_kept("img/pic.png"), "and an unmarked file stays unmarked");
+        assert!(a.move_file("nowhere.png", "x.png").is_none());
+
+        b.apply_update(&a.delete_file("theme/site.scss")).unwrap();
+        assert!(b.kept_files().is_empty() && b.attachment_hash("theme/site.scss").is_none());
+        assert!(a.delete_file("theme/site.scss").is_empty());
     }
 }

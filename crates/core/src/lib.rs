@@ -17,6 +17,7 @@ pub mod diff;
 pub mod doc;
 pub mod error;
 pub mod export;
+pub mod files;
 pub mod frontmatter;
 pub mod ids;
 pub mod import;

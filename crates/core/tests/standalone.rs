@@ -351,6 +351,132 @@ async fn a_file_that_arrives_after_its_note_is_found() {
     handle.abort();
 }
 
+/// PUT/DELETE/POST with a body and headers, answering (status, body as JSON or text).
+async fn request(
+    method: &'static str,
+    url: String,
+    headers: &[(&'static str, String)],
+    body: Vec<u8>,
+) -> (u16, Value) {
+    let headers: Vec<(&'static str, String)> = headers.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let mut r = match method {
+            "PUT" => {
+                let mut req = agent.put(&url);
+                for (k, v) in &headers {
+                    req = req.header(*k, v);
+                }
+                req.send(&body[..]).unwrap()
+            }
+            "POST" => agent.post(&url).header("content-type", "application/json").send(&body[..]).unwrap(),
+            "DELETE" => agent.delete(&url).call().unwrap(),
+            _ => unreachable!(),
+        };
+        let text = r.body_mut().read_to_string().unwrap_or_default();
+        (r.status().as_u16(), serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    })
+    .await
+    .unwrap()
+}
+
+/// The file manager (SPEC §9): a file put at a chosen path is kept though no note uses it, a
+/// second put is a conflict unless it replaces — and a replace from a stale copy is one too —
+/// a move carries the notes that use the file along, and a delete takes it off the disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_are_managed_by_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}/api/v1/vaults/{}", handle.addr, handle.vault_id);
+    let dir = tmp.path().join("notes");
+    let file_url = |p: &str| format!("{base}/files?path={}", p.replace(' ', "%20"));
+    let listed = |path: &'static str| {
+        let base = base.clone();
+        async move {
+            let (_, list) = get(format!("{base}/files")).await;
+            list.as_array().unwrap().iter().find(|f| f["path"] == path).cloned()
+        }
+    };
+
+    let v1 = b"$ink: #111;\n".to_vec();
+    let h1 = lemmate_core::attachments::hash_bytes(&v1);
+    let (code, put) = request("PUT", file_url("Slides/2026/custom.scss"), &[], v1.clone()).await;
+    assert_eq!(code, 201, "{put}");
+    assert_eq!(put["hash"], h1);
+    assert!(dir.join("Slides/2026/custom.scss").is_file());
+    until("the file to be listed, kept", async || {
+        listed("Slides/2026/custom.scss").await.is_some_and(|f| f["kept"] == true)
+    })
+    .await;
+    // No note uses it, and it stays: kept files outlive orphan cleanup.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(listed("Slides/2026/custom.scss").await.is_some(), "a kept file is not an orphan");
+
+    let v2 = b"$ink: #222;\n".to_vec();
+    let (code, clash) = request("PUT", file_url("Slides/2026/custom.scss"), &[], v2.clone()).await;
+    assert_eq!(
+        (code, &clash["current"]),
+        (409, &Value::String(h1.clone())),
+        "taken, and not asked to replace"
+    );
+    let stale = [("x-replace", "true".to_owned()), ("x-base-hash", "0".repeat(64))];
+    assert_eq!(
+        request("PUT", file_url("Slides/2026/custom.scss"), &stale, v2.clone()).await.0,
+        409,
+        "a stale base"
+    );
+    let fresh = [("x-replace", "true".to_owned()), ("x-base-hash", h1.clone())];
+    assert_eq!(request("PUT", file_url("Slides/2026/custom.scss"), &fresh, v2.clone()).await.0, 200);
+    assert_eq!(std::fs::read(dir.join("Slides/2026/custom.scss")).unwrap(), v2);
+    for bad in ["../escape.css", "Slides/n.md", ".hidden/x.css"] {
+        assert_eq!(request("PUT", file_url(bad), &[], b"x".to_vec()).await.0, 400, "{bad}");
+    }
+
+    // A note that uses it, by front matter.
+    let (code, note) = call(
+        "POST",
+        format!("{base}/notes"),
+        Some(serde_json::json!({
+            "path": "Slides/2026/Deck.qmd",
+            "content": "---\nformat:\n  html:\n    theme: [cosmo, custom.scss]\n---\nBody.\n",
+        })),
+    )
+    .await;
+    assert_eq!(code, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    until("the note to be listed as a user", async || {
+        listed("Slides/2026/custom.scss").await.is_some_and(|f| f["used_by"][0] == Value::String(id.clone()))
+    })
+    .await;
+
+    let (code, moved) = request(
+        "POST",
+        format!("{base}/files/move"),
+        &[],
+        serde_json::json!({ "from": "Slides/2026/custom.scss", "to": "styles/deck.scss" })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(code, 200, "{moved}");
+    assert_eq!(moved["rewritten"], 1);
+    assert!(!dir.join("Slides/2026/custom.scss").exists() && dir.join("styles/deck.scss").is_file());
+    let (_, n) = get(format!("{base}/notes/{id}")).await;
+    assert!(n["content"].as_str().unwrap().contains("theme: [cosmo, ../../styles/deck.scss]"), "{n}");
+    until("the move to be listed", async || {
+        listed("styles/deck.scss").await.is_some_and(|f| f["kept"] == true)
+    })
+    .await;
+    assert!(listed("Slides/2026/custom.scss").await.is_none());
+
+    assert_eq!(request("DELETE", file_url("styles/deck.scss"), &[], vec![]).await.0, 204);
+    assert!(!dir.join("styles/deck.scss").exists());
+    assert!(listed("styles/deck.scss").await.is_none());
+    assert_eq!(request("DELETE", file_url("styles/deck.scss"), &[], vec![]).await.0, 404);
+
+    handle.abort();
+}
+
 /// Connecting a standalone app to a server (SPEC §3.2). The relay only carries the request: the
 /// shell signs in, writes the configuration and restarts, and the HTTP answer is the shell's, so
 /// the dialog can say what went wrong.
