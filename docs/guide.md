@@ -752,7 +752,13 @@ the strip of a `.qmd` note — renders the note **the way its front matter says*
 format it declares that a render can make. A deck (`format: revealjs`) or a page (`html`) opens
 in a pane beside the note; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
 the pane says so. The picker on the pane's bar renders it another way — as a plain page, as
-slides, or as a PDF or Word file to download — whatever the note declares. Quarto's
+slides, or as a PDF or Word file to download — whatever the note declares.
+
+Rendered notes gather as **tabs of one pane**: rendering a second note adds a tab there rather
+than opening another pane, and rendering one that is already there just brings its tab forward.
+The tabs reorder by dragging, move to another rendered pane, or split off into a new one at a
+pane's edge; a rendered tab stays among rendered ones — dropping it on a pane of notes does
+nothing. Each tab keeps its render, so switching between them does not run Quarto again. Quarto's
 page runs in a sandboxed frame: its own scripts and styles work, and nothing in it can reach the
 app or your session. Links to other sites open in a new tab. A render takes a few seconds, so
 it runs when you ask: an edit afterwards marks the pane *Changed since this render*, and

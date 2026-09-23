@@ -34,8 +34,11 @@ export function clampIndex(strip: string[], tab: string, index: number, pinned: 
   return pinned.includes(tab) ? Math.min(Math.max(index, 0), pins) : Math.min(Math.max(index, pins), strip.length)
 }
 
-/** History and render panes are about one note; only a pane of notes takes or gives up tabs. */
-const isNotes = (p: TabPane) => (p.kind ?? 'note') === 'note'
+const kindOf = (p: TabPane) => p.kind ?? 'note'
+/** A pane of notes — not a history or render pane, which each show one view of a note. */
+const isNotes = (p: TabPane) => kindOf(p) === 'note'
+/** Panes whose tabs move: notes, and rendered notes. A history pane follows one note only. */
+const hasTabs = (p: TabPane) => kindOf(p) !== 'history'
 
 function without<P extends TabPane>(p: P, tab: string): P {
   const i = p.tabs.indexOf(tab)
@@ -47,9 +50,10 @@ function without<P extends TabPane>(p: P, tab: string): P {
 }
 
 /**
- * Move `drag.tab` to `drop`, or null when the move would change nothing or is not allowed:
- * history and render panes are neither sources nor targets, and a pane cannot be split off its own
- * only tab.
+ * Move `drag.tab` to `drop`, or null when the move would change nothing or is not allowed: a tab
+ * stays among panes of its kind — a note among notes, a rendered note among rendered ones (a split
+ * makes one more of the same kind) — history panes are neither sources nor targets, and a pane
+ * cannot be split off its own only tab. A tab from another window only ever lands among notes.
  * A split past `maxPanes` lands in the target pane instead, as dropping on its middle would.
  *
  * A tab from another window (`drag.pane` null) only arrives: taking it out of the pane it left is
@@ -70,8 +74,9 @@ export function moveTab<P extends TabPane>(
 ): { panes: P[]; focused: number } | null {
   const src = drag.pane === null ? undefined : panes.find((p) => p.id === drag.pane)
   const dst = panes.find((p) => p.id === drop.pane)
-  if (!dst || !isNotes(dst)) return null
-  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || !isNotes(src))) return null
+  if (!dst || !hasTabs(dst)) return null
+  if (drag.pane === null && !isNotes(dst)) return null
+  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || kindOf(src) !== kindOf(dst))) return null
   const split = 'split' in drop && panes.length < maxPanes ? drop.split : null
   if (split && src === dst && src.tabs.length === 1) return null
 

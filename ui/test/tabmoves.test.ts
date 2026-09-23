@@ -97,10 +97,19 @@ test('endedOutside: where a drag nobody took was let go', () => {
   assert.equal(at(-200, -200, 0, 0), false)
 })
 
-test('render panes are neither sources nor targets either', () => {
-  const panes = [pane(1, ['a', 'b']), pane(2, ['a'], 'a', 'render')]
-  assert.equal(moveTab(panes, { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
-  assert.equal(moveTab(panes, { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
+test('rendered tabs move among render panes, never into or out of a pane of notes', () => {
+  const notes = pane(1, ['a', 'b'])
+  const render = pane(2, ['a', 'c'], 'a', 'render')
+  const other = pane(3, ['d'], 'd', 'render')
+  assert.equal(moveTab([notes, render], { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
+  assert.equal(moveTab([notes, render], { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
+  assert.equal(moveTab([notes, render], { tab: 'x', pane: null }, { pane: 2, index: 0 }, [], 3, fresh), null, 'from another window: notes only')
+  // Reordered within the pane.
+  const re = moveTab([notes, render], { tab: 'c', pane: 2 }, { pane: 2, index: 0 }, [], 3, fresh)!
+  assert.deepEqual(re.panes[1]!.tabs, ['c', 'a'])
+  // Into another render pane.
+  const across = moveTab([notes, render, other], { tab: 'c', pane: 2 }, { pane: 3, index: 1 }, [], 3, fresh)!
+  assert.deepEqual(across.panes.map((p) => p.tabs), [['a', 'b'], ['a'], ['d', 'c']])
 })
 
 test('a note opened while a render pane is focused never opens in it', () => {

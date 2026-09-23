@@ -629,9 +629,19 @@
     const p = panes[at]
     const id = p?.active
     if (!p || !id || isBlank(id) || solo) return
-    const seen = panes.findIndex((q) => q.kind === kind && q.active === id)
+    const seen = panes.findIndex((q) => q.kind === kind && (kind === 'render' ? q.tabs.includes(id) : q.active === id))
     if (seen >= 0) {
+      panes[seen]!.active = id
       focusedPane = seen
+      return
+    }
+    // Rendered notes gather in one pane, as tabs, rather than each taking a pane of its own.
+    const home = kind === 'render' ? panes.findIndex((q) => q.kind === 'render') : -1
+    if (home >= 0) {
+      const r = panes[home]!
+      r.tabs = [...r.tabs, id]
+      r.active = id
+      focusedPane = home
       return
     }
     const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind, seq: 0 }
@@ -728,7 +738,8 @@
     // cannot open (not synced yet, another account's), stays in the window it came from.
     if (drag.pane === null && (isBlank(drag.tab) || !sessionOf(drag.tab)?.pathOf(drag.tab))) return false
     const room = solo || narrow.current ? panes.length : MAX_PANES
-    const moved = moveTab(panes, drag, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: 'note' }))
+    // A split makes a pane of the kind the tab came from: a rendered note stays rendered.
+    const moved = moveTab(panes, drag, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: like.kind ?? 'note', seq: 0 }))
     if (!moved) return false
     panes = moved.panes
     focusedPane = moved.focused
@@ -1376,7 +1387,13 @@
           pane={p}
           focused={i === focusedPane}
           {pinned}
-          onActivate={(id) => { focusedPane = i; open(id) }}
+          onActivate={(id) => {
+            focusedPane = i
+            // A history or render pane's tab only brings its own view forward; opening the note
+            // is for the panes of notes.
+            if ((p.kind ?? 'note') === 'note') open(id)
+            else p.active = id
+          }}
           onClose={(id) => { focusedPane = i; close(id) }}
           onFocus={() => (focusedPane = i)}
           onBookmark={bookmarkActive}
@@ -1400,7 +1417,7 @@
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
           onRender={solo ? undefined : () => openRender(i)}
-          renderOpen={panes.some((q) => q.kind === 'render' && q.active === p.active)}
+          renderOpen={panes.some((q) => q.kind === 'render' && !!p.active && q.tabs.includes(p.active))}
           onRenameFile={renameFile}
           onDeleteFile={deleteFile}
           onOpenFile={openFile}

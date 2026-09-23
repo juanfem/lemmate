@@ -207,6 +207,11 @@
 
   /** Right-click on a tab: what you do to the tab, as opposed to `⋯`, which is about the note. */
   function tabMenu(id: string, e: MouseEvent) {
+    // A rendered note's tab has one thing to do to it: close it. Pinning and windows are notes'.
+    if (isRender) {
+      menu = menuAt(e, [{ label: 'Close tab', run: () => onClose(id) }])
+      return
+    }
     const isPinned = pinned.includes(id)
     const about = [
       // A window is opened on a note; a file stays among the tabs of this one.
@@ -254,7 +259,7 @@
     if (!onTabDrop || !carriesTab(e)) return
     const drag = tabDrag.current ?? FOREIGN
     e.stopPropagation()
-    const at = aside ? null : dropAt(e, drag)
+    const at = isHistory ? null : dropAt(e, drag)
     hoverTab(at)
     if (!at) return
     e.preventDefault()
@@ -267,7 +272,7 @@
     const local = tabDrag.current
     if (local) {
       e.preventDefault()
-      const at = aside ? null : dropAt(e, local)
+      const at = isHistory ? null : dropAt(e, local)
       // Before the move: the tab's own element may not survive it to hear `dragend`.
       endTabDrag()
       if (at) onTabDrop(local, at)
@@ -275,7 +280,7 @@
     }
     hoverTab(null)
     const tab = droppedTab(e)
-    const at = tab && !aside ? dropAt(e, { tab, pane: null }) : null
+    const at = tab && !isHistory ? dropAt(e, { tab, pane: null }) : null
     // Taken only if it really lands: an unhandled drop reports `none` to the window it came
     // from, which then keeps its tab.
     if (tab && at && onTabDrop({ tab, pane: null }, at)) e.preventDefault()
@@ -349,11 +354,11 @@
         class:blank={isBlank(id)}
         class:dragging={tabDrag.current?.tab === id && tabDrag.current.pane === pane.id}
         data-tab={id}
-        draggable={onTabDrop && !aside ? 'true' : undefined}
+        draggable={onTabDrop && !isHistory ? 'true' : undefined}
         ondragstart={(e) => beginTabDrag(e, { tab: id, pane: pane.id })}
         ondragend={dragEnd}
         onclick={() => onActivate(id)}
-        oncontextmenu={aside ? undefined : (e) => tabMenu(id, e)}
+        oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)}
         title={pathOf(id)}
       >
         {#if aside}
@@ -366,9 +371,9 @@
           <span class="dot pinned" title="Pinned"></span>
         {/if}
         <span class="label">{tabLabel(id)}{isHistory ? ' · history' : isRender ? ' · rendered' : ''}</span>
-        {#if aside}
+        {#if isHistory}
           <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
-        {:else if !pinned.includes(id)}
+        {:else if isRender || !pinned.includes(id)}
           <span class="x" role="button" tabindex="-1" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
         {/if}
       </button>
@@ -406,7 +411,7 @@
           <Icon name="splitright" size={15} />
         </button>
       {/if}
-      {#if onClosePane && !aside}
+      {#if onClosePane && !isHistory}
         <button class="icon" onclick={onClosePane} title="Close pane" aria-label="Close pane"><Icon name="closepane" size={15} /></button>
       {/if}
       {#if !aside && !file}
@@ -440,9 +445,18 @@
       <span>File</span>
     </div>
   {:else if isRender && pane.active && session}
-    {#key pane.active}
-      <RenderView {session} noteId={pane.active} />
-    {/key}
+    <!-- Every tab keeps its render: switching tabs shows what Quarto made rather than making it
+         again. A tab renders the first time it is shown. -->
+    <div class="rendered-tabs">
+      {#each pane.tabs as t (t)}
+        {@const s = lookup(t)}
+        {#if s}
+          <div class="rendered" hidden={t !== pane.active}>
+            <RenderView session={s} noteId={t} visible={t === pane.active} />
+          </div>
+        {/if}
+      {/each}
+    </div>
     <div class="note-foot">
       <span>{displayName(activePath)}</span>
       <span class="spacer"></span>
@@ -732,6 +746,14 @@
   }
 
   /* The page: the editor, and the margin index laid over the empty column beside its measure. */
+  .rendered-tabs,
+  .rendered {
+    height: 100%;
+    min-height: 0;
+  }
+  .rendered[hidden] {
+    display: none;
+  }
   .page {
     position: relative;
     min-height: 0;

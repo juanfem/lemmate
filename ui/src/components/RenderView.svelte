@@ -15,7 +15,16 @@
    * the picker says otherwise. A page (HTML, slides) shows here; a file (PDF, Word) downloads,
    * and the pane says so.
    */
-  let { session, noteId }: { session: VaultSession; noteId: string } = $props()
+  let {
+    session,
+    noteId,
+    visible = true,
+  }: {
+    session: VaultSession
+    noteId: string
+    /** A tab behind another is not rendered until it is first brought forward. */
+    visible?: boolean
+  } = $props()
 
   let html: string | null = $state(null)
   let error: string | null = $state(null)
@@ -91,12 +100,15 @@
   }
 
   onMount(() => {
-    stop = session.watchNote(noteId, (t) => {
-      const first = text === null
-      text = t
-      // The first render waits for the note, so that "stale" has something to compare with.
-      if (first) void render()
-    })
+    stop = session.watchNote(noteId, (t) => (text = t))
+  })
+  // The first render waits for the note, so that "stale" has something to compare with, and for
+  // the tab to be the one showing.
+  let started = false
+  $effect(() => {
+    if (!visible || text === null || started) return
+    started = true
+    void render()
   })
   onDestroy(() => {
     stop?.()
