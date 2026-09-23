@@ -302,6 +302,12 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 - The note is rendered at its vault path in a temporary project, with the attachments it
   references at theirs and the vault's `export/references.bib` / `style.csl` as defaults.
   Wikilinks render as their labels; attachment embeds as images.
+- A note's dependencies are its links and embeds, every vault file its front matter names, and
+  — transitively — what those stylesheets import and those YAML files name. Dependencies are
+  attachments: recorded in the vault doc, synced, and kept while a note depends on them.
+  `_quarto.yml`, `_metadata.yml` and `export/` are vault resources, kept regardless. A vault
+  `_quarto.yml` is the render's base project, minus its `project:` (no scripts, no output
+  directory) and with HTML forced self-contained.
 - HTML is shown in a pane beside the note, in a sandboxed frame with no access to the app's
   origin; PDF (through Typst), DOCX and reveal.js download.
 

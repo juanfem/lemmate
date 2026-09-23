@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use tracing::{debug, info, warn};
 
-use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path, resolve_reference};
+use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path};
 use crate::doc::NoteDoc;
 use crate::error::{Error, Result};
 use crate::frontmatter;
@@ -692,6 +692,11 @@ pub struct Engine {
     local_hashes: HashMap<String, String>,
     /// Something changed that may have orphaned an attachment entry; checked once idle.
     orphan_check_due: bool,
+    /// Files kept for the vault rather than for a note (`attachments::vault_resources`):
+    /// `_quarto.yml`, `_metadata.yml`, `export/`, and what they name.
+    vault_resources: Vec<String>,
+    /// A stylesheet or a YAML resource changed on disk, so what depends on what may have too.
+    deps_dirty: bool,
     // Local relay (SPEC §3.2)
     peers: HashMap<u64, Peer>,
     /// Docs the server has refused, and the frame it refused them with, so a window opened
@@ -756,6 +761,8 @@ impl Engine {
             pending_attachment_fs: HashMap::new(),
             local_hashes: HashMap::new(),
             orphan_check_due: true,
+            vault_resources: Vec::new(),
+            deps_dirty: false,
             peers: HashMap::new(),
             denied: HashMap::new(),
             pending_docs: HashMap::new(),
@@ -793,7 +800,7 @@ impl Engine {
         for (id, path, text) in &notes {
             let ix = markdown::index(text)?;
             self.store.reindex_note(*id, &ix)?;
-            self.discover_attachments(path, &ix)?;
+            self.discover_attachments(path, text, &ix)?;
         }
         self.store.mark_index_current()?;
         info!(vault_id = %self.vault_id, notes = notes.len(), "re-indexed notes for a newer indexer");
@@ -826,6 +833,9 @@ impl Engine {
         for id in ids {
             self.normalize_note(id)?;
         }
+        // A stylesheet or `_quarto.yml` may have changed while we were not running, and what it
+        // imports with it; nothing else would notice, since the notes themselves did not.
+        self.refresh_dependencies()?;
         // Referenced attachments whose upload never completed, or tracked attachments edited
         // while we were not running: the local file wins.
         for path in self.store.referenced_attachment_paths()? {
@@ -1064,7 +1074,7 @@ impl Engine {
         let title = ix.title.clone().or_else(|| file_stem(rel));
         self.store.upsert_note(id, self.vault_id, rel, title.as_deref())?;
         self.store.index_note(id, &ix)?;
-        self.discover_attachments(rel, &ix)
+        self.discover_attachments(rel, text, &ix)
     }
 
     // ---- Writes through the local API (SPEC §13.1) ------------------------------------------
@@ -1260,20 +1270,19 @@ impl Engine {
 
     // ---- Attachments ------------------------------------------------------------------------
 
-    /// Every local file a note references becomes an attachment: hashed, uploaded when the
-    /// server lacks it, and recorded in the vault doc so other replicas fetch it.
-    fn discover_attachments(&mut self, note_rel: &str, ix: &NoteIndex) -> Result<()> {
-        let mut targets: Vec<(String, bool)> =
-            ix.wikilinks.iter().filter(|w| w.embed).map(|w| (w.target.clone(), true)).collect();
-        targets.extend(ix.links.iter().map(|l| (l.clone(), false)));
-        let mut paths: Vec<String> = Vec::new();
-        for (target, wiki) in targets {
-            if let Some(path) = self.resolve_attachment(note_rel, &target, wiki)?
-                && !paths.contains(&path)
-            {
-                paths.push(path);
-            }
-        }
+    /// Every local file a note depends on becomes an attachment: hashed, uploaded when the
+    /// server lacks it, and recorded in the vault doc so other replicas fetch it. "Depends on"
+    /// is `attachments::dependencies`: its links and embeds, the files its front matter names
+    /// (a Quarto theme, a filter), and what those import in turn.
+    fn discover_attachments(&mut self, note_rel: &str, text: &str, ix: &NoteIndex) -> Result<()> {
+        let paths = crate::attachments::dependencies(
+            note_rel,
+            text,
+            ix,
+            |p| self.is_attachment_file(p).unwrap_or(false),
+            || self.proj.walk_files().unwrap_or_default(),
+            |p| self.proj.read_bytes(p).ok(),
+        );
         let id = self.by_path.get(note_rel).copied();
         if let Some(id) = id {
             self.store.set_note_attachments(id, &paths)?;
@@ -1285,11 +1294,34 @@ impl Engine {
         Ok(())
     }
 
-    /// Map a link target to an existing non-note file in the vault (see [`resolve_reference`]).
-    fn resolve_attachment(&self, note_rel: &str, target: &str, wiki: bool) -> Result<Option<String>> {
-        let exists = |p: &str| self.is_attachment_file(p).unwrap_or(false);
-        let all = || self.proj.walk_files().unwrap_or_default();
-        Ok(resolve_reference(note_rel, target, wiki, exists, all))
+    /// Re-derive what is kept for its own sake — the vault's resources — and what the notes that
+    /// use a stylesheet or a YAML file depend on, after one of those files changed: a new
+    /// `@import` in `custom.scss` is a new dependency of every note using it, though none of
+    /// those notes changed.
+    fn refresh_dependencies(&mut self) -> Result<()> {
+        self.vault_resources = crate::attachments::vault_resources(
+            |p| self.is_attachment_file(p).unwrap_or(false),
+            || self.proj.walk_files().unwrap_or_default(),
+            |p| self.proj.read_bytes(p).ok(),
+        );
+        for path in self.vault_resources.clone() {
+            self.want_upload(&path)?;
+        }
+        let affected: HashSet<NoteId> = self
+            .store
+            .note_attachment_paths()?
+            .into_iter()
+            .filter(|(_, p)| crate::attachments::names_files(p))
+            .map(|(id, _)| id)
+            .collect();
+        for id in affected {
+            let Some(state) = self.notes.get(&id) else { continue };
+            let (path, text) = (state.path.clone(), state.doc.text());
+            let ix = markdown::index(&text)?;
+            self.discover_attachments(&path, &text, &ix)?;
+        }
+        self.orphan_check_due = true;
+        Ok(())
     }
 
     fn is_attachment_file(&self, rel: &str) -> Result<bool> {
@@ -1402,7 +1434,7 @@ impl Engine {
         self.orphan_check_due = false;
         let referenced = self.store.referenced_attachment_paths()?;
         for (path, _) in self.vault.attachment_entries() {
-            if !referenced.contains(&path) {
+            if !referenced.contains(&path) && !self.vault_resources.contains(&path) {
                 info!(path = %path, "attachment no longer referenced; dropping from vault");
                 let u = self.vault.remove_attachment(&path);
                 self.persist_and_send(DocId::Vault(self.vault_id), u)?;
@@ -1456,6 +1488,11 @@ impl Engine {
     /// A tracked attachment file changed or vanished on disk.
     fn process_attachment_path(&mut self, rel: &str) -> Result<()> {
         self.local_hashes.remove(rel);
+        // Before the early return below: a file nothing records yet — a new `_vars.scss` that
+        // an existing theme imports, a first `_quarto.yml` — is exactly the case to look at.
+        if crate::attachments::names_files(rel) {
+            self.deps_dirty = true;
+        }
         if self.vault.attachment_hash(rel).is_none() {
             return Ok(()); // unreferenced file; picked up when a note references it
         }
@@ -2039,6 +2076,10 @@ impl Engine {
             if let Err(e) = self.process_attachment_path(&rel) {
                 warn!(path = %rel, %e, "processing attachment");
             }
+        }
+        if self.deps_dirty {
+            self.deps_dirty = false;
+            self.refresh_dependencies()?;
         }
         self.flush_uploads()?;
 

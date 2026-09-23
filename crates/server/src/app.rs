@@ -526,7 +526,10 @@ fn index_note_text(
     } else {
         store.reindex_note(id, &ix)?;
     }
-    let paths = lemmate_core::attachments::referenced(path, text, attachment_paths)?;
+    // No reader: this list is what the note names itself, front matter included. What a
+    // stylesheet imports in turn is followed where the files are — by the engine that records
+    // them, and by a render, which reads the blob store.
+    let paths = lemmate_core::attachments::referenced(path, text, attachment_paths, |_| None)?;
     store.set_note_attachments(id, &paths)
 }
 

@@ -138,21 +138,33 @@ fn render_in(
 ) -> Result<(Vec<u8>, &'static str)> {
     let project = work.join("project");
     let rel = source_path(note_path);
-    let referenced = crate::attachments::referenced(note_path, text, attachments)?;
-    for path in &referenced {
-        if let (Some(safe), Some(bytes)) = (safe_relative(path), read(path)) {
-            write(&project.join(safe), &bytes)?;
+    // What the note depends on — images, stylesheets and what they import, filters, anything its
+    // front matter names — and the vault's own resources: `_quarto.yml`, `_metadata.yml`, the
+    // export folder. All of it at its vault path, so every relative path means what it does in
+    // the vault.
+    let exists = |p: &str| attachments.iter().any(|a| a == p);
+    let mut files = crate::attachments::referenced(note_path, text, attachments, &read)?;
+    for p in crate::attachments::vault_resources(exists, || attachments.to_vec(), &read) {
+        if !files.contains(&p) {
+            files.push(p);
         }
     }
-    let mut extra = Vec::new();
-    for (path, key) in [(BIBLIOGRAPHY, "bibliography"), (CSL, "csl")] {
-        if let Some(bytes) = read(path) {
-            let at = project.join(path);
-            write(&at, &bytes)?;
-            extra.push((key, at));
+    let mut vault_project = None;
+    for path in &files {
+        let (Some(safe), Some(bytes)) = (safe_relative(path), read(path)) else { continue };
+        if matches!(path.as_str(), "_quarto.yml" | "_quarto.yaml") {
+            // Merged into the project file below rather than written as it is.
+            vault_project = Some(String::from_utf8_lossy(&bytes).into_owned());
+            continue;
         }
+        write(&project.join(safe), &bytes)?;
     }
-    write(&project.join("_quarto.yml"), project_yaml(&extra).as_bytes())?;
+    let extra: Vec<(&str, PathBuf)> = [(BIBLIOGRAPHY, "bibliography"), (CSL, "csl")]
+        .into_iter()
+        .filter(|(path, _)| files.iter().any(|f| f == path))
+        .map(|(path, key)| (key, project.join(path)))
+        .collect();
+    write(&project.join("_quarto.yml"), project_yaml(vault_project.as_deref(), &extra)?.as_bytes())?;
     write(&project.join(&rel), prepare(text, note_path, attachments).as_bytes())?;
 
     let bin = quarto_bin(opts.quarto.as_deref());
@@ -217,17 +229,56 @@ fn safe_relative(path: &str) -> Option<PathBuf> {
     (!out.as_os_str().is_empty()).then_some(out)
 }
 
-/// The project around the note. Its format settings are defaults: the note's own front matter
-/// wins over them, as Quarto always lets a document override its project.
-fn project_yaml(extra: &[(&str, PathBuf)]) -> String {
-    let mut y = String::from(
-        "project:\n  type: default\nformat:\n  html:\n    embed-resources: true\n  revealjs:\n    embed-resources: true\n",
-    );
-    for (key, path) in extra {
-        let p = path.to_string_lossy().replace('\'', "''");
-        y.push_str(&format!("{key}: '{p}'\n"));
+/// The project around the note: the vault's `_quarto.yml` when it has one, so a theme or
+/// options shared across documents apply, with three things settled here whatever it says.
+///
+/// - The project is this one note: `type: default`, and nothing else of the vault's `project:`
+///   — no website or book, no output directory, and no `pre-render`/`post-render` scripts,
+///   which are programs to run and have no business in a preview.
+/// - HTML and reveal.js are self-contained, because the pane shows one page and nothing else.
+/// - The vault's `export/references.bib` and `style.csl` are the bibliography and style unless
+///   the vault's file names its own — and a note's front matter wins over both, as Quarto
+///   always lets a document override its project.
+fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)]) -> Result<String> {
+    use serde_yaml_ng::{Mapping, Value};
+    let mut root = match vault {
+        Some(text) if !text.trim().is_empty() => match serde_yaml_ng::from_str::<Value>(text) {
+            Ok(Value::Mapping(m)) => m,
+            Ok(_) => Mapping::new(),
+            Err(e) => return Err(Error::Export(format!("the vault's _quarto.yml is not valid YAML: {e}"))),
+        },
+        _ => Mapping::new(),
+    };
+    let key = |k: &str| Value::String(k.to_owned());
+    let mut project = Mapping::new();
+    project.insert(key("type"), key("default"));
+    root.insert(key("project"), Value::Mapping(project));
+
+    let mut format = match root.remove("format") {
+        Some(Value::Mapping(m)) => m,
+        // `format: html`, or a list of them: the formats are named, their options are not.
+        Some(Value::String(f)) => Mapping::from_iter([(key(&f), key("default"))]),
+        Some(Value::Sequence(fs)) => {
+            fs.into_iter().filter(|f| f.is_string()).map(|f| (f, key("default"))).collect()
+        }
+        _ => Mapping::new(),
+    };
+    for name in ["html", "revealjs"] {
+        let mut options = match format.remove(name) {
+            Some(Value::Mapping(m)) => m,
+            _ => Mapping::new(),
+        };
+        options.insert(key("embed-resources"), Value::Bool(true));
+        format.insert(key(name), Value::Mapping(options));
     }
-    y
+    root.insert(key("format"), Value::Mapping(format));
+
+    for (name, path) in extra {
+        if !root.contains_key(*name) {
+            root.insert(key(name), key(&path.to_string_lossy()));
+        }
+    }
+    serde_yaml_ng::to_string(&Value::Mapping(root)).map_err(|e| Error::Export(e.to_string()))
 }
 
 /// What a failed render says: Quarto's `ERROR` and the lines that point at the problem, without
@@ -473,9 +524,37 @@ mod tests {
 
     #[test]
     fn project_yaml_names_the_bibliography() {
-        let y = project_yaml(&[("bibliography", PathBuf::from("/tmp/it's/references.bib"))]);
-        assert!(y.contains("embed-resources: true"));
-        assert!(y.ends_with("bibliography: '/tmp/it''s/references.bib'\n"), "{y}");
+        let y = project_yaml(None, &[("bibliography", PathBuf::from("/tmp/it's/references.bib"))]).unwrap();
+        let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(&y).unwrap();
+        assert_eq!(v["project"]["type"], "default");
+        assert_eq!(v["format"]["html"]["embed-resources"], true);
+        assert_eq!(v["format"]["revealjs"]["embed-resources"], true);
+        assert_eq!(v["bibliography"], "/tmp/it's/references.bib");
+    }
+
+    #[test]
+    fn the_vaults_project_file_is_the_base_but_not_the_boss() {
+        let vault = "project:\n  type: website\n  output-dir: _site\n  pre-render: rm -rf /\n\
+                     format:\n  html:\n    theme: [cosmo, styles/custom.scss]\n    embed-resources: false\n\
+                     bibliography: refs/mine.bib\nauthor: Juan\n";
+        let extra = [
+            ("bibliography", PathBuf::from("/p/export/references.bib")),
+            ("csl", PathBuf::from("/p/export/style.csl")),
+        ];
+        let v: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&project_yaml(Some(vault), &extra).unwrap()).unwrap();
+        assert_eq!(v["project"].as_mapping().unwrap().len(), 1, "only `type` survives: {v:?}");
+        assert_eq!(v["project"]["type"], "default");
+        assert_eq!(v["format"]["html"]["theme"][1], "styles/custom.scss", "the shared theme stays");
+        assert_eq!(v["format"]["html"]["embed-resources"], true, "the pane needs one page");
+        assert_eq!(v["bibliography"], "refs/mine.bib", "the vault's own bibliography wins over export/");
+        assert_eq!(v["csl"], "/p/export/style.csl");
+        assert_eq!(v["author"], "Juan");
+        // A bare format name still gets its options.
+        let v: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&project_yaml(Some("format: html\n"), &[]).unwrap()).unwrap();
+        assert_eq!(v["format"]["html"]["embed-resources"], true);
+        assert!(project_yaml(Some("format: [\n"), &[]).unwrap_err().to_string().contains("not valid YAML"));
     }
 
     #[test]
@@ -528,5 +607,39 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
         let (docx, _) = render("dir/Talk.qmd", md, Format::Docx, &atts, read, &opts).unwrap();
         assert!(docx.starts_with(b"PK"));
+    }
+
+    /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary. A theme named in front
+    /// matter, the partial it imports, and the vault's `_quarto.yml` with a stylesheet of its
+    /// own all reach Quarto — and the `pre-render` script that file asks for does not run.
+    #[test]
+    fn companion_files_and_the_vaults_project_file_reach_quarto() {
+        let Some(bin) = quarto() else {
+            eprintln!("skipped: set LEMMATE_TEST_QUARTO");
+            return;
+        };
+        let opts = RenderOptions { quarto: Some(bin), ..Default::default() };
+        let files: std::collections::HashMap<&str, &str> = [
+            ("_quarto.yml", "project:\n  pre-render: does-not-exist.sh\nformat:\n  html:\n    css: shared/site.css\n"),
+            ("shared/site.css", ".from-vault { color: #123456; }\n"),
+            (
+                "dir/custom.scss",
+                "/*-- scss:defaults --*/\n@import 'vars';\n$body-color: $marker;\n/*-- scss:rules --*/\n.from-theme { color: #abcdef; }\n",
+            ),
+            ("dir/_vars.scss", "$marker: #fedcba;\n"),
+        ]
+        .into_iter()
+        .collect();
+        let atts: Vec<String> = files.keys().map(|k| (*k).to_owned()).collect();
+        let read = |p: &str| files.get(p).map(|c| c.as_bytes().to_vec());
+        let md = "---\ntitle: Themed\nformat:\n  html:\n    theme: [cosmo, custom.scss]\n---\n\nBody.\n";
+        let (html, _) = render("dir/Talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        let html = String::from_utf8(html).unwrap().to_ascii_lowercase();
+        // Embedded stylesheets arrive as `data:text/css,…` URLs, where `#` is `%23`.
+        let has =
+            |colour: &str| html.contains(&format!("#{colour}")) || html.contains(&format!("%23{colour}"));
+        assert!(has("abcdef"), "the theme's rules");
+        assert!(has("fedcba"), "a variable from the partial it imports");
+        assert!(has("123456"), "the stylesheet the vault's _quarto.yml names");
     }
 }

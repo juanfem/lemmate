@@ -550,6 +550,22 @@ impl Store {
     }
 
     /// Every attachment path referenced by at least one live (non-trashed) note.
+    /// Every (live note, attachment path) pair: which notes depend on which files.
+    pub fn note_attachment_paths(&self) -> Result<Vec<(NoteId, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.note_id, a.path FROM note_attachments a JOIN notes n ON n.id = a.note_id WHERE n.deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, path) = row?;
+            if let Ok(id) = id.parse() {
+                out.push((id, path));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn referenced_attachment_paths(&self) -> Result<std::collections::HashSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT a.path FROM note_attachments a JOIN notes n ON n.id = a.note_id WHERE n.deleted_at IS NULL",

@@ -241,6 +241,62 @@ async fn a_note_renders_through_quarto_with_its_images() {
     handle.abort();
 }
 
+/// A note's companion files are attachments like any image: a theme its front matter names, the
+/// partial that theme imports, the vault's `_quarto.yml` — recorded in the vault doc (which is
+/// what syncs them, and what keeps a server from purging them). A partial added to the theme
+/// later is picked up although no note changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn companion_files_are_recorded_with_the_note() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id.to_string();
+    let dir = tmp.path().join("notes");
+    let write = |rel: &str, text: &str| {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    let recorded = |text: &'static str| {
+        let url = format!(
+            "{base}/api/v1/vaults/{vault}/attachments/{}",
+            lemmate_core::attachments::hash_bytes(text.as_bytes())
+        );
+        async move { get(url).await.0 == 200 }
+    };
+
+    write("talks/custom.scss", "/*-- scss:defaults --*/\n@import 'vars';\n");
+    write("talks/_vars.scss", "$marker: #fedcba;\n");
+    write("_quarto.yml", "format:\n  html:\n    css: shared/site.css\n");
+    write("shared/site.css", ".site { color: #123456; }\n");
+    write("talks/unused.scss", "/* nobody imports me */\n");
+    let (code, note) = call(
+        "POST",
+        format!("{base}/api/v1/vaults/{vault}/notes"),
+        Some(serde_json::json!({
+            "path": "talks/deck.qmd",
+            "content": "---\ntitle: Deck\nformat:\n  html:\n    theme: [cosmo, custom.scss]\n---\nBody.\n",
+        })),
+    )
+    .await;
+    assert_eq!(code, 201, "{note}");
+
+    until("the theme to be recorded", async || recorded("/*-- scss:defaults --*/\n@import 'vars';\n").await)
+        .await;
+    until("the partial it imports", async || recorded("$marker: #fedcba;\n").await).await;
+    until("the vault's _quarto.yml", async || recorded("format:\n  html:\n    css: shared/site.css\n").await)
+        .await;
+    until("the stylesheet _quarto.yml names", async || recorded(".site { color: #123456; }\n").await).await;
+    assert!(!recorded("/* nobody imports me */\n").await, "a stylesheet nothing uses stays out");
+
+    // The theme grows an import; the note is untouched.
+    write("talks/_more.scss", "$more: 1;\n");
+    write("talks/custom.scss", "/*-- scss:defaults --*/\n@import 'vars', 'more';\n");
+    until("the new partial", async || recorded("$more: 1;\n").await).await;
+
+    handle.abort();
+}
+
 /// Connecting a standalone app to a server (SPEC §3.2). The relay only carries the request: the
 /// shell signs in, writes the configuration and restarts, and the HTTP answer is the shell's, so
 /// the dialog can say what went wrong.

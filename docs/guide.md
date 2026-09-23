@@ -742,8 +742,24 @@ What goes in:
   and an Obsidian width (`![[x.png|300]]`) is kept. HTML and slides embed them.
 - **Wikilinks become their labels.** Another note is not part of the rendered document, so
   `[[Plan|the plan]]` renders as *the plan* (marked `.wikilink` for a stylesheet to find).
+- **Companion files come along too.** Any file the front matter names — `theme: [cosmo,
+  custom.scss]`, `css:`, `include-in-header:`, `filters: [wordcount.lua]`, `reference-doc:`,
+  `bibliography:` — relative to the note, the vault root, or `attachments/`, and whatever a
+  stylesheet `@import`s, `@use`s or `@forward`s in turn (`'vars'` finds `_vars.scss`).
+- **The vault's own Quarto settings.** A `_quarto.yml` at the vault root is the base for every
+  render, so a theme shared across documents goes there once; `_metadata.yml` files apply to
+  their folder as Quarto has them do. Three things are settled whatever it says: the project
+  is the one note (its `project:` — website, book, output directory, `pre-render` and
+  `post-render` scripts — is dropped), HTML and slides are self-contained, and a note's front
+  matter still wins over it.
 - **The vault's bibliography** — `export/references.bib`, and `export/style.csl` — is used
-  unless the note's front matter names its own `bibliography:`.
+  unless `_quarto.yml` or the note's front matter names its own `bibliography:`.
+
+These files are ordinary attachments as far as sync goes: a file a note depends on this way is
+recorded in the vault and synced like an image it embeds, and so are `_quarto.yml`, every
+`_metadata.yml` and everything under `export/`, whether or not a note mentions them. A
+stylesheet nothing depends on stays local. Editing a theme to import a new partial picks the
+partial up without touching the notes that use it.
 
 `quarto` is found through `--quarto PATH` / `LEMMATE_QUARTO` on the server, `LEMMATE_QUARTO` for
 the desktop app and `lemmate serve`, and `PATH` otherwise; without one, rendering answers
