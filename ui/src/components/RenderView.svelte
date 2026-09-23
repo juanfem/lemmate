@@ -164,7 +164,7 @@
     </div>
   {/if}
   {#if html !== null && !saved}
-    <iframe bind:this={frame} class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
+    <iframe bind:this={frame} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
@@ -263,16 +263,19 @@
     font-size: 0.8rem;
     color: var(--faint);
   }
-  /* Quarto's page brings its own background; white is what it was designed on. */
+  /* Quarto's page brings its own background; white is what it was designed on.
+
+     WebKit on iOS (Safari, and Chrome there, which is WebKit too) did not repaint the frame
+     when the deck inside changed slide — the new slide showed only after leaving the app and
+     coming back. The frame gets a compositing layer of its own, and nothing that animates it
+     (it used to fade while re-rendering): both are what that compositor needs to redraw it. */
   iframe {
     flex: 1;
     min-height: 0;
     width: 100%;
     border: 0;
     background: white;
-    transition: opacity 0.2s;
-  }
-  iframe.dim {
-    opacity: 0.55;
+    transform: translateZ(0);
+    will-change: transform;
   }
 </style>
