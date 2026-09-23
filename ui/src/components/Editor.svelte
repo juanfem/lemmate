@@ -129,6 +129,7 @@
     },
     follow: (id, onText) => session.watchNote(id, onText),
     embedUrl: (id, target) => embedUrlFor(session, session.pathOf(id) ?? '', target),
+    watch: (onChange) => session.watchPaths(onChange),
   }
 
   function openLink(target: string) {

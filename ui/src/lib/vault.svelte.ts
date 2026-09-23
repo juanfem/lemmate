@@ -311,6 +311,20 @@ export class VaultSession {
     )
   }
 
+  /**
+   * Call `onChange` whenever a note or an attachment appears, moves or goes — everything a link
+   * or an embed resolves against, including the first load of the list. It runs after `notes`
+   * and `attachments` have caught up. Returns what stops it.
+   */
+  watchPaths(onChange: () => void): () => void {
+    this.notesMap.observe(onChange)
+    this.attachmentsMap.observe(onChange)
+    return () => {
+      this.notesMap.unobserve(onChange)
+      this.attachmentsMap.unobserve(onChange)
+    }
+  }
+
   /** Open (or share) a note doc; call `release` when the view goes away. */
   acquire(id: string): { doc: Y.Doc; awareness: Awareness; release: () => void } {
     let e = this.open.get(id)

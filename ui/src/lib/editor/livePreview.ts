@@ -2,7 +2,7 @@
 // place, and revealed again on any line the selection touches. Lossless by construction.
 
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
-import { StateField, type EditorState } from '@codemirror/state'
+import { StateEffect, StateField, type EditorState } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode } from '@lezer/common'
 import katex from 'katex'
@@ -108,6 +108,12 @@ class ImageWidget extends WidgetType {
   }
 }
 
+/**
+ * Draw the preview again with the document unchanged: what an embed or a link resolves to has
+ * moved under it — the vault's note list arrived after the note did, or a note was renamed.
+ */
+export const refreshPreview = StateEffect.define<null>()
+
 /** What each drawn embed must undo when CodeMirror drops its DOM. */
 const unmounts = new WeakMap<HTMLElement, () => void>()
 
@@ -127,7 +133,7 @@ class TranscludeWidget extends WidgetType {
     this.open = open
   }
   eq(other: TranscludeWidget) {
-    return other.embed.key === this.embed.key
+    return other.embed.key === this.embed.key && other.embed.title === this.embed.title
   }
   get estimatedHeight() {
     return 120
@@ -832,7 +838,8 @@ export function livePreview(opts: LivePreviewOptions) {
   // front matter) are only allowed from fields. Recomputed on document or selection changes.
   const field = StateField.define<DecorationSet>({
     create: (state) => build(state, opts),
-    update: (deco, tr) => (tr.docChanged || tr.selection ? build(tr.state, opts) : deco),
+    update: (deco, tr) =>
+      tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview)) ? build(tr.state, opts) : deco,
     provide: (f) => EditorView.decorations.from(f),
   })
   return [

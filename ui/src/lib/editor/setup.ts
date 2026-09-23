@@ -1,7 +1,7 @@
 // CodeMirror 6 editor bound to a Y.Text (SPEC §8): markdown + our syntax extensions, live
 // preview, collaborative cursors, and the usual keymaps.
 
-import { EditorView, keymap, drawSelection, highlightActiveLine, rectangularSelection } from '@codemirror/view'
+import { EditorView, ViewPlugin, keymap, drawSelection, highlightActiveLine, rectangularSelection } from '@codemirror/view'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
@@ -14,7 +14,7 @@ import { yCollab } from 'y-codemirror.next'
 import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import { codeLanguage, noteSyntax } from './syntax.ts'
-import { livePreview, type EmbeddedNote, type LivePreviewOptions } from './livePreview.ts'
+import { livePreview, refreshPreview, type EmbeddedNote, type LivePreviewOptions } from './livePreview.ts'
 import { embeddedSection, type EmbedTarget } from './transclude.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
@@ -286,6 +286,34 @@ export interface NoteSource {
   follow: (id: string, onText: (text: string) => void) => () => void
   /** `embedUrl`, for an attachment named inside note `id` — its folder is where it looks first. */
   embedUrl: (id: string, target: string) => string | undefined
+  /** Call `onChange` whenever what `resolve` and `embedUrl` answer may have changed; the
+   *  function returned stops. */
+  watch: (onChange: () => void) => () => void
+}
+
+/**
+ * Redraw the preview when the vault's notes or attachments change. A note can open before the
+ * list it resolves against has arrived — a restored tab on a cold start always does — and
+ * without this its embeds stayed links until the next keystroke. Coalesced to a frame: a vault
+ * doc arriving is a burst of changes, and the answer is only wanted once.
+ */
+function followResolution(notes: NoteSource): Extension {
+  return ViewPlugin.define((view) => {
+    let frame = 0
+    const stop = notes.watch(() => {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        view.dispatch({ effects: refreshPreview.of(null) })
+      })
+    })
+    return {
+      destroy: () => {
+        cancelAnimationFrame(frame)
+        stop()
+      },
+    }
+  })
 }
 
 export interface PreviewOptions extends LivePreviewOptions {
@@ -315,11 +343,14 @@ function noteEmbeds(notes: NoteSource, openLink: (t: string) => void, chain: str
         const view = new EditorView({
           parent: host,
           state: EditorState.create({
-            extensions: embeddedExtensions({
-              openLink,
-              embedUrl: (t) => notes.embedUrl(hit.id, t),
-              embedNote: noteEmbeds(notes, openLink, [...chain, hit.id]),
-            }),
+            extensions: [
+              embeddedExtensions({
+                openLink,
+                embedUrl: (t) => notes.embedUrl(hit.id, t),
+                embedNote: noteEmbeds(notes, openLink, [...chain, hit.id]),
+              }),
+              followResolution(notes),
+            ],
           }),
         })
         // Said in place of the text whenever there is none to show: before the note has
@@ -366,8 +397,9 @@ function modeExtensions(mode: ViewMode, opts: PreviewOptions): Extension {
   if (mode === 'source') return [sourceLook]
   const { notes, noteId, ...preview } = opts
   if (notes) preview.embedNote = noteEmbeds(notes, opts.openLink, noteId === undefined ? [] : [noteId])
-  if (mode === 'reading') return [livePreview({ ...preview, alwaysFolded: true }), EditorView.editable.of(false), readingLook]
-  return [livePreview(preview)]
+  const follow = notes ? [followResolution(notes)] : []
+  if (mode === 'reading') return [livePreview({ ...preview, alwaysFolded: true }), EditorView.editable.of(false), readingLook, ...follow]
+  return [livePreview(preview), ...follow]
 }
 
 export interface EditorOptions extends PreviewOptions {
