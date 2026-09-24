@@ -249,6 +249,8 @@ pub(crate) struct LocalState {
     /// Where a request to connect a server goes, and `None` when nothing is listening.
     connect: Option<mpsc::UnboundedSender<ConnectAsk>>,
     next_peer: AtomicU64,
+    /// Renders made for viewing, to be opened again without rendering again.
+    renders: crate::quarto::RenderCache,
 }
 
 impl LocalState {
@@ -485,6 +487,7 @@ pub(crate) async fn serve(
         config_path: opts.config_path.clone(),
         connect: reconfigurable.then_some(connect_tx),
         next_peer: AtomicU64::new(1),
+        renders: crate::quarto::RenderCache::new(),
     });
     let registrar = Registrar(state.clone());
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
@@ -506,6 +509,7 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/daily/{date}", get(daily))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render/{render}", get(kept_render))
         .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
         .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
         .route("/api/v1/vaults/{vault}/trash", get(trash))
@@ -875,6 +879,27 @@ async fn export_note(
     }
 }
 
+/// A render the pane already has, opened again without rendering (see the server's
+/// `kept_render`); rendered afresh once it has expired.
+async fn kept_render(
+    State(s): State<Arc<LocalState>>,
+    Path((vault, id, render)): Path<(String, String, String)>,
+    q: Query<ExportIn>,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    let Some((bytes, mime, disposition)) = s.renders.get(&render, &id) else {
+        return render_page(State(s), Path((vault, id)), q).await;
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_owned()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_SECURITY_POLICY, crate::quarto::PAGE_SANDBOX.to_owned()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// A render as a page of its own, sandboxed by its headers (see the server's `render_page`).
 async fn render_page(
     state: State<Arc<LocalState>>,
@@ -989,7 +1014,8 @@ async fn render_note(
         "preview" => crate::quarto::preview_format(&text),
         _ => format,
     };
-    let opts = crate::quarto::RenderOptions { viewing: body.view, ..Default::default() };
+    let view = body.view;
+    let opts = crate::quarto::RenderOptions { viewing: view, ..Default::default() };
     let rendered = tokio::task::spawn_blocking(move || {
         if !crate::quarto::quarto_available(None) {
             return Ok(None);
@@ -1001,14 +1027,19 @@ async fn render_note(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match rendered {
-        Ok(Some(((bytes, mime), path))) => Ok((
-            [
-                (header::CONTENT_TYPE, mime.to_owned()),
-                (header::CONTENT_DISPOSITION, crate::quarto::disposition(&path, format)),
-            ],
-            bytes,
-        )
-            .into_response()),
+        Ok(Some(((bytes, mime), path))) => {
+            let disposition = crate::quarto::disposition(&path, format);
+            let kept = view.then(|| s.renders.put(&id.to_string(), &bytes, mime, &disposition));
+            let mut response = (
+                [(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)],
+                bytes,
+            )
+                .into_response();
+            if let Some(kept) = kept.and_then(|k| axum::http::HeaderValue::from_str(&k).ok()) {
+                response.headers_mut().insert("x-render-id", kept);
+            }
+            Ok(response)
+        }
         Ok(None) => Err(StatusCode::NOT_IMPLEMENTED),
         Err(e) => {
             tracing::warn!(%e, "quarto render");

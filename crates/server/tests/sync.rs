@@ -502,6 +502,38 @@ async fn render_uses_quarto_unless_switched_off() {
                     page.find("sessionStorage").unwrap() < page.find("reveal").unwrap(),
                     "storage stand-in first"
                 );
+                // What the pane rendered opens again as a page of its own without a second render.
+                let (kept, again, csp) = tokio::task::spawn_blocking({
+                    let base = base_for_preview.clone();
+                    move || {
+                        let mut r = ureq::post(format!("{base}/notes"))
+                            .header("content-type", "application/json")
+                            .send(
+                                r##"{"path":"Deck3.qmd","content":"---\nformat: revealjs\n---\n## One\n"}"##
+                                    .as_bytes(),
+                            )
+                            .unwrap();
+                        let n: serde_json::Value =
+                            serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+                        let note = n["id"].as_str().unwrap().to_owned();
+                        let mut r = ureq::post(format!("{base}/notes/{note}/render"))
+                            .header("content-type", "application/json")
+                            .send(r#"{"format":"auto","view":true}"#.as_bytes())
+                            .unwrap();
+                        let id = r.headers().get("x-render-id").unwrap().to_str().unwrap().to_owned();
+                        let first = r.body_mut().read_to_string().unwrap();
+                        let mut r = ureq::get(format!("{base}/notes/{note}/render/{id}?format=revealjs"))
+                            .call()
+                            .unwrap();
+                        let csp =
+                            r.headers().get("content-security-policy").unwrap().to_str().unwrap().to_owned();
+                        (first, r.body_mut().read_to_string().unwrap(), csp)
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(kept, again, "the very page the pane had");
+                assert!(csp.starts_with("sandbox"));
             }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");

@@ -113,6 +113,68 @@ pub fn preview_format(text: &str) -> Format {
 /// the session or the API of the site it came from.
 pub const PAGE_SANDBOX: &str = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox";
 
+/// Renders made for viewing, kept a while under an id of their own, so that the same page can be
+/// opened again — in a tab of its own, say — without Quarto making it a second time. A handful,
+/// for half an hour: this is a courtesy, not a store; a miss means rendering again.
+pub struct RenderCache {
+    kept: std::sync::Mutex<std::collections::VecDeque<Kept>>,
+}
+
+struct Kept {
+    id: String,
+    /// The note it was made from: an id is only good together with its note.
+    note: String,
+    bytes: std::sync::Arc<Vec<u8>>,
+    mime: &'static str,
+    disposition: String,
+    made: Instant,
+}
+
+/// A render kept by [`RenderCache`]: bytes, MIME type, `Content-Disposition`.
+pub type KeptRender = (Vec<u8>, &'static str, String);
+
+impl RenderCache {
+    const KEEP: usize = 16;
+    const FOR: Duration = Duration::from_secs(30 * 60);
+
+    pub fn new() -> Self {
+        Self { kept: std::sync::Mutex::new(std::collections::VecDeque::new()) }
+    }
+
+    /// Keep a render of `note`; the id to fetch it again by.
+    pub fn put(&self, note: &str, bytes: &[u8], mime: &'static str, disposition: &str) -> String {
+        let id = ulid::Ulid::generate().to_string();
+        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        kept.retain(|k| k.made.elapsed() < Self::FOR);
+        while kept.len() >= Self::KEEP {
+            kept.pop_front();
+        }
+        kept.push_back(Kept {
+            id: id.clone(),
+            note: note.to_owned(),
+            bytes: std::sync::Arc::new(bytes.to_vec()),
+            mime,
+            disposition: disposition.to_owned(),
+            made: Instant::now(),
+        });
+        id
+    }
+
+    /// The render kept as `id`, if it is still kept and was made from `note`.
+    pub fn get(&self, id: &str, note: &str) -> Option<KeptRender> {
+        let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        kept.iter()
+            .find(|k| k.id == id && k.note == note && k.made.elapsed() < Self::FOR)
+            .map(|k| (k.bytes.to_vec(), k.mime, k.disposition.clone()))
+    }
+}
+
+impl Default for RenderCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The `Content-Disposition` a render is served with: inline, so HTML can be shown in place,
 /// and named after the note for whoever saves it.
 pub fn disposition(note_path: &str, format: Format) -> String {
@@ -610,6 +672,19 @@ mod tests {
         let stand_in = page.find("sessionStorage").unwrap();
         assert!(page.find("<head>").unwrap() < stand_in && stand_in < page.find("x()").unwrap());
         assert!(String::from_utf8(with_storage(b"<p>no head</p>".to_vec())).unwrap().starts_with("<script>"));
+    }
+
+    #[test]
+    fn a_kept_render_is_had_again_only_with_its_note() {
+        let cache = RenderCache::new();
+        let id = cache.put("note-a", b"<p>page</p>", "text/html", "inline");
+        assert_eq!(cache.get(&id, "note-a").unwrap().0, b"<p>page</p>");
+        assert!(cache.get(&id, "note-b").is_none(), "an id is only good with its note");
+        assert!(cache.get("nonsense", "note-a").is_none());
+        for i in 0..RenderCache::KEEP {
+            cache.put("note-a", format!("{i}").as_bytes(), "text/html", "inline");
+        }
+        assert!(cache.get(&id, "note-a").is_none(), "the oldest goes first");
     }
 
     #[test]

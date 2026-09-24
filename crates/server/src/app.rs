@@ -127,6 +127,8 @@ pub struct AppState {
     /// references (`claim_waiting_files`). Each is looked for once per process: a note that
     /// names one later is indexed then anyway.
     waiting_files: std::sync::Mutex<HashMap<VaultId, HashSet<String>>>,
+    /// Renders made for viewing, to be opened again without rendering again.
+    renders: lemmate_core::quarto::RenderCache,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
@@ -187,6 +189,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         attachments,
         note_vault_claims: Mutex::new(HashMap::new()),
         waiting_files: std::sync::Mutex::new(HashMap::new()),
+        renders: lemmate_core::quarto::RenderCache::new(),
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
@@ -213,6 +216,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
+        .route("/api/v1/vaults/{vault}/notes/{id}/render/{render}", get(kept_render))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
@@ -1156,14 +1160,20 @@ async fn render_note(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match rendered {
-        Ok(Some((bytes, mime))) => Ok((
-            [
-                (header::CONTENT_TYPE, mime.to_owned()),
-                (header::CONTENT_DISPOSITION, lemmate_core::quarto::disposition(&row.path, format)),
-            ],
-            bytes,
-        )
-            .into_response()),
+        Ok(Some((bytes, mime))) => {
+            let disposition = lemmate_core::quarto::disposition(&row.path, format);
+            // A page made to be looked at is kept, so opening it again elsewhere is instant.
+            let kept = view.then(|| state.renders.put(&id.to_string(), &bytes, mime, &disposition));
+            let mut response = (
+                [(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)],
+                bytes,
+            )
+                .into_response();
+            if let Some(kept) = kept.and_then(|k| header::HeaderValue::from_str(&k).ok()) {
+                response.headers_mut().insert("x-render-id", kept);
+            }
+            Ok(response)
+        }
         Ok(None) => Err(StatusCode::NOT_IMPLEMENTED),
         Err(e) => {
             warn!(%e, "quarto render");
@@ -1175,6 +1185,34 @@ async fn render_note(
             Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
         }
     }
+}
+
+/// A render the pane already has, opened as a page of its own without rendering it again
+/// (`x-render-id` on the pane's render). Kept renders expire; then it is rendered as the query's
+/// `format` says, as `render_page` would.
+async fn kept_render(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id, render)): Path<(String, String, String)>,
+    q: Query<ExportIn>,
+) -> Result<axum::response::Response, StatusCode> {
+    let vault_id: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let note: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::note_role(&state, &user, vault_id, note).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let Some((bytes, mime, disposition)) = state.renders.get(&render, &note.to_string()) else {
+        return render_page(State(state), user, Path((vault, id)), q).await;
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_owned()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_SECURITY_POLICY, lemmate_core::quarto::PAGE_SANDBOX.to_owned()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// A render opened as a page of its own — a browser tab rather than the app's frame, which some

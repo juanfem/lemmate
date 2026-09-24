@@ -46,13 +46,61 @@
 
   /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
   let made = $state('')
+  /** The server keeps what it rendered for the pane under this id, so the new tab shows that very
+   *  page rather than rendering it again (and renders afresh only once it has expired). */
+  let renderId = $state('')
   /**
    * The same render as a tab of its own — the whole window for a deck, to present it. The
    * server sandboxes that page by its headers as the frame is by its attribute.
    */
   let tabUrl = $derived(
-    `/api/v1/vaults/${session.id}/notes/${noteId}/render?format=${made === 'slides' ? 'revealjs' : 'html'}`,
+    `/api/v1/vaults/${session.id}/notes/${noteId}/render${renderId ? `/${renderId}` : ''}?format=${made === 'slides' ? 'revealjs' : 'html'}`,
   )
+
+  /**
+   * Full screen, inside the app: the render fills the screen — the browser's own full screen
+   * where it offers one for any element (desktops, iPads), else the whole app window, drawn in
+   * the browser's top layer as a popover (an iPhone offers full screen for video only). Either
+   * way the frame stays where it is in the page, so the deck keeps its slide: moving an iframe
+   * reloads it. A pane is a CSS container, which a plain `position: fixed` would stay inside.
+   */
+  let root: HTMLDivElement | undefined = $state()
+  let full = $state(false)
+  async function enterFull() {
+    if (!root) return
+    if (document.fullscreenEnabled && root.requestFullscreen) {
+      try {
+        await root.requestFullscreen()
+        full = true
+        return
+      } catch {
+        /* refused: the app window it is */
+      }
+    }
+    if ('showPopover' in root) {
+      root.setAttribute('popover', 'manual')
+      root.showPopover()
+      full = true
+    }
+  }
+  function exitFull() {
+    if (document.fullscreenElement === root) void document.exitFullscreen()
+    if (root?.hasAttribute('popover')) {
+      if (root.matches(':popover-open')) root.hidePopover()
+      root.removeAttribute('popover')
+    }
+    full = false
+  }
+  /** Esc from the browser's full screen ends it without us: follow it. */
+  function onFullscreenChange() {
+    if (full && !document.fullscreenElement && !root?.hasAttribute('popover')) full = false
+  }
+  function onKey(e: KeyboardEvent) {
+    if (full && e.key === 'Escape') {
+      e.preventDefault()
+      exitFull()
+    }
+  }
   /** A render that was a file rather than a page: what was saved. */
   let saved: { name: string; url: string } | null = $state(null)
   const KINDS: Record<string, string> = { 'text/html': 'page', 'application/pdf': 'PDF', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word file' }
@@ -85,6 +133,7 @@
       } else if (!r.ok) {
         error = (await r.text()).trim() || `Rendering failed (${r.status}).`
       } else if (type === 'text/html') {
+        renderId = r.headers.get('x-render-id') ?? ''
         const page = await r.text()
         html = beforeBodyEnd(page, LINKS_OUT)
         // A self-contained deck carries its scripts first; the markup that makes it one is late.
@@ -109,6 +158,8 @@
 
   onMount(() => {
     stop = session.watchNote(noteId, (t) => (text = t))
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    window.addEventListener('keydown', onKey)
   })
   // The first render waits for the note, so that "stale" has something to compare with, and for
   // the tab to be the one showing.
@@ -119,12 +170,18 @@
     void render()
   })
   onDestroy(() => {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    window.removeEventListener('keydown', onKey)
+    if (full) exitFull()
     stop?.()
     if (saved) URL.revokeObjectURL(saved.url)
   })
 </script>
 
-<div class="render">
+<div class="render" class:full bind:this={root}>
+  {#if full}
+    <button class="exit" onclick={exitFull} title="Leave full screen (Esc)" aria-label="Leave full screen">×</button>
+  {/if}
   <div class="bar">
     <select bind:value={choice} onchange={render} disabled={busy} aria-label="Render as">
       {#each CHOICES as c (c.id)}<option value={c.id}>{c.label}</option>{/each}
@@ -142,6 +199,7 @@
     </span>
     <span class="actions">
       {#if (made === 'slides' || made === 'page') && html !== null && !saved}
+        <button class="link" onclick={enterFull} title="Fill the screen with this render">Full screen ⤢</button>
         <a class="out" href={tabUrl} target="_blank" rel="noopener" title="Open this render in a tab of its own — to present it full-window">New tab ↗</a>
       {/if}
       <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
@@ -216,6 +274,59 @@
     white-space: pre-wrap;
     color: var(--danger);
     border-bottom: 1px solid var(--border-soft);
+  }
+  /* Full screen: the bar goes, the render takes everything, and one button brings it back. */
+  .render.full {
+    background: white;
+  }
+  .render:popover-open {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    box-sizing: border-box;
+    display: flex;
+  }
+  .render.full .bar,
+  .render.full .error {
+    display: none;
+  }
+  .exit {
+    position: absolute;
+    top: calc(env(safe-area-inset-top) + 0.5rem);
+    right: calc(env(safe-area-inset-right) + 0.5rem);
+    z-index: 1;
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 0;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.45);
+    color: white;
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.6;
+  }
+  .exit:hover,
+  .exit:focus-visible {
+    opacity: 1;
+  }
+  .link {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .link:hover {
+    text-decoration: underline;
   }
   .out {
     color: var(--accent);
