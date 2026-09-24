@@ -8,9 +8,9 @@
     active: string | null
     /** SPEC §8 view mode, per pane — a source pane can sit beside a reading one. */
     mode: ViewMode
-    /** A history pane shows a note's versions instead of its text, a render pane what Quarto
-     *  makes of it (SPEC §5.6); absent means the note. */
-    kind?: 'note' | 'history' | 'render'
+    /** A history pane shows a note's versions instead of its text; absent means a pane of tabs
+     *  — notes, files and rendered notes (lib/rendertabs.ts). */
+    kind?: 'note' | 'history'
     /** Which version a history pane is showing; 0, or absent, is the log itself. */
     seq?: number
   }
@@ -32,6 +32,7 @@
   import RenderView from './RenderView.svelte'
   import FileView from './FileView.svelte'
   import { parseFileTab } from '../lib/filetabs.ts'
+  import { isRenderTab, tabNote } from '../lib/rendertabs.ts'
   import { baseName } from '../lib/filetree.ts'
   import type { FileEntry } from '../lib/api.ts'
   import { VIEW_MODES } from '../lib/editor/setup.ts'
@@ -157,15 +158,17 @@
    *  the first one — in the title, or the lines under it — nothing is current, which is true. */
   let current = $derived(index.reduce((best, h, i) => (h.pos <= here ? i : best), -1))
 
-  let isHistory = $derived(pane.kind === 'history')
-  let isRender = $derived(pane.kind === 'render')
   /** A pane *about* a note rather than the note: one tab, no editing chrome, closed as a whole. */
-  let aside = $derived(isHistory || isRender)
+  let isHistory = $derived(pane.kind === 'history')
   /** The tab in front holds a vault file, not a note: no note chrome for it either. */
   let file = $derived(pane.active ? parseFileTab(pane.active) : null)
+  /** …or what Quarto makes of a note, which has none either. */
+  let rendered = $derived(!!pane.active && isRenderTab(pane.active))
+  /** The pane's rendered notes, each kept alive behind the others (see the page below). */
+  let renderTabs = $derived(isHistory ? [] : pane.tabs.filter(isRenderTab))
 
   function pathOf(id: string): string | undefined {
-    return parseFileTab(id)?.path ?? lookup(id)?.pathOf(id)
+    return parseFileTab(id)?.path ?? lookup(id)?.pathOf(tabNote(id))
   }
   /** What a tab says: a note's name, or a file's name with its extension — that is its name. */
   function tabLabel(id: string): string {
@@ -207,14 +210,9 @@
 
   /** Right-click on a tab: what you do to the tab, as opposed to `⋯`, which is about the note. */
   function tabMenu(id: string, e: MouseEvent) {
-    // A rendered note's tab has one thing to do to it: close it. Pinning and windows are notes'.
-    if (isRender) {
-      menu = menuAt(e, [{ label: 'Close tab', run: () => onClose(id) }])
-      return
-    }
     const isPinned = pinned.includes(id)
     const about = [
-      // A window is opened on a note; a file stays among the tabs of this one.
+      // A window is opened on a note, or its render; a file stays among the tabs of this one.
       ...(onDetach && !isBlank(id) && !parseFileTab(id) ? [{ label: 'Move to new window', run: () => onDetach(id) }] : []),
       ...(onPin && !isBlank(id) ? [{ label: isPinned ? 'Unpin tab' : 'Pin tab', run: () => onPin(id) }] : []),
     ]
@@ -361,8 +359,8 @@
         oncontextmenu={isHistory ? undefined : (e) => tabMenu(id, e)}
         title={pathOf(id)}
       >
-        {#if aside}
-          <Icon name={isRender ? 'render' : 'history'} size={13} />
+        {#if isHistory || isRenderTab(id)}
+          <Icon name={isHistory ? 'history' : 'render'} size={13} />
         {:else if id === pane.active}
           <!-- One dot, two meanings, never at once: on the active tab it marks where you are,
                and on the others it marks a pin. A pinned tab is also the one without a `×`. -->
@@ -370,10 +368,10 @@
         {:else if pinned.includes(id)}
           <span class="dot pinned" title="Pinned"></span>
         {/if}
-        <span class="label">{tabLabel(id)}{isHistory ? ' · history' : isRender ? ' · rendered' : ''}</span>
+        <span class="label">{tabLabel(id)}{isHistory ? ' · history' : isRenderTab(id) ? ' · rendered' : ''}</span>
         {#if isHistory}
           <span class="x" role="button" tabindex="-1" aria-label="Close pane" onclick={(e) => { e.stopPropagation(); onClosePane?.() }} onkeydown={() => {}}>×</span>
-        {:else if isRender || !pinned.includes(id)}
+        {:else if !pinned.includes(id)}
           <span class="x" role="button" tabindex="-1" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); onClose(id) }} onkeydown={() => {}}>×</span>
         {/if}
       </button>
@@ -381,12 +379,12 @@
     {#if marker !== null}
       <span class="insert" style:left="{marker}px" aria-hidden="true"></span>
     {/if}
-    {#if onNewTab && !aside}
+    {#if onNewTab && !isHistory}
       <button class="newtab" onclick={onNewTab} title="New tab (Ctrl+T)" aria-label="New tab"><Icon name="plus" size={13} /></button>
     {/if}
     <span class="spacer"></span>
     <div class="cluster">
-      {#if !aside && !file && pane.active && session && !isBlank(pane.active)}
+      {#if !isHistory && !file && !rendered && pane.active && session && !isBlank(pane.active)}
         <span class="modes fold" role="group" aria-label="View mode">
           {#each VIEW_MODES as m (m.id)}
             <button class:on={pane.mode === m.id} onclick={() => onMode?.(m.id)} title={m.hint} aria-pressed={pane.mode === m.id}>{m.label}</button>
@@ -406,7 +404,7 @@
           </button>
         {/if}
       {/if}
-      {#if onSplit && !aside}
+      {#if onSplit && !isHistory}
         <button class="icon" onclick={onSplit} disabled={splitFull} title={splitFull ? 'Three panes is the limit' : 'Split right (Ctrl+\\)'} aria-label="Split right">
           <Icon name="splitright" size={15} />
         </button>
@@ -414,12 +412,26 @@
       {#if onClosePane && !isHistory}
         <button class="icon" onclick={onClosePane} title="Close pane" aria-label="Close pane"><Icon name="closepane" size={15} /></button>
       {/if}
-      {#if !aside && !file}
+      {#if !isHistory && !file && !rendered}
         <button class="icon more" onclick={(e) => (menu = menuAt(e, moreItems))} title="History, bookmark, rename, delete" aria-label="More actions">···</button>
       {/if}
     </div>
   </div>
 
+  {#if renderTabs.length}
+    <!-- Every rendered tab keeps its render, even behind a note: switching tabs shows what Quarto
+         made rather than making it again. A tab renders the first time it is shown. -->
+    <div class="rendered-tabs" hidden={!rendered}>
+      {#each renderTabs as t (t)}
+        {@const s = lookup(t)}
+        {#if s}
+          <div class="rendered" hidden={t !== pane.active}>
+            <RenderView session={s} noteId={tabNote(t)} visible={t === pane.active} />
+          </div>
+        {/if}
+      {/each}
+    </div>
+  {/if}
   {#if isHistory && pane.active && session && onSeq && onAsk}
     {#key pane.active}
       <HistoryPage {session} noteId={pane.active} seq={pane.seq ?? 0} {onSeq} {onAsk} />
@@ -444,19 +456,7 @@
       <span class="spacer"></span>
       <span>File</span>
     </div>
-  {:else if isRender && pane.active && session}
-    <!-- Every tab keeps its render: switching tabs shows what Quarto made rather than making it
-         again. A tab renders the first time it is shown. -->
-    <div class="rendered-tabs">
-      {#each pane.tabs as t (t)}
-        {@const s = lookup(t)}
-        {#if s}
-          <div class="rendered" hidden={t !== pane.active}>
-            <RenderView session={s} noteId={t} visible={t === pane.active} />
-          </div>
-        {/if}
-      {/each}
-    </div>
+  {:else if rendered && session}
     <div class="note-foot">
       <span>{displayName(activePath)}</span>
       <span class="spacer"></span>
@@ -751,6 +751,7 @@
     height: 100%;
     min-height: 0;
   }
+  .rendered-tabs[hidden],
   .rendered[hidden] {
     display: none;
   }

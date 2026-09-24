@@ -2,12 +2,14 @@
 // or against a pane's edge to split it. The rules live here, apart from the DOM, so they can be
 // tested: the panes pass in, the panes pass out, and nothing else is touched.
 
+import { isRenderTab } from './rendertabs.ts'
+
 /** The part of a pane a tab move cares about. `kind` absent means a note pane. */
 export interface TabPane {
   id: number
   tabs: string[]
   active: string | null
-  kind?: 'note' | 'history' | 'render'
+  kind?: 'note' | 'history'
 }
 
 /** The tab in flight, and the pane it left — `null` when that pane is in another window. */
@@ -34,11 +36,11 @@ export function clampIndex(strip: string[], tab: string, index: number, pinned: 
   return pinned.includes(tab) ? Math.min(Math.max(index, 0), pins) : Math.min(Math.max(index, pins), strip.length)
 }
 
-const kindOf = (p: TabPane) => p.kind ?? 'note'
-/** A pane of notes — not a history or render pane, which each show one view of a note. */
-const isNotes = (p: TabPane) => kindOf(p) === 'note'
-/** Panes whose tabs move: notes, and rendered notes. A history pane follows one note only. */
-const hasTabs = (p: TabPane) => kindOf(p) !== 'history'
+/** A pane of tabs — not a history pane, which follows one note only. Its tabs are notes,
+ *  files and rendered notes, mixed as they were opened or dragged in. */
+const isNotes = (p: TabPane) => (p.kind ?? 'note') === 'note'
+/** A pane of tabs with a note, or nothing yet, in front — not a rendered one. */
+const showsNote = (p: TabPane) => isNotes(p) && !(p.active && isRenderTab(p.active))
 
 function without<P extends TabPane>(p: P, tab: string): P {
   const i = p.tabs.indexOf(tab)
@@ -50,10 +52,9 @@ function without<P extends TabPane>(p: P, tab: string): P {
 }
 
 /**
- * Move `drag.tab` to `drop`, or null when the move would change nothing or is not allowed: a tab
- * stays among panes of its kind — a note among notes, a rendered note among rendered ones (a split
- * makes one more of the same kind) — history panes are neither sources nor targets, and a pane
- * cannot be split off its own only tab. A tab from another window only ever lands among notes.
+ * Move `drag.tab` to `drop`, or null when the move would change nothing or is not allowed:
+ * history panes are neither sources nor targets, and a pane cannot be split off its own only tab.
+ * Any other tab — a note, a file, a rendered note — goes into any other pane of tabs.
  * A split past `maxPanes` lands in the target pane instead, as dropping on its middle would.
  *
  * A tab from another window (`drag.pane` null) only arrives: taking it out of the pane it left is
@@ -74,9 +75,8 @@ export function moveTab<P extends TabPane>(
 ): { panes: P[]; focused: number } | null {
   const src = drag.pane === null ? undefined : panes.find((p) => p.id === drag.pane)
   const dst = panes.find((p) => p.id === drop.pane)
-  if (!dst || !hasTabs(dst)) return null
-  if (drag.pane === null && !isNotes(dst)) return null
-  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || kindOf(src) !== kindOf(dst))) return null
+  if (!dst || !isNotes(dst)) return null
+  if (drag.pane !== null && (!src || !src.tabs.includes(drag.tab) || !isNotes(src))) return null
   const split = 'split' in drop && panes.length < maxPanes ? drop.split : null
   if (split && src === dst && src.tabs.length === 1) return null
 
@@ -132,14 +132,19 @@ export function removeTab<P extends TabPane>(panes: P[], drag: TabDrag): P[] {
 }
 
 /**
- * Where a note opened from outside the panes goes, when the focused pane is a history or render
- * pane — which only ever shows what it was opened for. The focus moves to a pane of notes; when
- * none is left (the last was closed beside a render pane), a new one is made, to the left while
- * there is room and in the focused pane's place when there is not. `fresh` makes the new pane.
+ * Where a note opened from outside the panes goes, when the focused pane is a history pane —
+ * which only ever shows what it was opened for — or has a rendered note in front, which the note
+ * would cover. The focus moves to a pane with a note in front; failing that, a pane of tabs stays
+ * where it is (the note becomes a tab of its own beside the render), and a history pane gives way
+ * to any pane of tabs, or to a new one when none is left: to the left while there is room, and in
+ * the history pane's place when there is not. `fresh` makes the new pane.
  */
 export function notePane<P extends TabPane>(panes: P[], focused: number, max: number, fresh: () => P): { panes: P[]; focused: number } {
   const current = panes[focused]
-  if (!current || isNotes(current)) return { panes, focused }
+  if (!current || showsNote(current)) return { panes, focused }
+  const shows = panes.findIndex(showsNote)
+  if (shows >= 0) return { panes, focused: shows }
+  if (isNotes(current)) return { panes, focused }
   const i = panes.findIndex(isNotes)
   if (i >= 0) return { panes, focused: i }
   if (panes.length < max) return { panes: [fresh(), ...panes], focused: 0 }

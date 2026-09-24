@@ -28,6 +28,7 @@
   import AttachmentsPane from './components/AttachmentsPane.svelte'
   import UploadDialog from './components/UploadDialog.svelte'
   import { fileTab, isFileTab, parseFileTab } from './lib/filetabs.ts'
+  import { isRenderTab, renderTab, tabNote } from './lib/rendertabs.ts'
   import { renderReturn } from './lib/next.ts'
   import type { FileEntry } from './lib/api.ts'
   import ShareDialog from './components/ShareDialog.svelte'
@@ -116,7 +117,7 @@
   //
   // Routes: `#/v/<vault>` focuses a vault, `#/v/<vault>/<note>` a note inside it, and both are
   // written back as you move around. `#/w/<vault>/<note>` is the same note in a window of its
-  // own (a tab's *Move to new window*). `#/n/<vault>/<note>` (a note shared directly with you) and
+  // own (a tab's *Move to new window*); `render:<note>` in place of the note is its render. `#/n/<vault>/<note>` (a note shared directly with you) and
   // `#/s/<token>` (a public link) are single-note views with no workspace behind them.
   const ULID = '[0-9A-HJKMNP-TV-Z]{26}'
   /**
@@ -141,7 +142,7 @@
     return n ? n[1]! : null
   }
   function readRouteNote(): string | null {
-    const m = new RegExp(`^#/[vw]/${ULID}/(${ULID})`, 'u').exec(location.hash)
+    const m = new RegExp(`^#/[vw]/${ULID}/((?:render:)?${ULID})`, 'u').exec(location.hash)
     return m ? m[1]! : null
   }
   function readNoteOnly(): string | null {
@@ -167,7 +168,7 @@
     const v = readRouteVault()
     if (v && !noteOnly) focusVault = v
     const n = readRouteNote()
-    if (n && n !== active) routeNote = n
+    if (n && n !== activeTab) routeNote = n
   })
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
@@ -414,7 +415,9 @@
   }
   let focused = $derived(panes[Math.min(focusedPane, panes.length - 1)] ?? panes[0]!)
   /** The focused pane's note: everything outside the panes (commands, sidebar) acts on it. */
-  let active = $derived(focused.active)
+  let activeTab = $derived(focused.active)
+  /** …and that is the note behind a rendered tab: its commands are the note's. */
+  let active = $derived(activeTab && tabNote(activeTab))
   let presence = $derived(presenceByPane[focused.id] ?? [])
 
   /** The session behind a note id, whichever vault holds it. A file's tab is not a note, and
@@ -422,7 +425,7 @@
   function sessionOf(noteId: string | null | undefined): VaultSession | undefined {
     if (solo) return solo
     if (noteId && isFileTab(noteId)) return undefined
-    return workspace?.sessionForNote(noteId) ?? undefined
+    return workspace?.sessionForNote(noteId && tabNote(noteId)) ?? undefined
   }
   /** The session behind any tab: a note's, or the vault a file's tab names. */
   function tabSession(tab: string): VaultSession | undefined {
@@ -460,14 +463,14 @@
     return manyVaults && vault ? (workspace?.label(vault) ?? '') : ''
   }
   function labelOfNote(noteId: string): string {
-    return vaultLabel(workspace?.vaultOfNote(noteId))
+    return vaultLabel(workspace?.vaultOfNote(tabNote(noteId)))
   }
 
   // The route follows the focused note, so a reload or a copied URL comes back to it.
   $effect(() => {
     if (publicToken || noteOnly || invite) return
     const vault = session?.id
-    const note = active
+    const note = activeTab
     // A detached window with its last tab closed keeps its route, and with it what it is.
     const want = note && vault ? `#/${detached ? 'w' : 'v'}/${vault}/${note}` : vault && !detached ? `#/v/${vault}` : ''
     if (want && location.hash !== want) location.hash = want
@@ -488,10 +491,13 @@
         .filter((p) => Array.isArray(p.tabs) && p.tabs.length > 0)
         .slice(0, MAX_PANES)
         .map((p) => {
-          const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string')
-          const kind = p.kind === 'history' || p.kind === 'render' ? p.kind : 'note'
+          // A render pane, from before rendered notes were tabs like the rest: its tabs say so now.
+          const was = p.kind === 'render' ? renderTab : (t: string) => t
+          const tabs = (p.tabs ?? []).filter((t) => typeof t === 'string').map(was)
+          const at = p.active ? was(p.active) : null
+          const kind = p.kind === 'history' ? 'history' : 'note'
           const seq = kind === 'history' && typeof p.seq === 'number' ? p.seq : 0
-          return { id: ++paneSeq, tabs, active: p.active && tabs.includes(p.active) ? p.active : (tabs[0] ?? null), mode: asMode(p.mode), kind, seq } as PaneState
+          return { id: ++paneSeq, tabs, active: at && tabs.includes(at) ? at : (tabs[0] ?? null), mode: asMode(p.mode), kind, seq } as PaneState
         })
       if (list.length) return { panes: list, focused: Math.min(Math.max(data?.focused ?? 0, 0), list.length - 1) }
     } catch {
@@ -528,11 +534,11 @@
     const known = new Set(ws.notes.map((n) => n.id))
     untrack(() => {
       layoutRestored = true
-      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(t) || isBlank(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
+      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(tabNote(t)) || isBlank(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
       const live = kept.filter((p) => p.tabs.length > 0)
       panes = live.length ? live : [blankPane()]
       focusedPane = Math.min(focusedPane, panes.length - 1)
-      pinned = pinned.filter((id) => known.has(id))
+      pinned = pinned.filter((id) => known.has(tabNote(id)))
     })
   })
   // A note named by the URL (a link someone sent, a reload) opens as soon as it is known.
@@ -540,7 +546,7 @@
     const ws = workspace
     const want = routeNote
     if (!ws || !want) return
-    if (!ws.notes.some((n) => n.id === want)) return
+    if (!ws.notes.some((n) => n.id === tabNote(want))) return
     untrack(() => {
       routeNote = null
       open(want)
@@ -580,8 +586,8 @@
    * showing the note. `openInNewTab` is the deliberate opposite, from the ＋ button and the
    * right-click menu.
    */
-  /** Move the focus off a history or render pane before opening a note — into a pane of
-   *  notes, made for it if the last one was closed (`notePane`). */
+  /** Move the focus off a history pane, or a rendered note, before opening a note — into a pane
+   *  with a note in front, made for it if the last one was closed (`notePane`). */
   function noteFocus() {
     const next = notePane(panes, focusedPane, MAX_PANES, blankPane)
     if (next.panes !== panes) panes = next.panes
@@ -592,7 +598,8 @@
     const p = focused
     if (!p.tabs.includes(id)) {
       const at = p.active ? p.tabs.indexOf(p.active) : -1
-      if (at === -1 || pinned.includes(p.active!)) p.tabs = [...p.tabs, id]
+      // A render is not browsed past either: making it again is not a click away.
+      if (at === -1 || pinned.includes(p.active!) || isRenderTab(p.active!)) p.tabs = [...p.tabs, id]
       else {
         const displaced = p.tabs[at]!
         p.tabs = p.tabs.map((t, i) => (i === at ? id : t))
@@ -610,7 +617,8 @@
   }
   /** A fresh empty tab, waiting for the next note you click (the ＋ on the tab strip). */
   function newTab() {
-    noteFocus()
+    // Only off a history pane: a ＋ beside a render is asked for there.
+    if (focused.kind === 'history') noteFocus()
     const p = focused
     p.tabs = [...p.tabs, `blank:${++blankSeq}`]
     p.active = p.tabs[p.tabs.length - 1]!
@@ -622,7 +630,7 @@
     // On a phone the drawer is covering the note you just picked.
     drawer = false
     closed = closed.filter((c) => c !== id)
-    const vault = workspace?.vaultOfNote(id)
+    const vault = workspace?.vaultOfNote(tabNote(id))
     if (vault) focusVault = vault
     tagsVersion++
   }
@@ -655,32 +663,15 @@
    * press goes back to the pane already showing it rather than opening another.
    */
   function openHistory(at = focusedPane) {
-    openAside('history', at)
-  }
-  /** What Quarto makes of the note (SPEC §5.6), beside it — placed like its history. */
-  function openRender(at = focusedPane) {
-    openAside('render', at)
-  }
-  function openAside(kind: 'history' | 'render', at: number) {
     const p = panes[at]
-    const id = p?.active
-    if (!p || !id || isBlank(id) || solo) return
-    const seen = panes.findIndex((q) => q.kind === kind && (kind === 'render' ? q.tabs.includes(id) : q.active === id))
+    const id = p?.active && tabNote(p.active)
+    if (!p || !id || isBlank(id) || isFileTab(id) || solo) return
+    const seen = panes.findIndex((q) => q.kind === 'history' && q.active === id)
     if (seen >= 0) {
-      panes[seen]!.active = id
       focusedPane = seen
       return
     }
-    // Rendered notes gather in one pane, as tabs, rather than each taking a pane of its own.
-    const home = kind === 'render' ? panes.findIndex((q) => q.kind === 'render') : -1
-    if (home >= 0) {
-      const r = panes[home]!
-      r.tabs = [...r.tabs, id]
-      r.active = id
-      focusedPane = home
-      return
-    }
-    const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind, seq: 0 }
+    const entry: PaneState = { id: ++paneSeq, tabs: [id], active: id, mode: p.mode, kind: 'history', seq: 0 }
     if (panes.length < MAX_PANES) {
       panes = [...panes.slice(0, at + 1), entry, ...panes.slice(at + 1)]
       focusedPane = at + 1
@@ -688,6 +679,29 @@
       panes = [...panes.slice(0, -1), entry]
       focusedPane = panes.length - 1
     }
+  }
+  /**
+   * What Quarto makes of the note (SPEC §5.6): a tab like any other (lib/rendertabs.ts), opened
+   * in a pane beside the note. Renders gather: the next one joins a pane already showing one,
+   * and a note rendered already goes back to its tab rather than opening another.
+   */
+  function openRender(at = focusedPane) {
+    const p = panes[at]
+    const id = p?.active && tabNote(p.active)
+    if (!p || !id || isBlank(id) || isFileTab(id) || solo) return
+    const tab = renderTab(id)
+    const seen = panes.findIndex((q) => q.kind !== 'history' && q.tabs.includes(tab))
+    const home = seen >= 0 ? seen : panes.findIndex((q) => q.kind !== 'history' && !!q.active && isRenderTab(q.active))
+    if (home >= 0) {
+      const r = panes[home]!
+      if (!r.tabs.includes(tab)) r.tabs = [...r.tabs, tab]
+      r.active = tab
+      focusedPane = home
+      return
+    }
+    const next = inNewPane(panes, at, MAX_PANES, tab, (t, like) => ({ id: ++paneSeq, tabs: [t], active: t, mode: like.mode, kind: 'note' }))
+    panes = next.panes
+    focusedPane = next.focused
   }
   function closePane(i = focusedPane) {
     if (panes.length <= 1) return
@@ -700,7 +714,7 @@
   function reopenClosed() {
     const id = closed[closed.length - 1]
     closed = closed.slice(0, -1)
-    if (id && sessionOf(id)?.pathOf(id)) openInNewTab(id)
+    if (id && sessionOf(id)?.pathOf(tabNote(id))) openInNewTab(id)
   }
   function togglePin(id: string) {
     // Re-read first: another window on this origin may have pinned or unpinned something since
@@ -771,8 +785,8 @@
       ? 'New tab'
       : isFileTab(id)
         ? (parseFileTab(id)?.path.split('/').pop() ?? 'File')
-        : displayName(sessionOf(id)?.pathOf(id) ?? '') || 'Note'
-    return p.kind === 'history' ? `History · ${name}` : p.kind === 'render' ? `Render · ${name}` : name
+        : displayName(sessionOf(id)?.pathOf(tabNote(id)) ?? '') || 'Note'
+    return p.kind === 'history' ? `History · ${name}` : id && isRenderTab(id) ? `Render · ${name}` : name
   }
   /**
    * The phone's way between panes. It draws only the focused one, so the others need a door:
@@ -795,10 +809,9 @@
   function dropTab(drag: TabDrag, drop: TabDrop): boolean {
     // From another window, only a note this one holds too: a blank tab, or a note this workspace
     // cannot open (not synced yet, another account's), stays in the window it came from.
-    if (drag.pane === null && (isBlank(drag.tab) || !sessionOf(drag.tab)?.pathOf(drag.tab))) return false
+    if (drag.pane === null && (isBlank(drag.tab) || !sessionOf(drag.tab)?.pathOf(tabNote(drag.tab)))) return false
     const room = solo || narrow.current ? panes.length : MAX_PANES
-    // A split makes a pane of the kind the tab came from: a rendered note stays rendered.
-    const moved = moveTab(panes, drag, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: like.kind ?? 'note', seq: 0 }))
+    const moved = moveTab(panes, drag, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: 'note' }))
     if (!moved) return false
     panes = moved.panes
     focusedPane = moved.focused
@@ -848,9 +861,9 @@
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
-    { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => active && close(active) },
-    ...(canDetach ? [{ id: 'detach', label: 'Move tab to new window', run: () => active && detach(active) }] : []),
-    { id: 'pin', label: active && pinned.includes(active) ? 'Unpin tab' : 'Pin tab', run: () => active && togglePin(active) },
+    { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => activeTab && close(activeTab) },
+    ...(canDetach ? [{ id: 'detach', label: 'Move tab to new window', run: () => activeTab && detach(activeTab) }] : []),
+    { id: 'pin', label: activeTab && pinned.includes(activeTab) ? 'Unpin tab' : 'Pin tab', run: () => activeTab && togglePin(activeTab) },
     { id: 'reopen', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T', run: reopenClosed },
     { id: 'split', label: 'Split right', shortcut: 'Ctrl+\\', run: splitRight },
     { id: 'closepane', label: 'Close pane', run: () => closePane() },
@@ -938,9 +951,11 @@
     if (ok === null) return
     for (const id of ids) {
       s.deleteNote(id)
-      // The note is gone: close it in every pane, pinned or not.
-      for (const p of [...panes]) if (p.tabs.includes(id)) close(id, true)
-      closed = closed.filter((c) => c !== id)
+      // The note is gone: close it, and its render, in every pane, pinned or not.
+      for (const tab of [id, renderTab(id)]) {
+        for (const p of [...panes]) if (p.tabs.includes(tab)) close(tab, true)
+        closed = closed.filter((c) => c !== tab)
+      }
     }
   }
 
@@ -970,6 +985,8 @@
     if (drag.vault !== toVault) {
       // The originals are gone and their ids with them; reopen the copies in their place.
       for (const id of openBefore) close(id, true)
+      // Their renders name the old ids too, and a render is one click to make again.
+      for (const m of moves) for (const p of [...panes]) if (p.tabs.includes(renderTab(m.id))) close(renderTab(m.id), true)
       const reopen = moved.filter((_, i) => openBefore.includes(moves[i]?.id ?? ''))
       for (const m of reopen) openInNewTab(m.id)
     }
@@ -1152,7 +1169,7 @@
       cycleMode()
       e.preventDefault()
     } else if (e.key === 'w') {
-      if (active) close(active)
+      if (activeTab) close(activeTab)
       e.preventDefault()
     } else if ((e.key === 't' || e.key === 'T') && e.shiftKey) {
       reopenClosed()
@@ -1469,10 +1486,9 @@
           {pinned}
           onActivate={(id) => {
             focusedPane = i
-            // A history or render pane's tab only brings its own view forward; opening the note
-            // is for the panes of notes.
-            if ((p.kind ?? 'note') === 'note') open(id)
-            else p.active = id
+            // A history pane's tab only brings its own view forward.
+            if (p.kind === 'history') p.active = id
+            else landOn(id)
           }}
           onClose={(id) => { focusedPane = i; close(id) }}
           onFocus={() => (focusedPane = i)}
@@ -1495,9 +1511,9 @@
           onTabOut={canDetach ? (drag, x, y) => detach(drag.tab, { pane: drag.pane, x, y }) : undefined}
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}
-          historyOpen={panes.some((q) => q.kind === 'history' && q.active === p.active)}
+          historyOpen={!!p.active && panes.some((q) => q.kind === 'history' && q.active === tabNote(p.active!))}
           onRender={solo ? undefined : () => openRender(i)}
-          renderOpen={panes.some((q) => q.kind === 'render' && !!p.active && q.tabs.includes(p.active))}
+          renderOpen={!!p.active && panes.some((q) => q.kind !== 'history' && q.tabs.includes(renderTab(tabNote(p.active!))))}
           onRenameFile={renameFile}
           onDeleteFile={deleteFile}
           onOpenFile={openFile}

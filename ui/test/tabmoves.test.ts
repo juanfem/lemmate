@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { clampIndex, endedOutside, inNewPane, moveTab, notePane, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { renderTab, tabNote } from '../src/lib/rendertabs.ts'
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
-const pane = (id: number, tabs: string[], active: string | null = tabs[0] ?? null, kind?: 'history' | 'render'): TabPane => ({ id, tabs, active, kind })
+const pane = (id: number, tabs: string[], active: string | null = tabs[0] ?? null, kind?: 'history'): TabPane => ({ id, tabs, active, kind })
 const shape = (r: { panes: TabPane[]; focused: number } | null) =>
   r && { panes: r.panes.map((p) => `${p.tabs.map((t) => (t === p.active ? `[${t}]` : t)).join(' ')}`), focused: r.focused }
 
@@ -97,38 +98,53 @@ test('endedOutside: where a drag nobody took was let go', () => {
   assert.equal(at(-200, -200, 0, 0), false)
 })
 
-test('rendered tabs move among render panes, never into or out of a pane of notes', () => {
+test('a rendered tab moves like any other: into a pane of notes, out of it, to another window', () => {
+  const ra = renderTab('a')
   const notes = pane(1, ['a', 'b'])
-  const render = pane(2, ['a', 'c'], 'a', 'render')
-  const other = pane(3, ['d'], 'd', 'render')
-  assert.equal(moveTab([notes, render], { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh), null)
-  assert.equal(moveTab([notes, render], { tab: 'a', pane: 2 }, { pane: 1, index: 0 }, [], 3, fresh), null)
-  assert.equal(moveTab([notes, render], { tab: 'x', pane: null }, { pane: 2, index: 0 }, [], 3, fresh), null, 'from another window: notes only')
-  // Reordered within the pane.
-  const re = moveTab([notes, render], { tab: 'c', pane: 2 }, { pane: 2, index: 0 }, [], 3, fresh)!
-  assert.deepEqual(re.panes[1]!.tabs, ['c', 'a'])
-  // Into another render pane.
-  const across = moveTab([notes, render, other], { tab: 'c', pane: 2 }, { pane: 3, index: 1 }, [], 3, fresh)!
-  assert.deepEqual(across.panes.map((p) => p.tabs), [['a', 'b'], ['a'], ['d', 'c']])
+  const renders = pane(2, [ra, renderTab('c')], ra)
+  // Into the notes, beside the note it renders.
+  assert.deepEqual(shape(moveTab([notes, renders], { tab: ra, pane: 2 }, { pane: 1, index: 1 }, [], 3, fresh)), {
+    panes: [`a [${ra}] b`, `[${renderTab('c')}]`],
+    focused: 0,
+  })
+  // A note into the renders.
+  assert.deepEqual(moveTab([notes, renders], { tab: 'b', pane: 1 }, { pane: 2, index: 0 }, [], 3, fresh)!.panes[1]!.tabs, ['b', ra, renderTab('c')])
+  // From another window, and split off at an edge.
+  assert.deepEqual(moveTab([notes], { tab: ra, pane: null }, { pane: 1, index: 9 }, [], 3, fresh)!.panes[0]!.tabs, ['a', 'b', ra])
+  assert.deepEqual(shape(moveTab([notes, renders], { tab: ra, pane: 2 }, { pane: 1, split: 'left' }, [], 3, fresh)), {
+    panes: [`[${ra}]`, '[a] b', `[${renderTab('c')}]`],
+    focused: 0,
+  })
+  // Still never into or out of a history pane.
+  const history = pane(3, ['a'], 'a', 'history')
+  assert.equal(moveTab([renders, history], { tab: ra, pane: 2 }, { pane: 3, index: 0 }, [], 3, fresh), null)
+  assert.equal(tabNote(ra), 'a')
+  assert.equal(tabNote('a'), 'a')
 })
 
-test('a note opened while a render pane is focused never opens in it', () => {
+test('a note opened while a render or history is in front never covers it', () => {
   const blank = (): TabPane => ({ id: 99, tabs: [], active: null })
   const note = pane(1, ['a'])
-  const render = pane(2, ['a'], 'a', 'render')
+  const render = pane(2, [renderTab('a')])
   const history = pane(3, ['b'], 'b', 'history')
-  // A pane of notes is there: the focus goes to it.
+  // A pane with a note in front is there: the focus goes to it.
   assert.deepEqual(notePane([note, render], 1, 3, blank), { panes: [note, render], focused: 0 })
+  assert.deepEqual(notePane([note, history], 1, 3, blank), { panes: [note, history], focused: 0 })
   // Already on one: nothing moves.
   assert.deepEqual(notePane([note, render], 0, 3, blank), { panes: [note, render], focused: 0 })
+  // Only renders open: the focused one stays, and the note becomes a tab beside them.
+  assert.deepEqual(notePane([render], 0, 3, blank), { panes: [render], focused: 0 })
+  // From a history pane, any pane of tabs will do.
+  assert.deepEqual(notePane([render, history], 1, 3, blank), { panes: [render, history], focused: 0 })
   // The last one was closed: a new one, to the left.
-  const made = notePane([render], 0, 3, blank)
+  const made = notePane([history], 0, 3, blank)
   assert.equal(made.focused, 0)
-  assert.deepEqual(made.panes.map((p) => p.kind ?? 'note'), ['note', 'render'])
-  // No room for one: the focused aside pane gives up its place.
-  const full = notePane([render, history, pane(4, ['c'], 'c', 'render')], 1, 3, blank)
+  assert.deepEqual(made.panes.map((p) => p.kind ?? 'note'), ['note', 'history'])
+  // No room for one: the focused history pane gives up its place.
+  const h = (id: number) => pane(id, ['x'], 'x', 'history')
+  const full = notePane([h(4), history, h(5)], 1, 3, blank)
   assert.equal(full.focused, 1)
-  assert.deepEqual(full.panes.map((p) => p.kind ?? 'note'), ['render', 'note', 'render'])
+  assert.deepEqual(full.panes.map((p) => p.kind ?? 'note'), ['history', 'note', 'history'])
 })
 
 test('opening in a new pane never displaces what is open', () => {
@@ -142,7 +158,7 @@ test('opening in a new pane never displaces what is open', () => {
   assert.deepEqual(shape(inNewPane(full, 2, 3, 'b', fresh2)), { panes: ['a [b]', '[c]', '[d]'], focused: 0 })
   // Already open there: focused, not doubled.
   assert.deepEqual(shape(inNewPane([pane(1, ['a']), pane(2, ['b', 'c'], 'c'), pane(3, ['d'])], 0, 3, 'b', fresh2)), { panes: ['[a]', '[b] c', '[d]'], focused: 1 })
-  // History and render panes are skipped: a note does not go into one.
-  const asides = [pane(1, ['a']), pane(2, ['a'], 'a', 'history'), pane(3, ['a'], 'a', 'render')]
-  assert.deepEqual(shape(inNewPane(asides, 0, 3, 'b', fresh2)), { panes: ['a [b]', '[a]', '[a]'], focused: 0 })
+  // History panes are skipped: a note does not go into one.
+  const asides = [pane(1, ['a']), pane(2, ['a'], 'a', 'history'), pane(3, ['c'], 'c', 'history')]
+  assert.deepEqual(shape(inNewPane(asides, 0, 3, 'b', fresh2)), { panes: ['a [b]', '[a]', '[c]'], focused: 0 })
 })
