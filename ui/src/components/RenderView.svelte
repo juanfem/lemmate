@@ -44,21 +44,11 @@
   ]
   let choice: RenderFormat | 'auto' = $state('auto')
 
-  /**
-   * Turn a deck's slide from outside its frame. reveal.js takes commands by `postMessage` — the
-   * one way in through the sandbox — so the bar can offer buttons where a phone's swipe or a
-   * keyboard's arrows are not to hand, or not obvious.
-   */
-  let frame: HTMLIFrameElement | undefined = $state()
-  function slide(method: 'prev' | 'next') {
-    frame?.contentWindow?.postMessage(JSON.stringify({ method, args: [] }), '*')
-  }
   /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
   let made = $state('')
   /**
-   * The same render as a tab of its own — for presenting, and for browsers that will not repaint
-   * a deck in a frame (WebKit on iOS turns the slide and shows it only after leaving the app).
-   * The server sandboxes that page by its headers as the frame is by its attribute.
+   * The same render as a tab of its own — the whole window for a deck, to present it. The
+   * server sandboxes that page by its headers as the frame is by its attribute.
    */
   let tabUrl = $derived(
     `/api/v1/vaults/${session.id}/notes/${noteId}/render?format=${made === 'slides' ? 'revealjs' : 'html'}`,
@@ -150,17 +140,12 @@
         Rendered as {made === 'slides' ? 'slides' : `a ${made}`}
       {/if}
     </span>
-    <span class="spacer"></span>
-    {#if made === 'slides' && html !== null && !saved}
-      <span class="turn" role="group" aria-label="Slides">
-        <button onclick={() => slide('prev')} title="Previous slide" aria-label="Previous slide">‹</button>
-        <button onclick={() => slide('next')} title="Next slide" aria-label="Next slide">›</button>
-      </span>
-    {/if}
-    {#if (made === 'slides' || made === 'page') && html !== null && !saved}
-      <a class="out" href={tabUrl} target="_blank" rel="noopener" title="Open this render in a tab of its own — to present it, or where slides will not turn here">Open in a new tab ↗</a>
-    {/if}
-    <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
+    <span class="actions">
+      {#if (made === 'slides' || made === 'page') && html !== null && !saved}
+        <a class="out" href={tabUrl} target="_blank" rel="noopener" title="Open this render in a tab of its own — to present it full-window">New tab ↗</a>
+      {/if}
+      <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
+    </span>
   </div>
   {#if error}
     <pre class="error">{error}</pre>
@@ -175,7 +160,7 @@
     </div>
   {/if}
   {#if html !== null && !saved}
-    <iframe bind:this={frame} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
+    <iframe title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
@@ -188,18 +173,24 @@
     height: 100%;
     min-height: 0;
   }
+  /* A narrow pane wraps the bar rather than cutting off its end, where the actions are. */
   .bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem 0.5rem;
     padding: 0.35rem 0.75rem;
     border-bottom: 1px solid var(--border-soft);
     font-family: var(--ui);
     font-size: 0.75rem;
     color: var(--muted);
   }
-  .spacer {
-    flex: 1;
+  /* The new tab and the re-render travel together, at the end of the bar or wrapped under it. */
+  .actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
   }
   .bar button {
     font: inherit;
@@ -234,21 +225,8 @@
   .out:hover {
     text-decoration: underline;
   }
-  .turn {
-    display: flex;
-    gap: 0.25rem;
-  }
-  .turn button {
-    min-width: 2.2rem;
-    font-size: 1rem;
-    line-height: 1;
-  }
-  /* A finger needs a target, and a phone's bar has no room for the status beside them. */
+  /* The status says what the render is; on a phone the choice above already does. */
   @media (pointer: coarse) {
-    .turn button {
-      min-width: 2.75rem;
-      min-height: 2.25rem;
-    }
     .state {
       display: none;
     }
