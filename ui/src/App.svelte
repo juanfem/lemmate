@@ -28,6 +28,7 @@
   import AttachmentsPane from './components/AttachmentsPane.svelte'
   import UploadDialog from './components/UploadDialog.svelte'
   import { fileTab, isFileTab, parseFileTab } from './lib/filetabs.ts'
+  import { renderReturn } from './lib/next.ts'
   import type { FileEntry } from './lib/api.ts'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
@@ -92,6 +93,9 @@
     if (me) (window as unknown as { lemmate?: { userName?: string } }).lemmate = { ...((window as unknown as { lemmate?: object }).lemmate ?? {}), userName: me.display_name }
   })
   async function signedIn() {
+    // Signed in on the way to a render (a page opened in a browser that had no session): go on.
+    const next = renderReturn(location.search)
+    if (next) return void location.replace(next)
     authRequired = false
     // The invite is spent now; leaving it in the URL would only re-show the register form.
     if (invite) {

@@ -672,3 +672,35 @@ async fn invites_expire_are_revocable_and_are_admin_only() {
     .await;
     assert_eq!(s, 200, "the invite survived the 409: {body}");
 }
+
+/// A render page opened where there is no session — another browser — goes to the sign-in, with
+/// the way back; with a session it is served. The POST the pane uses still answers 401.
+#[tokio::test]
+async fn a_render_page_without_a_session_goes_to_the_sign_in() {
+    let (addr, _) = start().await;
+    let path = format!(
+        "/api/v1/vaults/{}/notes/{}/render/01M398NHVVT8VC8KH4F8CSJTWS?format=revealjs",
+        VaultId::new(),
+        NoteId::new()
+    );
+    let (status, location) = tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent =
+            ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
+        let r = agent.get(format!("http://{addr}{path}")).call().unwrap();
+        let location = r.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+        (r.status().as_u16(), location)
+    })
+    .await
+    .unwrap();
+    assert!((300..400).contains(&status), "{status}");
+    assert!(location.starts_with("/?next=/api/v1/vaults/"), "{location}");
+    assert!(location.contains("render/01M398NHVVT8VC8KH4F8CSJTWS%3Fformat%3Drevealjs"), "{location}");
+    let (code, _) = post(
+        addr,
+        &format!("/api/v1/vaults/{}/notes/{}/render", VaultId::new(), NoteId::new()),
+        json!({"format":"html"}),
+        None,
+    )
+    .await;
+    assert_eq!(code, 401);
+}

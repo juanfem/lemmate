@@ -1192,17 +1192,19 @@ async fn render_note(
 /// `format` says, as `render_page` would.
 async fn kept_render(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Result<AuthUser, StatusCode>,
+    uri: axum::http::Uri,
     Path((vault, id, render)): Path<(String, String, String)>,
     q: Query<ExportIn>,
 ) -> Result<axum::response::Response, StatusCode> {
+    let Ok(user) = user else { return Ok(sign_in_first(&uri)) };
     let vault_id: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let note: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     if auth::note_role(&state, &user, vault_id, note).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     let Some((bytes, mime, disposition)) = state.renders.get(&render, &note.to_string()) else {
-        return render_page(State(state), user, Path((vault, id)), q).await;
+        return render_page(State(state), Ok(user), uri, Path((vault, id)), q).await;
     };
     Ok((
         [
@@ -1215,16 +1217,35 @@ async fn kept_render(
         .into_response())
 }
 
+/// A render page opened where there is no session — another browser than the one signed in, as
+/// an iPhone's "open in the browser" is — goes to the sign-in, which comes back here after
+/// (`next`, which the web client only follows to a render).
+fn sign_in_first(uri: &axum::http::Uri) -> axum::response::Response {
+    let back = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let next: String = back
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    axum::response::Redirect::to(&format!("/?next={next}")).into_response()
+}
+
 /// A render opened as a page of its own — a browser tab rather than the app's frame, which some
 /// browsers (WebKit on iOS) will not repaint as a deck turns its slides. `?format=` as for the
 /// POST; the page is sandboxed by its headers (`quarto::PAGE_SANDBOX`) as the frame is by its
 /// attribute.
 async fn render_page(
     state: State<Arc<AppState>>,
-    user: AuthUser,
+    user: Result<AuthUser, StatusCode>,
+    uri: axum::http::Uri,
     path: Path<(String, String)>,
     Query(q): Query<ExportIn>,
 ) -> Result<axum::response::Response, StatusCode> {
+    let Ok(user) = user else { return Ok(sign_in_first(&uri)) };
     let mut response = render_note(state, user, path, Json(ExportIn { view: true, ..q })).await?;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
