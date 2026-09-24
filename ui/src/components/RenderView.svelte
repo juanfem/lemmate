@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
-  import { beforeBodyEnd } from '../lib/render.ts'
+  import { beforeBodyEnd, keepRender, keptRender } from '../lib/render.ts'
   import Icon from './Icon.svelte'
 
   /**
@@ -27,12 +27,15 @@
     visible?: boolean
   } = $props()
 
-  let html: string | null = $state(null)
+  /** What this tab showed before it moved to this pane, if anything: shown again, not remade.
+   *  Read once — a render tab's component is keyed by its note, so neither prop changes. */
+  const was = untrack(() => keptRender(session.id, noteId))
+  let html: string | null = $state(was?.html ?? null)
   let error: string | null = $state(null)
   let busy = $state(false)
   /** The note as it is now, and as it was when the page on screen was rendered. */
   let text: string | null = $state(null)
-  let renderedFrom: string | null = $state(null)
+  let renderedFrom: string | null = $state(was?.renderedFrom ?? null)
   let stale = $derived(html !== null && text !== null && renderedFrom !== null && text !== renderedFrom)
   let stop: (() => void) | undefined
 
@@ -43,13 +46,13 @@
     { id: 'pdf', label: 'PDF — download' },
     { id: 'docx', label: 'Word — download' },
   ]
-  let choice: RenderFormat | 'auto' = $state('auto')
+  let choice: RenderFormat | 'auto' = $state((was?.choice as RenderFormat | undefined) ?? 'auto')
 
   /** What the last render turned out to be, for the bar to name: `auto` resolves on the server. */
-  let made = $state('')
+  let made = $state(was?.made ?? '')
   /** The server keeps what it rendered for the pane under this id, so the new tab shows that very
    *  page rather than rendering it again (and renders afresh only once it has expired). */
-  let renderId = $state('')
+  let renderId = $state(was?.renderId ?? '')
   /**
    * The same render as a tab of its own — the whole window for a deck, to present it. The
    * server sandboxes that page by its headers as the frame is by its attribute.
@@ -148,6 +151,7 @@
         saved = null
         renderedFrom = from
         error = null
+        keepRender(session.id, noteId, { html, made, renderId, choice, renderedFrom })
       } else {
         // A file, not a page: it goes to the downloads, and the pane keeps what it showed.
         const ext = r.headers.get('content-disposition')?.match(/filename="[^"]*\.([^".]+)"/u)?.[1] ?? 'bin'
@@ -170,7 +174,7 @@
   })
   // The first render waits for the note, so that "stale" has something to compare with, and for
   // the tab to be the one showing.
-  let started = false
+  let started = !!was
   $effect(() => {
     if (!visible || text === null || started) return
     started = true

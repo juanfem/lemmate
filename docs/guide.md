@@ -784,7 +784,8 @@ second note adds a tab to the pane showing a render rather than opening another 
 rendering one that is already open just brings its tab forward. A rendered tab is otherwise a tab
 like any other — drag it along the strip, into any pane (a note's included) or against a pane's
 edge to split; right-click it to pin it or *Move to new window*, or drag it out of the window.
-Each tab keeps its render, so switching away and back does not run Quarto again. Quarto's
+Each tab keeps its render, so switching away and back, or moving the tab to another pane, does
+not run Quarto again (a move reloads the page, though, so a deck starts from its first slide). Quarto's
 page runs in a sandboxed frame: its own scripts and styles work, and nothing in it can reach the
 app or your session. Links to other sites open in a new tab. A render takes a few seconds, so
 it runs when you ask: an edit afterwards marks the pane *Changed since this render*, and

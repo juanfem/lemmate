@@ -534,11 +534,17 @@
     const known = new Set(ws.notes.map((n) => n.id))
     untrack(() => {
       layoutRestored = true
-      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter((t) => known.has(tabNote(t)) || isBlank(t)) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
+      // A file's tab stays while its vault does: the file list is fetched only when something
+      // shows it, and a file gone since says so in its own tab.
+      const keep = (t: string) => {
+        const f = parseFileTab(t)
+        return f ? !!ws.get(f.vault) : known.has(tabNote(t)) || isBlank(t)
+      }
+      const kept = panes.map((p) => ({ ...p, tabs: p.tabs.filter(keep) })).map((p) => ({ ...p, active: p.active && p.tabs.includes(p.active) ? p.active : (p.tabs[0] ?? null) }))
       const live = kept.filter((p) => p.tabs.length > 0)
       panes = live.length ? live : [blankPane()]
       focusedPane = Math.min(focusedPane, panes.length - 1)
-      pinned = pinned.filter((id) => known.has(tabNote(id)))
+      pinned = pinned.filter(keep)
     })
   })
   // A note named by the URL (a link someone sent, a reload) opens as soon as it is known.
