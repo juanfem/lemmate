@@ -498,6 +498,10 @@ async fn render_uses_quarto_unless_switched_off() {
                 // Made for viewing: the deck does not rewrite its URL, which WebKit refuses a
                 // sandboxed page (and which left an iPhone's screen behind the slide).
                 assert!(page.contains("history: false") && page.contains("hash: false"), "URL writes off");
+                assert!(
+                    page.find("sessionStorage").unwrap() < page.find("reveal").unwrap(),
+                    "storage stand-in first"
+                );
             }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");

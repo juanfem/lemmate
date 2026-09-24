@@ -261,7 +261,36 @@ fn render_in(
         let stderr = std::fs::read_to_string(&log).unwrap_or_default();
         return Err(Error::Export(tail(&stderr)));
     }
-    Ok((std::fs::read(out)?, format.mime()))
+    let bytes = std::fs::read(out)?;
+    let bytes = match (opts.viewing, format) {
+        (true, Format::Html | Format::RevealJs) => with_storage(bytes),
+        _ => bytes,
+    };
+    Ok((bytes, format.mime()))
+}
+
+/// Web storage that lives in memory, for a page that has none. A render made for viewing runs
+/// sandboxed, with an origin of its own, and such a document may not touch `localStorage` or
+/// `sessionStorage`: reading either throws. reveal.js reads `sessionStorage` when it switches a
+/// deck to its scroll view — which it does on a phone-narrow screen — and the throw left the
+/// deck half-switched: Chrome carried on, but on an iPhone only the first swipe turned a slide,
+/// and the screen showed it only after the phone was rotated. With this in the page before
+/// any of its own scripts, storage works for as long as the page is open and is gone after.
+const STORAGE_STAND_IN: &str = r#"<script>(function(){function m(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}["localStorage","sessionStorage"].forEach(function(k){try{window[k].getItem("x")}catch(e){try{Object.defineProperty(window,k,{value:m(),configurable:true})}catch(e2){}}})})();</script>"#;
+
+/// `page` with [`STORAGE_STAND_IN`] as the first thing in its `<head>` (or at its very start,
+/// if it has none) — ahead of every script of its own.
+fn with_storage(page: Vec<u8>) -> Vec<u8> {
+    let at = page
+        .windows(5)
+        .position(|w| w.eq_ignore_ascii_case(b"<head"))
+        .and_then(|i| page[i..].iter().position(|&b| b == b'>').map(|j| i + j + 1))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(page.len() + STORAGE_STAND_IN.len());
+    out.extend_from_slice(&page[..at]);
+    out.extend_from_slice(STORAGE_STAND_IN.as_bytes());
+    out.extend_from_slice(&page[at..]);
+    out
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -570,6 +599,17 @@ mod tests {
             Format::RevealJs,
             "a preview is a page"
         );
+    }
+
+    #[test]
+    fn a_page_for_viewing_gets_storage_first() {
+        let page = with_storage(
+            b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><script>x()</script>".to_vec(),
+        );
+        let page = String::from_utf8(page).unwrap();
+        let stand_in = page.find("sessionStorage").unwrap();
+        assert!(page.find("<head>").unwrap() < stand_in && stand_in < page.find("x()").unwrap());
+        assert!(String::from_utf8(with_storage(b"<p>no head</p>".to_vec())).unwrap().starts_with("<script>"));
     }
 
     #[test]
