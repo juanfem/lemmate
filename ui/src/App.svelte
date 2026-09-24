@@ -1890,15 +1890,18 @@
   /* Nothing but the panes: the sidebar stays in the window the tab came from. */
   .layout.detached,
   .layout.detached.narrow {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-areas: 'denied' 'main';
   }
   .layout.detached > .denied {
     grid-area: denied;
   }
+  /* `minmax(0, …)`, not a bare `1fr`: that one's minimum is the content's min-content width,
+     and the top bar's includes the whole unwrapped note title — a long one widened the column
+     past the screen and the page scrolled sideways. */
   .layout.narrow {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-areas: 'top' 'main';
   }
