@@ -19,7 +19,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { moveTab, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { inNewPane, moveTab, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -758,13 +758,36 @@
   }
   /** Open a note beside the current one, splitting if there is room and reusing a pane if not. */
   function openInNewPane(id: string) {
-    if (!solo && !narrow.current && panes.length < MAX_PANES) {
-      const i = panes.indexOf(focused)
-      panes = [...panes.slice(0, i + 1), { id: ++paneSeq, tabs: [id], active: id, mode: focused.mode }, ...panes.slice(i + 1)]
-      focusedPane = i + 1
-    } else {
-      focusedPane = (focusedPane + 1) % panes.length
-      open(id)
+    if (solo) return openInNewTab(id)
+    const next = inNewPane(panes, panes.indexOf(focused), MAX_PANES, id, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode }))
+    panes = next.panes
+    focusedPane = next.focused
+    landOn(id)
+  }
+  /** What a pane is showing, in a few words: the pane switcher's rows. */
+  function paneLabel(p: PaneState): string {
+    const id = p.active
+    const name = !id || isBlank(id)
+      ? 'New tab'
+      : isFileTab(id)
+        ? (parseFileTab(id)?.path.split('/').pop() ?? 'File')
+        : displayName(sessionOf(id)?.pathOf(id) ?? '') || 'Note'
+    return p.kind === 'history' ? `History · ${name}` : p.kind === 'render' ? `Render · ${name}` : name
+  }
+  /**
+   * The phone's way between panes. It draws only the focused one, so the others need a door:
+   * the chip on the top bar opens this list of them, anchored under it, the current one ticked.
+   */
+  function paneMenu(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    menu = {
+      x: r.left,
+      y: r.bottom + 4,
+      items: [
+        ...panes.map((p, i) => ({ label: paneLabel(p), checked: i === focusedPane, run: () => (focusedPane = i) })),
+        { separator: true, label: '' },
+        { label: 'Close this pane', run: () => closePane() },
+      ],
     }
   }
   /** A tab dragged within this window or in from another (lib/tabmoves.ts); a split needs room
@@ -832,6 +855,7 @@
     { id: 'split', label: 'Split right', shortcut: 'Ctrl+\\', run: splitRight },
     { id: 'closepane', label: 'Close pane', run: () => closePane() },
     { id: 'nextpane', label: 'Focus next pane', shortcut: 'Ctrl+Alt+→', run: () => focusPane(1) },
+    { id: 'prevpane', label: 'Focus previous pane', shortcut: 'Ctrl+Alt+←', run: () => focusPane(-1) },
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
@@ -1228,6 +1252,12 @@
       <header class="topbar">
         <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
         <span class="here" title={activePath}>{activeTitle}</span>
+        {#if panes.length > 1}
+          <button class="panes" onclick={paneMenu} aria-haspopup="menu" aria-label="Pane {focusedPane + 1} of {panes.length} — switch pane" title="Switch pane">
+            <Icon name="splitright" size={14} />
+            {focusedPane + 1}/{panes.length}
+          </button>
+        {/if}
         <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
         {#if !solo}
           <button class="icon" onclick={daily} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
@@ -1820,6 +1850,23 @@
     color: var(--muted);
     padding: 0.45rem 0.6rem;
     border-radius: 6px;
+    cursor: pointer;
+  }
+  /* Only there when a pane is hidden: the count says so, and a tap lists them. */
+  .topbar .panes {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    height: 2rem;
+    padding: 0 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    background: var(--bg);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
     cursor: pointer;
   }
   .topbar .here {

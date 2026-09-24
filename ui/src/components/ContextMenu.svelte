@@ -7,6 +7,8 @@
     disabled?: boolean
     /** A rule between groups; `label` is ignored. */
     separator?: boolean
+    /** One of a set to pick from, and whether it is the picked one: drawn with a tick. */
+    checked?: boolean
   }
 
   export interface MenuState {
@@ -83,14 +85,15 @@
       <hr />
     {:else}
       <button
-        role="menuitem"
+        role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
+        aria-checked={item.checked}
         data-i={i}
         class:danger={item.danger}
         disabled={item.disabled}
         onclick={() => choose(item)}
         onmouseenter={() => (focused = i)}
       >
-        {item.label}
+        {#if item.checked !== undefined}<span class="tick" aria-hidden="true">{item.checked ? '✓' : ''}</span>{/if}{item.label}
       </button>
     {/if}
   {/each}
@@ -131,6 +134,11 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .tick {
+    display: inline-block;
+    width: 1.1rem;
+    color: var(--accent);
   }
   button:hover:not(:disabled),
   button:focus-visible {

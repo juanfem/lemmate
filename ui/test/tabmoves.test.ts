@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, moveTab, notePane, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, inNewPane, moveTab, notePane, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
 
 let seq = 100
 const fresh = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
@@ -129,4 +129,20 @@ test('a note opened while a render pane is focused never opens in it', () => {
   const full = notePane([render, history, pane(4, ['c'], 'c', 'render')], 1, 3, blank)
   assert.equal(full.focused, 1)
   assert.deepEqual(full.panes.map((p) => p.kind ?? 'note'), ['render', 'note', 'render'])
+})
+
+test('opening in a new pane never displaces what is open', () => {
+  const fresh2 = (tab: string): TabPane => ({ id: ++seq, tabs: [tab], active: tab })
+  // Room: a pane of its own, right of the focused one, and the focus goes with it.
+  assert.deepEqual(shape(inNewPane([pane(1, ['a'])], 0, 3, 'b', fresh2)), { panes: ['[a]', '[b]'], focused: 1 })
+  assert.deepEqual(shape(inNewPane([pane(1, ['a']), pane(2, ['c'])], 0, 3, 'b', fresh2)), { panes: ['[a]', '[b]', '[c]'], focused: 1 })
+  // Full: a tab of its own in the next pane of notes; the note it lands beside stays open.
+  const full = [pane(1, ['a']), pane(2, ['c']), pane(3, ['d'])]
+  assert.deepEqual(shape(inNewPane(full, 0, 3, 'b', fresh2)), { panes: ['[a]', 'c [b]', '[d]'], focused: 1 })
+  assert.deepEqual(shape(inNewPane(full, 2, 3, 'b', fresh2)), { panes: ['a [b]', '[c]', '[d]'], focused: 0 })
+  // Already open there: focused, not doubled.
+  assert.deepEqual(shape(inNewPane([pane(1, ['a']), pane(2, ['b', 'c'], 'c'), pane(3, ['d'])], 0, 3, 'b', fresh2)), { panes: ['[a]', '[b] c', '[d]'], focused: 1 })
+  // History and render panes are skipped: a note does not go into one.
+  const asides = [pane(1, ['a']), pane(2, ['a'], 'a', 'history'), pane(3, ['a'], 'a', 'render')]
+  assert.deepEqual(shape(inNewPane(asides, 0, 3, 'b', fresh2)), { panes: ['a [b]', '[a]', '[a]'], focused: 0 })
 })

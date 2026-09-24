@@ -145,3 +145,30 @@ export function notePane<P extends TabPane>(panes: P[], focused: number, max: nu
   if (panes.length < max) return { panes: [fresh(), ...panes], focused: 0 }
   return { panes: panes.map((p, j) => (j === focused ? fresh() : p)), focused }
 }
+
+/**
+ * "Open in new pane": a pane of its own, beside the focused one, while there is room. Without
+ * room the note goes to the next pane of notes as a tab of its own, so nothing already open is
+ * displaced — and a phone has as much room as a desktop: it draws one pane at a time, but the
+ * rest are still there, a tap away on the top bar's pane switcher. Treating it as full is what
+ * used to put the note over the one you were reading.
+ */
+export function inNewPane<P extends TabPane>(
+  panes: P[],
+  focused: number,
+  max: number,
+  id: string,
+  fresh: (tab: string, like: P) => P,
+): { panes: P[]; focused: number } {
+  const here = panes[focused]
+  if (!here) return { panes, focused }
+  if (panes.length < max) return { panes: [...panes.slice(0, focused + 1), fresh(id, here), ...panes.slice(focused + 1)], focused: focused + 1 }
+  for (let k = 1; k <= panes.length; k++) {
+    const j = (focused + k) % panes.length
+    const p = panes[j]!
+    if (!isNotes(p)) continue
+    const tabs = p.tabs.includes(id) ? p.tabs : [...p.tabs, id]
+    return { panes: panes.map((q, i) => (i === j ? { ...q, tabs, active: id } : q)), focused: j }
+  }
+  return { panes, focused }
+}

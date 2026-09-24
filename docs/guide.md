@@ -187,8 +187,13 @@ the two things you would otherwise reach for with a keyboard: the magnifier for 
 rail and all — it slides in from the left and closes again the moment you open a note or start
 a search, and tapping the dimmed editor or pressing Escape dismisses it.
 
-Only the focused pane is drawn. Split panes are not lost when the window narrows: they keep
-their tabs and scroll positions, and they come back as soon as there is room for them again.
+Only the focused pane is drawn. The others are not lost: they keep their tabs and scroll
+positions, and they come back as soon as there is room for them again. While there is more than
+one, a chip on the top bar says which you are on (**2/3**); tap it for the list of panes —
+note, history or render, by what each is showing — to switch to one, or to close the one you
+are on. *Open in a new pane* (long-press a note) works here as it does on a desktop: a pane of
+its own, up to three, and after that a tab of its own in the next one — never over the note you
+were reading.
 
 Touch has no right-click, so **press and hold** a note or folder for half a second to get the
 menu you would otherwise right-click for — rename, move, share, copy path, trash. Holding is
