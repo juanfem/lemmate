@@ -24,6 +24,7 @@
     | 'calendar'
     | 'newnote'
     | 'trash'
+    | 'search'
 
   const PATHS: Record<IconName, string[]> = {
     expand: ['M3.5 3.5 8 8l4.5-4.5', 'M3.5 9 8 13.5 12.5 9'],
@@ -48,6 +49,7 @@
     newnote: ['M9.5 2H4a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h8a.5.5 0 0 0 .5-.5V5L9.5 2Z', 'M9.5 2v3h3', 'M8 7.5v4', 'M6 9.5h4'],
     indent: ['M2 3h12', 'M7 8h7', 'M2 13h12', 'M2 6l2.5 2L2 10'],
     outdent: ['M2 3h12', 'M7 8h7', 'M2 13h12', 'M4.5 6 2 8l2.5 2'],
+    search: ['M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z', 'M10.3 10.3 13.5 13.5'],
   }
 </script>
 

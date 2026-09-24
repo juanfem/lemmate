@@ -345,6 +345,11 @@
   // sessions and the sockets are untouched by how many of them are on screen.
   const narrow = media(NARROW)
   let drawer = $state(false)
+  // On a phone the palette is a full-screen search, opened from the drawer as often as from the
+  // top bar; Cancel should land on the note, not on a drawer left open underneath it.
+  $effect(() => {
+    if (palette !== null && narrow.current) drawer = false
+  })
 
   // ---- sidebar width: drag the divider, double-click it to go back to the default
   const SIDE_MIN = 180
@@ -1200,7 +1205,7 @@
         {#if !solo}
           <button class="icon" onclick={daily} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
         {/if}
-        <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands">＋</button>
+        <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands"><Icon name="search" size={17} /></button>
         <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
       </header>
       {#if narrow.current && drawer}

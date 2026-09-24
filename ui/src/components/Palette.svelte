@@ -19,6 +19,7 @@
 
 <script lang="ts">
   import { untrack } from 'svelte'
+  import Icon from './Icon.svelte'
   import { api, type SearchHit } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
   import { notePath } from '../lib/notename.ts'
@@ -199,9 +200,15 @@
 <div class="backdrop" onmousedown={onClose} role="presentation">
   <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-label="Search and commands" tabindex="-1">
     <div class="field">
-      <span class="icon" aria-hidden="true">⌕</span>
+      <span class="icon"><Icon name="search" size={15} /></span>
       <input bind:this={input} bind:value={query} onkeydown={onKey} placeholder="Search notes, folders, text and commands…" aria-label="Search notes, folders, text and commands" />
       <kbd>esc</kbd>
+      <!-- A phone has no Escape key, and its palette covers the whole screen: nothing outside
+           it to tap away on. -->
+      {#if query}
+        <button class="clear" onclick={() => { query = ''; input.focus() }} aria-label="Clear the search">×</button>
+      {/if}
+      <button class="cancel" onclick={onClose}>Cancel</button>
     </div>
     <ul bind:this={list}>
       {#each rows as r, i (r.key)}
@@ -346,11 +353,65 @@
     font-family: inherit;
   }
 
-  /* A phone has no room to spare above an overlay, and the hint row is four shortcuts it has
-     no keys for. */
+  .clear,
+  .cancel {
+    display: none;
+  }
+
+  /* On a phone the palette *is* the search screen: it takes the whole of it, with the field
+     where the tap was (the top) and the results running down to the keyboard. A dialog
+     floating over the note left the eye and the keyboard in two different places. The hint
+     row is four shortcuts a phone has no keys for. */
   @media (max-width: 720px) {
     .backdrop {
-      padding-top: 5vh;
+      padding: 0;
+      align-items: stretch;
+      background: var(--bg);
+    }
+    .dialog {
+      width: 100%;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 0;
+      box-shadow: none;
+      animation-duration: 90ms;
+    }
+    .field {
+      flex: none;
+      padding: calc(env(safe-area-inset-top) + 0.5rem) 0.5rem 0.5rem 1rem;
+      border-bottom-color: var(--border);
+    }
+    .field kbd {
+      display: none;
+    }
+    .clear,
+    .cancel {
+      display: block;
+      border: 0;
+      background: none;
+      font: inherit;
+      cursor: pointer;
+      min-height: 2.75rem;
+    }
+    .clear {
+      width: 2.25rem;
+      font-size: 1.25rem;
+      color: var(--faint);
+    }
+    .cancel {
+      padding: 0 0.5rem;
+      font-size: 0.95rem;
+      color: var(--accent);
+    }
+    ul {
+      flex: 1;
+      max-height: none;
+      padding-bottom: env(safe-area-inset-bottom);
+      overscroll-behavior: contain;
+    }
+    .name {
+      font-size: 0.95rem;
     }
     .hints {
       display: none;
