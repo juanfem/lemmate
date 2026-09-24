@@ -1029,7 +1029,16 @@ async fn render_note(
     match rendered {
         Ok(Some(((bytes, mime), path))) => {
             let disposition = crate::quarto::disposition(&path, format);
-            let kept = view.then(|| s.renders.put(&id.to_string(), &bytes, mime, &disposition));
+            let kept = view.then(crate::quarto::RenderCache::new_id);
+            let bytes = match (&kept, format) {
+                (Some(k), crate::quarto::Format::RevealJs) => {
+                    crate::quarto::with_speaker(bytes, &vault, &id.to_string(), k)
+                }
+                _ => bytes,
+            };
+            if let Some(k) = &kept {
+                s.renders.put_as(k, &id.to_string(), &bytes, mime, &disposition);
+            }
             let mut response = (
                 [(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)],
                 bytes,

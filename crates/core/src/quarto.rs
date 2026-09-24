@@ -141,9 +141,22 @@ impl RenderCache {
         Self { kept: std::sync::Mutex::new(std::collections::VecDeque::new()) }
     }
 
+    /// A fresh id for [`RenderCache::put_as`], for a render that has to name itself before it
+    /// is kept (a deck's speaker view is sent to it).
+    pub fn new_id() -> String {
+        ulid::Ulid::generate().to_string()
+    }
+
     /// Keep a render of `note`; the id to fetch it again by.
     pub fn put(&self, note: &str, bytes: &[u8], mime: &'static str, disposition: &str) -> String {
-        let id = ulid::Ulid::generate().to_string();
+        let id = Self::new_id();
+        self.put_as(&id, note, bytes, mime, disposition);
+        id
+    }
+
+    /// Keep a render of `note` under `id` ([`RenderCache::new_id`]).
+    pub fn put_as(&self, id: &str, note: &str, bytes: &[u8], mime: &'static str, disposition: &str) {
+        let id = id.to_owned();
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
         kept.retain(|k| k.made.elapsed() < Self::FOR);
         while kept.len() >= Self::KEEP {
@@ -157,7 +170,6 @@ impl RenderCache {
             disposition: disposition.to_owned(),
             made: Instant::now(),
         });
-        id
     }
 
     /// The render kept as `id`, if it is still kept and was made from `note`.
@@ -340,17 +352,42 @@ fn render_in(
 /// any of its own scripts, storage works for as long as the page is open and is gone after.
 const STORAGE_STAND_IN: &str = r#"<script>(function(){function m(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}["localStorage","sessionStorage"].forEach(function(k){try{window[k].getItem("x")}catch(e){try{Object.defineProperty(window,k,{value:m(),configurable:true})}catch(e2){}}})})();</script>"#;
 
+/// A deck's speaker view, the Lemmate way. reveal.js opens its own by writing into a window it
+/// opens — which a sandboxed deck cannot do: each sandboxed document has an origin of its own,
+/// and one may not touch another. So `S`, and the menu's *Speaker View*, open Lemmate's speaker
+/// page instead (`/speaker.html`, the web client's), and the two only ever talk by
+/// `postMessage`: the deck says where it is and what the slide's notes are; the speaker page
+/// turns the deck with reveal.js's own postMessage commands. `__IDS__` becomes the query that
+/// names the render the speaker page shows its previews from.
+const SPEAKER_HOOK: &str = r#"<script>(function(){var q="__IDS__",w=null;function st(){var R=window.Reveal;if(!R)return null;var s=R.getCurrentSlide(),n=s&&s.querySelector("aside.notes");return{lemmateDeck:1,state:R.getState(),notes:n?n.innerHTML:(s&&s.getAttribute("data-notes"))||"",index:R.getSlidePastCount()+1,total:R.getTotalSlides()}}function send(){if(w&&!w.closed)try{w.postMessage(JSON.stringify(st()),"*")}catch(e){}}function open(){if(w&&!w.closed){w.focus();send();return}w=window.open("/speaker.html?"+q,"lemmate-speaker","width=1180,height=720")}window.addEventListener("message",function(e){if(!w||e.source!==w)return;var d;try{d=JSON.parse(e.data)}catch(x){return}if(d&&d.lemmateSpeaker==="hello")send()});function hook(){var R=window.Reveal;if(!R||!R.isReady||!R.isReady())return void setTimeout(hook,200);["slidechanged","fragmentshown","fragmenthidden","overviewshown","overviewhidden","paused","resumed"].forEach(function(v){R.on(v,send)});try{R.removeKeyBinding(83)}catch(e){}R.addKeyBinding({keyCode:83,key:"S",description:"Speaker view"},open);var p=R.getPlugin&&R.getPlugin("notes");if(p)p.open=open}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",hook);else hook()})();</script>"#;
+
+/// `page` — a deck made for viewing — with [`SPEAKER_HOOK`], naming the render kept as `render`
+/// of note `note` in `vault` (ids: letters and digits only, or nothing is added).
+pub fn with_speaker(page: Vec<u8>, vault: &str, note: &str, render: &str) -> Vec<u8> {
+    let plain = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric());
+    if !(plain(vault) && plain(note) && plain(render)) {
+        return page;
+    }
+    let hook = SPEAKER_HOOK.replace("__IDS__", &format!("vault={vault}&note={note}&render={render}"));
+    insert_in_head(page, &hook)
+}
+
 /// `page` with [`STORAGE_STAND_IN`] as the first thing in its `<head>` (or at its very start,
 /// if it has none) — ahead of every script of its own.
 fn with_storage(page: Vec<u8>) -> Vec<u8> {
+    insert_in_head(page, STORAGE_STAND_IN)
+}
+
+/// `page` with `html` just inside its `<head>` (or at its very start, if it has none).
+fn insert_in_head(page: Vec<u8>, html: &str) -> Vec<u8> {
     let at = page
         .windows(5)
         .position(|w| w.eq_ignore_ascii_case(b"<head"))
         .and_then(|i| page[i..].iter().position(|&b| b == b'>').map(|j| i + j + 1))
         .unwrap_or(0);
-    let mut out = Vec::with_capacity(page.len() + STORAGE_STAND_IN.len());
+    let mut out = Vec::with_capacity(page.len() + html.len());
     out.extend_from_slice(&page[..at]);
-    out.extend_from_slice(STORAGE_STAND_IN.as_bytes());
+    out.extend_from_slice(html.as_bytes());
     out.extend_from_slice(&page[at..]);
     out
 }
@@ -672,6 +709,20 @@ mod tests {
         let stand_in = page.find("sessionStorage").unwrap();
         assert!(page.find("<head>").unwrap() < stand_in && stand_in < page.find("x()").unwrap());
         assert!(String::from_utf8(with_storage(b"<p>no head</p>".to_vec())).unwrap().starts_with("<script>"));
+    }
+
+    #[test]
+    fn a_deck_sends_its_speaker_view_to_lemmate() {
+        let page = String::from_utf8(with_speaker(
+            b"<html><head></head><body></body></html>".to_vec(),
+            "V1",
+            "N2",
+            "R3",
+        ))
+        .unwrap();
+        assert!(page.contains("/speaker.html?") && page.contains("vault=V1&note=N2&render=R3"), "{page}");
+        let odd = with_speaker(b"<head></head>".to_vec(), "V1", "N\"2", "R3");
+        assert_eq!(odd, b"<head></head>", "anything but plain ids adds nothing");
     }
 
     #[test]

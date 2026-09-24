@@ -1162,8 +1162,18 @@ async fn render_note(
     match rendered {
         Ok(Some((bytes, mime))) => {
             let disposition = lemmate_core::quarto::disposition(&row.path, format);
-            // A page made to be looked at is kept, so opening it again elsewhere is instant.
-            let kept = view.then(|| state.renders.put(&id.to_string(), &bytes, mime, &disposition));
+            // A page made to be looked at is kept, so opening it again elsewhere is instant; a
+            // deck's speaker view shows its previews from that kept page, so it names it.
+            let kept = view.then(lemmate_core::quarto::RenderCache::new_id);
+            let bytes = match (&kept, format) {
+                (Some(k), lemmate_core::quarto::Format::RevealJs) => {
+                    lemmate_core::quarto::with_speaker(bytes, &vault.to_string(), &id.to_string(), k)
+                }
+                _ => bytes,
+            };
+            if let Some(k) = &kept {
+                state.renders.put_as(k, &id.to_string(), &bytes, mime, &disposition);
+            }
             let mut response = (
                 [(header::CONTENT_TYPE, mime.to_owned()), (header::CONTENT_DISPOSITION, disposition)],
                 bytes,

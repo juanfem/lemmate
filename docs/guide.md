@@ -761,6 +761,14 @@ an iPhone, long-press it for *Open in* your browser — straight away. A browser
 signed in goes through the sign-in first and comes back to the render: the page the pane already has is kept for half an hour, and only rendered again after.
 On a phone, swipe sideways to turn a deck's slides.
 
+**Speaker view.** Press **S** in a rendered deck (or pick *Speaker View* from its menu) for
+Lemmate's speaker view, in a window of its own: the current slide, the next one, the slide's
+notes (`::: {.notes}`), the slide count, a timer and the clock. Its **Previous**/**Next** and
+arrow keys turn the deck in the other window, which is the one to put on the projector — full
+screen from the pane, or opened in a tab of its own. It is not reveal.js's own speaker view,
+which cannot work in a deck that runs sandboxed; this one does the same job by messages. In
+the desktop app, open the deck in your browser first (the arrow icon) and press **S** there.
+
 Rendered notes gather as **tabs of one pane**: rendering a second note adds a tab there rather
 than opening another pane, and rendering one that is already there just brings its tab forward.
 The tabs reorder by dragging, move to another rendered pane, or split off into a new one at a
