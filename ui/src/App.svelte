@@ -1801,10 +1801,13 @@
     font-size: 0.9rem;
     font-weight: 600;
   }
+  /* The drawer and its scrim sit *under* every overlay (dialogs at 10, modals at 20): the
+     palette and the prompts are opened from inside the drawer, and above it they were drawn
+     behind it — visible through the scrim, never reachable. */
   .scrim {
     position: fixed;
     inset: 0;
-    z-index: 25;
+    z-index: 8;
     background: rgb(0 0 0 / 0.35);
   }
   /* Nothing but the panes: the sidebar stays in the window the tab came from. */
@@ -1832,7 +1835,7 @@
   .layout.narrow aside {
     position: fixed;
     inset: 0 auto 0 0;
-    z-index: 30;
+    z-index: 9;
     width: min(21rem, 86vw);
     border-right: 1px solid var(--border);
     transform: translateX(-100%);
