@@ -3,6 +3,7 @@
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
   import { beforeBodyEnd } from '../lib/render.ts'
+  import Icon from './Icon.svelte'
 
   /**
    * A note rendered through Quarto (SPEC §5.6), in a pane beside it. Quarto's page is its own
@@ -64,6 +65,12 @@
    * way the frame stays where it is in the page, so the deck keeps its slide: moving an iframe
    * reloads it. A pane is a CSS container, which a plain `position: fixed` would stay inside.
    */
+  /** The desktop app's shell, which can hand a page to the system's default browser. */
+  const shell = (window as unknown as { lemmateShell?: { openExternal?: (url: string) => void } }).lemmateShell
+  function openOutside() {
+    shell?.openExternal?.(new URL(tabUrl, location.href).href)
+  }
+
   let root: HTMLDivElement | undefined = $state()
   let full = $state(false)
   async function enterFull() {
@@ -199,8 +206,12 @@
     </span>
     <span class="actions">
       {#if (made === 'slides' || made === 'page') && html !== null && !saved}
-        <button class="link" onclick={enterFull} title="Fill the screen with this render">Full screen ⤢</button>
-        <a class="out" href={tabUrl} target="_blank" rel="noopener" title="Open this render in a tab of its own — to present it full-window">New tab ↗</a>
+        <button class="icon" onclick={enterFull} title="Full screen" aria-label="Full screen"><Icon name="fullscreen" size={15} /></button>
+        {#if shell?.openExternal}
+          <button class="icon" onclick={openOutside} title="Open in your browser" aria-label="Open in your browser"><Icon name="external" size={15} /></button>
+        {:else}
+          <a class="icon" href={tabUrl} target="_blank" rel="noopener" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="external" size={15} /></a>
+        {/if}
       {/if}
       <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
     </span>
@@ -316,25 +327,27 @@
   .exit:focus-visible {
     opacity: 1;
   }
-  .link {
+  .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.8rem;
+    height: 1.6rem;
     border: 0;
+    border-radius: 5px;
     background: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent);
+    color: var(--muted);
     cursor: pointer;
-    white-space: nowrap;
   }
-  .link:hover {
-    text-decoration: underline;
+  .icon:hover {
+    background: var(--hover);
+    color: var(--fg);
   }
-  .out {
-    color: var(--accent);
-    text-decoration: none;
-    white-space: nowrap;
-  }
-  .out:hover {
-    text-decoration: underline;
+  @media (pointer: coarse) {
+    .icon {
+      width: 2.5rem;
+      height: 2.25rem;
+    }
   }
   /* The status says what the render is; on a phone the choice above already does. */
   @media (pointer: coarse) {

@@ -36,6 +36,7 @@ const NOTE_WINDOW_SIZE: (f64, f64) = (960.0, 900.0);
 const SHELL_PREFIX: &str = "/.lemmate-shell/";
 const CLOSE_PATH: &str = "/.lemmate-shell/close-window";
 const OPEN_PATH: &str = "/.lemmate-shell/open-window";
+const EXTERNAL_PATH: &str = "/.lemmate-shell/open-external";
 /// What every relay window's page gets as `window.lemmateShell`: the two requests, as navigations.
 const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
   closeWindow: () => location.assign("/.lemmate-shell/close-window"),
@@ -44,6 +45,7 @@ const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
     if (Number.isFinite(x) && Number.isFinite(y)) q.set('x', String(Math.round(x))), q.set('y', String(Math.round(y)))
     location.assign("/.lemmate-shell/open-window?" + q)
   },
+  openExternal: (url) => location.assign("/.lemmate-shell/open-external?" + new URLSearchParams({ url: new URL(url, location.href).href })),
 }"#;
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
@@ -265,6 +267,13 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
                         }
                     }
                     Some(ShellRequest::Open { url, position }) => open_note_window(&handle, url, position),
+                    // Only a page this relay serves: the page may send the browser there, and
+                    // nowhere else, whatever a script in it tried.
+                    Some(ShellRequest::External(url))
+                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url)) =>
+                    {
+                        open_in_browser(&url)
+                    }
                     _ => tracing::debug!(window = me, "ignored a shell request"),
                 }
             });
@@ -284,6 +293,8 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
 #[derive(Debug, PartialEq)]
 enum ShellRequest {
     Close,
+    /// `url` in the system's default browser — a render, to present it.
+    External(Url),
     /// A note window on `url`, at a screen position (logical pixels, top left) if the page knew one.
     Open {
         url: Url,
@@ -309,8 +320,28 @@ impl ShellRequest {
                 let position = coord("x").zip(coord("y"));
                 Some(Self::Open { url: target, position })
             }
+            EXTERNAL_PATH => {
+                let target = url.query_pairs().find(|(k, _)| k == "url").map(|(_, v)| v.into_owned())?;
+                let target = Url::parse(&target).ok().filter(|u| matches!(u.scheme(), "http" | "https"))?;
+                Some(Self::External(target))
+            }
             _ => None,
         }
+    }
+}
+
+/// Hand `url` to the system's default browser, the way each platform opens a link from another
+/// program. Nothing waits for it: the browser outlives the request, and may already be running.
+fn open_in_browser(url: &Url) {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    match command.arg(url.as_str()).spawn() {
+        Ok(_) => tracing::info!(%url, "opened in the default browser"),
+        Err(e) => tracing::warn!(%url, error = %e, "could not open the default browser"),
     }
 }
 
@@ -549,6 +580,16 @@ mod tests {
         assert!(CLOSE_PATH.starts_with(SHELL_PREFIX) && OPEN_PATH.starts_with(SHELL_PREFIX));
         // The page's script spells the same paths out.
         assert!(SHELL_SCRIPT.contains(CLOSE_PATH) && SHELL_SCRIPT.contains(OPEN_PATH));
+        assert!(EXTERNAL_PATH.starts_with(SHELL_PREFIX) && SHELL_SCRIPT.contains(EXTERNAL_PATH));
+        let render = "http://127.0.0.1:4242/api/v1/vaults/01J/notes/01K/render/01M?format=revealjs";
+        let mut ask = url(EXTERNAL_PATH);
+        ask.query_pairs_mut().append_pair("url", render);
+        assert_eq!(ShellRequest::parse(&ask), Some(ShellRequest::External(Url::parse(render).unwrap())));
+        assert_eq!(
+            ShellRequest::parse(&url(&format!("{EXTERNAL_PATH}?url=file%3A%2F%2F%2Fetc%2Fpasswd"))),
+            None
+        );
+        assert_eq!(ShellRequest::parse(&url(EXTERNAL_PATH)), None);
         assert_eq!(ShellRequest::parse(&url(CLOSE_PATH)), Some(ShellRequest::Close));
         assert_eq!(
             ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fw%2F01J%2F01K&x=120&y=-40"))),

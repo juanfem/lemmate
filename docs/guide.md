@@ -752,11 +752,11 @@ the strip of a `.qmd` note — renders the note **the way its front matter says*
 format it declares that a render can make. A deck (`format: revealjs`) or a page (`html`) opens
 in a pane beside the note; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
 the pane says so. The picker on the pane's bar renders it another way — as a plain page, as
-slides, or as a PDF or Word file to download — whatever the note declares. **Full screen ⤢**
+slides, or as a PDF or Word file to download — whatever the note declares. **Full screen** (the four corners)
 fills the screen with the render — the browser's own full screen where it has one, the whole
 app window on an iPhone — and stays on the slide you were on; the **×** in its corner (or Esc)
-brings the pane back. **New tab ↗** opens the same render in a browser tab of its own, straight
-away: the page the pane already has is kept for half an hour, and only rendered again after.
+brings the pane back. **Open outside** (the box with an arrow) opens the same render in a
+browser tab of its own — in the desktop app, in your default browser — straight away: the page the pane already has is kept for half an hour, and only rendered again after.
 On a phone, swipe sideways to turn a deck's slides.
 
 Rendered notes gather as **tabs of one pane**: rendering a second note adds a tab there rather
