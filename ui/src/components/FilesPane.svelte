@@ -404,25 +404,20 @@
     if (e.target === e.currentTarget) picks = []
   }}
 >
+  <!-- The pane's header: what it is showing, then how. Attachments and Trash are picked on the
+       sidebar's rail (see App), so all this row switches is the shape of the file list. -->
   <div class="toolbar">
-    <div class="modes">
-      <button class:on={!trash && !attachments && mode === 'tree'} onclick={() => ((trash = false), (attachments = false), setMode('tree'))} title="Single tree" aria-label="Single tree">
-        <Icon name="tree" />
-      </button>
-      <button class:on={!trash && !attachments && mode === 'split'} onclick={() => ((trash = false), (attachments = false), setMode('split'))} title="Folders and notes" aria-label="Folders and notes">
-        <Icon name="split" />
-      </button>
-      {#if attachmentsView}
-        <button class:on={attachments && !trash} onclick={() => ((attachments = true), (trash = false))} title="Attachments — the files that are not notes" aria-label="Attachments">
-          <Icon name="attach" />
+    <h2 class="title">{trash ? 'Trash' : attachments ? 'Attachments' : 'Files'}</h2>
+    {#if !trash && !attachments}
+      <div class="modes">
+        <button class:on={mode === 'tree'} onclick={() => setMode('tree')} title="Single tree" aria-label="Single tree">
+          <Icon name="tree" />
         </button>
-      {/if}
-      {#if trashView}
-        <button class:on={trash} onclick={() => ((trash = true), (attachments = false))} title="Trash — deleted notes, and restoring them" aria-label="Trash">
-          <Icon name="trash" />
+        <button class:on={mode === 'split'} onclick={() => setMode('split')} title="Folders and notes" aria-label="Folders and notes">
+          <Icon name="split" />
         </button>
-      {/if}
-    </div>
+      </div>
+    {/if}
     <span class="gap">{#if !trash && !attachments && picks.length > 1}<span class="picked">{picks.length} selected</span>{/if}</span>
     {#if attachments && !trash && attachmentsTools}
       {@render attachmentsTools()}
@@ -532,12 +527,22 @@
   .files.split {
     grid-template-rows: auto auto auto auto 1fr;
   }
+  /* The same height and title as App's `.panel-head`, so switching views on the rail does not
+     make the header jump. */
   .toolbar {
     display: flex;
     align-items: center;
     gap: 0.1rem;
-    padding: 0.25rem 0.4rem;
+    min-height: 2.5rem;
+    box-sizing: border-box;
+    padding: 0.25rem 0.4rem 0.25rem 0.75rem;
     border-bottom: 1px solid var(--border);
+  }
+  .title {
+    margin: 0 0.5rem 0 0;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
   .gap {
     flex: 1;
@@ -553,7 +558,6 @@
   .modes {
     display: flex;
     gap: 0.1rem;
-    margin-right: 0.2rem;
   }
   .toolbar :global(button),
   .list-head button {

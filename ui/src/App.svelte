@@ -35,7 +35,7 @@
   import ImportDialog from './components/ImportDialog.svelte'
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
-  import Icon from './components/Icon.svelte'
+  import Icon, { type IconName } from './components/Icon.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
   let setup = $state<{ config_path: string; suggested_root_dir: string } | null>(null)
@@ -249,11 +249,38 @@
   let presenceByPane: Record<number, string[]> = $state({})
   let layoutRestored = $state(false)
 
-  let sidebar: 'files' | 'search' | 'tags' | 'bookmarks' = $state('files')
+  let sidebar = $state<'files' | 'search' | 'tags' | 'bookmarks'>('files')
   /** The Files tab's third view, beside its two layouts (FilesPane). */
   let trashOpen = $state(false)
   /** The Files tab's attachments view (SPEC §9). */
   let attachmentsOpen = $state(false)
+  /** What the rail shows as picked. Attachments and trash are views *of* the Files pane — they
+   *  share its toolbar and its vault — so they live there as two flags, and the rail folds the
+   *  three back into one choice. */
+  type View = 'files' | 'tags' | 'bookmarks' | 'attachments' | 'trash'
+  const RAIL: { id: View; label: string; icon: IconName }[] = [
+    { id: 'files', label: 'Files', icon: 'files' },
+    { id: 'tags', label: 'Tags', icon: 'tags' },
+    { id: 'bookmarks', label: 'Starred', icon: 'star' },
+    { id: 'attachments', label: 'Attachments — the files that are not notes', icon: 'attach' },
+    { id: 'trash', label: 'Trash — deleted notes, and restoring them', icon: 'trash' },
+  ]
+  let view: View = $derived(
+    sidebar === 'tags' || sidebar === 'bookmarks' ? sidebar : trashOpen ? 'trash' : attachmentsOpen ? 'attachments' : 'files',
+  )
+  function show(v: View) {
+    if (v === 'tags' || v === 'bookmarks') {
+      sidebar = v
+      return
+    }
+    sidebar = 'files'
+    trashOpen = v === 'trash'
+    attachmentsOpen = v === 'attachments'
+  }
+  /** The avatar's letter: the first of the display name, whatever script it is in. */
+  function initial(name: string): string {
+    return [...name.trim()][0]?.toUpperCase() ?? '?'
+  }
   let attachmentsPane: AttachmentsPane | undefined = $state()
   /** The tag the Tags pane is listing. Here rather than in the pane: a tag chip at the foot of
    *  a note picks one too, and the pane is unmounted whenever another tab is showing. */
@@ -771,12 +798,12 @@
     { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (palette = '') },
     { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
     { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (palette = '') },
-    { id: 'files', label: 'Show files', run: () => (sidebar = 'files') },
-    { id: 'tags', label: 'Show tags', run: () => (sidebar = 'tags') },
-    { id: 'bookmarks', label: 'Show bookmarks', run: () => (sidebar = 'bookmarks') },
+    { id: 'files', label: 'Show files', run: () => show('files') },
+    { id: 'tags', label: 'Show tags', run: () => show('tags') },
+    { id: 'bookmarks', label: 'Show bookmarks', run: () => show('bookmarks') },
     { id: 'history', label: 'Show version history', shortcut: 'Ctrl+Shift+R', run: () => openHistory() },
-    { id: 'trash', label: 'Show trash', run: () => ((sidebar = 'files'), (trashOpen = false), (attachmentsOpen = false), (trashOpen = true)) },
-    { id: 'attachments', label: 'Show attachments', run: () => ((sidebar = 'files'), (trashOpen = false), (attachmentsOpen = true)) },
+    { id: 'trash', label: 'Show trash', run: () => show('trash') },
+    { id: 'attachments', label: 'Show attachments', run: () => show('attachments') },
     { id: 'upload', label: 'Upload files…', run: () => session && startUpload(session.id, null) },
     { id: 'newtab', label: 'New tab', shortcut: 'Ctrl+T', run: newTab },
     { id: 'mode-cycle', label: 'Cycle view mode (live / source / reading)', shortcut: 'Ctrl+E', run: cycleMode },
@@ -1214,155 +1241,169 @@
       <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
            screen reader to wander into. -->
       <aside class:open={drawer} inert={narrow.current && !drawer}>
-        <div class="side-top">
-          <!-- Not an input: search *is* the palette now, and a box you can type into here would
-               promise a second, weaker search that only looks at what this pane happens to hold. -->
-          <div class="side-row">
-            <button class="side-search" onclick={() => (palette = '')}>
-              <span class="mag" aria-hidden="true">⌕</span>
-              <span>Search {noteCount} {noteCount === 1 ? 'note' : 'notes'}</span>
-              <kbd>Ctrl K</kbd>
+        <!-- The rail: every view the sidebar has, one click each, and the two things you reach
+             for from anywhere (search, a new note). It replaced a search box that was a button in
+             disguise and a row of tabs: the box took a row to say "press Ctrl K", and Attachments
+             and Trash were hidden in the Files toolbar. On a phone it is the same rail, inside
+             the drawer. A shared note on its own has no workspace for any of it to act on. -->
+        {#if !solo}
+          <nav class="rail" aria-label="Sidebar">
+            <button onclick={() => (palette = '')} title="Search and commands (Ctrl K)" aria-label="Search and commands">
+              <Icon name="search" size={18} />
             </button>
-            <!-- Beside search rather than in the Files toolbar: the daily note is the one note you
-                 open every day, and it should not depend on which sidebar tab is showing. -->
-            {#if !solo}
-              <button class="side-daily" onclick={daily} title="Today's daily note — opened, or created from Templates/Daily.md (Ctrl+Shift+D)" aria-label="Today's daily note">
-                <Icon name="calendar" size={15} />
+            <hr />
+            <div class="views" role="tablist" aria-orientation="vertical">
+              {#each RAIL as r (r.id)}
+                <button class:on={view === r.id} role="tab" aria-selected={view === r.id} onclick={() => show(r.id)} title={r.label} aria-label={r.label}>
+                  <Icon name={r.icon} size={18} />
+                </button>
+              {/each}
+            </div>
+            <hr />
+            <!-- A phone has the daily note in its top bar, a tap away without the drawer. -->
+            <button class="daily" onclick={daily} title="Today's daily note — opened, or created from Templates/Daily.md (Ctrl+Shift+D)" aria-label="Today's daily note">
+              <Icon name="calendar" size={18} />
+            </button>
+            <button onclick={() => session && createInVault(session.id)} disabled={!session} title="New note" aria-label="New note">
+              <Icon name="newnote" size={18} />
+            </button>
+            <span class="grow"></span>
+            <span class="dot" class:offline={status !== 'online'} role="status" title={statusLine} aria-label={statusLine}></span>
+            <!-- Who you are, and the way back out. Both were commands and nothing else, and a
+                 session you can only end by knowing what to type is a session you cannot end.
+                 Absent with the relay and with `--no-auth`, where `me` is the local user and
+                 there is nothing to leave. -->
+            {#if me && me.id !== 'local'}
+              <button
+                class="avatar"
+                title="{me.display_name} — {me.email}"
+                aria-label="Account: {me.display_name}"
+                aria-haspopup="menu"
+                onclick={(e) => {
+                  // Anchored to the button, not to the pointer: this one is reached from the
+                  // keyboard too, and a menu that lands in the corner of the window because the
+                  // click carried no coordinates is not a menu about this row.
+                  const r = e.currentTarget.getBoundingClientRect()
+                  menu = {
+                    x: r.right + 4,
+                    y: r.bottom,
+                    items: [
+                      { label: 'Account, password and invites…', run: () => (accountOpen = true) },
+                      { separator: true, label: '' },
+                      { label: 'Sign out', run: signOut, danger: true },
+                    ],
+                  }
+                }}
+              >
+                {initial(me.display_name)}
               </button>
             {/if}
-          </div>
-          <div class="side-tabs" role="tablist">
-            <button class:on={sidebar === 'files'} role="tab" aria-selected={sidebar === 'files'} onclick={() => (sidebar = 'files')}>Files</button>
-            <button class:on={sidebar === 'tags'} role="tab" aria-selected={sidebar === 'tags'} onclick={() => (sidebar = 'tags')}>Tags</button>
-            <button class:on={sidebar === 'bookmarks'} role="tab" aria-selected={sidebar === 'bookmarks'} onclick={() => (sidebar = 'bookmarks')}>Starred</button>
-          </div>
-        </div>
-        {#if solo}
-          <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
-        {:else if sidebar === 'files'}
-          <FilesPane
-            bind:revealFolder
-            {vaults}
-            activeId={active}
-            activeVault={session?.id ?? null}
-            onOpen={open}
-            bind:trash={trashOpen}
-            bind:attachments={attachmentsOpen}
-            actions={{
-              onCreateIn: createInFolder,
-              onRenameFolder: renameFolder,
-              onDeleteFolder: deleteFolder,
-              onCreateInVault: createInVault,
-              onRenameVault: renameVault,
-              onImportInto: (v) => (importInto = v),
-              onNewVault: newVault,
-              onRenameNote: renameNote,
-              onTrashNotes: trashNotes,
-              onOpenInTab: openInNewTab,
-              onOpenInPane: openInNewPane,
-              onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
-              onBookmarkNote: bookmarkNote,
-              onMove: moveDropped,
-            }}
-          >
-            {#snippet attachmentsTools()}
-              <button onclick={() => attachmentsPane?.collapseAll()} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
-              <button onclick={() => attachmentsPane?.locate()} disabled={!attachmentsPane?.canLocate()} title="Show the files the open note uses" aria-label="Show the files the open note uses"><Icon name="locate" /></button>
-              <button onclick={() => session && startUpload(session.id, null)} disabled={!session} title="Upload files…" aria-label="Upload files"><Icon name="upload" /></button>
-            {/snippet}
-            {#snippet attachmentsView()}
-              <AttachmentsPane
-                bind:this={attachmentsPane}
-                vaults={(workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id, session: v }))}
-                activeVault={session?.id ?? null}
-                activeNoteId={active && !isFileTab(active) && !isBlank(active) ? active : null}
-                activeFile={active ? parseFileTab(active) : null}
-                onOpenFile={openFile}
-                onUpload={startUpload}
-                onRename={renameFile}
-                onDelete={deleteFile}
-              />
-            {/snippet}
-            {#snippet trashView()}
-              {#if session}
-                <TrashPane
-                  vault={session.id}
-                  vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
-                  version={tagsVersion}
-                  onRestored={(id) => open(id)}
-                />
-              {/if}
-            {/snippet}
-          </FilesPane>
-          {#if sharedWithMe.length}
-            <nav class="shared">
-              <p class="muted">Shared with me</p>
-              {#each sharedWithMe as n (n.id)}
-                <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
-              {/each}
-            </nav>
-          {/if}
-        {:else if sidebar === 'search'}
-          <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
-        {:else if sidebar === 'tags'}
-          {#if session}
-            <TagsPane
-              vault={session.id}
-              version={tagsVersion}
-              bind:selected={tagFilter}
-              onOpen={open}
-              onMenu={(t, e) => tagMenu(t, session.id, e)}
-            />
-          {/if}
-        {:else}
-          <nav class="bookmarks-pane">
-            {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
-              <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
-                ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
-              </button>
-            {/each}
-            {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
           </nav>
         {/if}
-        {#if denied}
-          <div class="denied">
-            Permission denied by the server ({denied.reason}) — your last change was not saved.
-            <button class="link" onclick={() => location.reload()}>Reload</button>
-            <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
-          </div>
-        {/if}
-        <!-- Who you are, and the way back out. Both were commands and nothing else, and a session
-             you can only end by knowing what to type is a session you cannot end. Absent with the
-             relay and with `--no-auth`, where `me` is the local user and there is nothing to leave. -->
-        {#if me && me.id !== 'local'}
-          <button
-            class="account"
-            title={me.email}
-            aria-haspopup="menu"
-            onclick={(e) => {
-              // Anchored to the button, not to the pointer: this one is reached from the keyboard
-              // too, and a menu that lands in the corner of the window because the click carried
-              // no coordinates is not a menu about this row.
-              const r = e.currentTarget.getBoundingClientRect()
-              menu = {
-                x: r.left,
-                y: r.top,
-                items: [
-                  { label: 'Account, password and invites…', run: () => (accountOpen = true) },
-                  { separator: true, label: '' },
-                  { label: 'Sign out', run: signOut, danger: true },
-                ],
-              }
-            }}
-          >
-            <span class="who">{me.display_name}</span>
-            <span class="chev" aria-hidden="true">⌄</span>
-          </button>
-        {/if}
-        <footer class="status" class:offline={status !== 'online'}>
-          <span class="dot"></span>
-          {statusLine}
-        </footer>
+        <div class="panel">
+          {#if solo}
+            <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
+          {:else if sidebar === 'files'}
+            <FilesPane
+              bind:revealFolder
+              {vaults}
+              activeId={active}
+              activeVault={session?.id ?? null}
+              onOpen={open}
+              bind:trash={trashOpen}
+              bind:attachments={attachmentsOpen}
+              actions={{
+                onCreateIn: createInFolder,
+                onRenameFolder: renameFolder,
+                onDeleteFolder: deleteFolder,
+                onCreateInVault: createInVault,
+                onRenameVault: renameVault,
+                onImportInto: (v) => (importInto = v),
+                onNewVault: newVault,
+                onRenameNote: renameNote,
+                onTrashNotes: trashNotes,
+                onOpenInTab: openInNewTab,
+                onOpenInPane: openInNewPane,
+                onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
+                onBookmarkNote: bookmarkNote,
+                onMove: moveDropped,
+              }}
+            >
+              {#snippet attachmentsTools()}
+                <button onclick={() => attachmentsPane?.collapseAll()} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
+                <button onclick={() => attachmentsPane?.locate()} disabled={!attachmentsPane?.canLocate()} title="Show the files the open note uses" aria-label="Show the files the open note uses"><Icon name="locate" /></button>
+                <button onclick={() => session && startUpload(session.id, null)} disabled={!session} title="Upload files…" aria-label="Upload files"><Icon name="upload" /></button>
+              {/snippet}
+              {#snippet attachmentsView()}
+                <AttachmentsPane
+                  bind:this={attachmentsPane}
+                  vaults={(workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id, session: v }))}
+                  activeVault={session?.id ?? null}
+                  activeNoteId={active && !isFileTab(active) && !isBlank(active) ? active : null}
+                  activeFile={active ? parseFileTab(active) : null}
+                  onOpenFile={openFile}
+                  onUpload={startUpload}
+                  onRename={renameFile}
+                  onDelete={deleteFile}
+                />
+              {/snippet}
+              {#snippet trashView()}
+                {#if session}
+                  <TrashPane
+                    vault={session.id}
+                    vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
+                    version={tagsVersion}
+                    onRestored={(id) => open(id)}
+                  />
+                {/if}
+              {/snippet}
+            </FilesPane>
+            {#if sharedWithMe.length}
+              <nav class="shared">
+                <p class="muted">Shared with me</p>
+                {#each sharedWithMe as n (n.id)}
+                  <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
+                {/each}
+              </nav>
+            {/if}
+          {:else if sidebar === 'search'}
+            <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
+          {:else if sidebar === 'tags'}
+            <header class="panel-head"><h2>Tags</h2></header>
+            {#if session}
+              <TagsPane
+                vault={session.id}
+                version={tagsVersion}
+                bind:selected={tagFilter}
+                onOpen={open}
+                onMenu={(t, e) => tagMenu(t, session.id, e)}
+              />
+            {/if}
+          {:else}
+            <header class="panel-head"><h2>Starred</h2></header>
+            <nav class="bookmarks-pane">
+              {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
+                <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
+                  ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
+                </button>
+              {/each}
+              {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
+            </nav>
+          {/if}
+          {#if denied}
+            <div class="denied">
+              Permission denied by the server ({denied.reason}) — your last change was not saved.
+              <button class="link" onclick={() => location.reload()}>Reload</button>
+              <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
+            </div>
+          {/if}
+          {#if solo}
+            <footer class="status" class:offline={status !== 'online'}>
+              <span class="dot"></span>
+              {statusLine}
+            </footer>
+          {/if}
+        </div>
       </aside>
       <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
            static kind. -->
@@ -1538,8 +1579,7 @@
   aside {
     grid-area: side;
     background: var(--panel);
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    display: flex;
     min-height: 0;
     min-width: 0;
   }
@@ -1564,90 +1604,107 @@
   .vsplit:focus-visible::after {
     background: var(--accent);
   }
-  .side-top {
-    display: flex;
-    flex-direction: column;
-    gap: 0.625rem;
-    padding: 0.75rem 0.75rem 0.625rem;
-  }
-  .side-row {
-    display: flex;
-    gap: 0.375rem;
-  }
-  .side-search {
+  /* The rail and the view beside it. The rail is the width of its buttons and never grows;
+     the panel takes the rest of the sidebar, whatever width it was dragged to. In the panel
+     the view fills and whatever follows it (shared notes, a refusal, the status) sits under. */
+  .panel {
     flex: 1;
     min-width: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    grid-auto-rows: auto;
+  }
+  .panel:has(> .panel-head) {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .rail {
+    flex: none;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 0.5rem;
-    font: inherit;
-    font-size: 0.8125rem;
-    text-align: left;
-    height: 1.875rem;
-    padding: 0 0.625rem;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--faint);
-    cursor: pointer;
+    gap: 0.25rem;
+    width: 2.875rem;
+    padding: 0.625rem 0;
+    background: var(--chrome);
+    border-right: 1px solid var(--border);
   }
-  .side-search:hover,
-  .side-daily:hover {
-    color: var(--fg);
-    border-color: var(--muted);
+  .rail .views {
+    display: contents;
   }
-  /* The search box's height and frame, square: a companion to it rather than a toolbar button. */
-  .side-daily {
+  .rail hr {
+    width: 1.5rem;
+    margin: 0.25rem 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+  .rail button {
+    position: relative;
     display: grid;
     place-items: center;
-    flex: none;
-    width: 1.875rem;
-    height: 1.875rem;
+    width: 2.25rem;
+    height: 2.25rem;
     padding: 0;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--muted);
-    cursor: pointer;
-  }
-  .side-search .mag {
-    font-size: 0.9em;
-  }
-  .side-search kbd {
-    margin-left: auto;
     border: 0;
-    font-family: var(--ui);
-    font-size: 0.65rem;
-    color: var(--faint);
-  }
-  /* A segmented control in a groove — the same shape as the pane's mode switch and the note
-     panel's tabs, because all three are "pick one of these". */
-  .side-tabs {
-    display: flex;
-    gap: 0.25rem;
-    background: var(--chrome);
-    padding: 3px;
-    border-radius: 7px;
-  }
-  .side-tabs button {
-    flex: 1;
-    font: inherit;
-    font-size: 0.75rem;
-    border: 0;
+    border-radius: 8px;
     background: none;
     color: var(--muted);
-    padding: 0.25rem 0;
-    border-radius: 5px;
     cursor: pointer;
   }
-  .side-tabs button:hover:not(.on) {
+  .rail button:hover:not(:disabled) {
+    background: var(--hover);
     color: var(--fg);
   }
-  .side-tabs button.on {
-    color: var(--fg);
+  .rail button:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .rail button.on {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+  /* A notch against the rail's edge, so the picked view reads even without colour. */
+  .rail button.on::before {
+    content: '';
+    position: absolute;
+    left: -0.3125rem;
+    top: 0.5rem;
+    bottom: 0.5rem;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .rail .grow {
+    flex: 1;
+  }
+  .rail .dot {
+    margin-bottom: 0.375rem;
+  }
+  .rail .avatar {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--accent-bg);
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.75rem;
     font-weight: 600;
-    background: var(--bg);
-    box-shadow: 0 1px 1.5px rgb(0 0 0 / 0.07);
+  }
+  .rail .avatar:hover {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    min-height: 2.5rem;
+    box-sizing: border-box;
+    padding: 0.25rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-size: 0.8125rem;
+    font-weight: 600;
   }
   .denied {
     font-size: 0.8rem;
@@ -1655,38 +1712,6 @@
     color: #991b1b;
     padding: 0.4rem 0.6rem;
     border-top: 1px solid #fca5a5;
-  }
-  /* One quiet row, the weight of the status line under it: the account is where you leave
-     from, not something the sidebar is about. */
-  .account {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    width: 100%;
-    font: inherit;
-    font-size: 0.75rem;
-    text-align: left;
-    color: var(--muted);
-    background: none;
-    border: 0;
-    border-top: 1px solid var(--border);
-    padding: 0.35rem 0.6rem;
-    cursor: pointer;
-  }
-  .account:hover {
-    background: var(--hover);
-    color: var(--fg);
-  }
-  .account .who {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .account .chev {
-    flex: none;
-    font-size: 0.7rem;
   }
   .status {
     font-size: 0.75rem;
@@ -1851,6 +1876,10 @@
     /* Only once it is out: a shadow on the parked drawer bleeds along the left edge. */
     box-shadow: 0 0 40px rgb(0 0 0 / 0.35);
   }
+  /* The top bar has the daily note already, one tap from the note without the drawer. */
+  .layout.narrow .rail .daily {
+    display: none;
+  }
   @media (prefers-reduced-motion: reduce) {
     .layout.narrow aside {
       transition: none;
@@ -1867,11 +1896,20 @@
 
   /* ---- touch: no hover to reveal anything, and a finger is not a pixel */
   @media (pointer: coarse) {
-    .side-tabs button {
-      padding: 0.5rem 0;
+    .rail {
+      width: 3.5rem;
+      gap: 0.375rem;
     }
-    .side-search {
-      height: 2.25rem;
+    .rail button {
+      width: 2.75rem;
+      height: 2.75rem;
+    }
+    .rail .avatar {
+      width: 2rem;
+      height: 2rem;
+    }
+    .panel-head {
+      min-height: 3rem;
     }
     .bookmarks-pane button,
     .shared button {

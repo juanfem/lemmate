@@ -99,8 +99,8 @@ for: your other devices, other people, sharing and public links, accounts, and t
 itself. Writing, the tree, tabs and panes, search across every vault, backlinks, tags, outline,
 bookmarks, trash, version history, daily notes and templates, attachments, Obsidian import and
 pandoc export are all answered by the relay on your machine, out of each vault's `.lemmate/`
-folder. The status line at the foot of the sidebar says `local` rather than `online`, and the
-sharing commands are not offered.
+folder. The status dot at the foot of the sidebar's rail says `local` rather than `online`
+(hover it), and the sharing commands are not offered.
 
 **Changed your mind later?** Open the command palette (`Ctrl+Shift+P`) and run **Connect a
 server…**. Give it the URL and, if the server has accounts, an email and password — with the
@@ -167,7 +167,8 @@ happened to read first. That fetching only happens once installed — open the s
 ordinary browser tab and it behaves as before, downloading notes as you read them, so signing in
 from someone else's computer does not leave a copy of everything on it. Write and edit freely — new notes and changes are held on the device and
 pushed the next time the app opens with a connection, whether or not you reopen the notes
-concerned. The status line at the foot of the sidebar says `offline` while you are.
+concerned. The status dot at the foot of the sidebar's rail turns amber and says `offline`
+while you are.
 
 Search keeps working offline too, over the notes on the device — the pane says so while it is,
 because the offline index is broader and more roughly ordered than the server's: it matches
@@ -179,11 +180,12 @@ you have not already looked at.
 ### (e) On a phone or a narrow window
 
 Below about 720px the shell folds down to one column. A bar across the top carries the sidebar
-handle (**☰**), the name of the note you are on, the connection dot, and the two things you
-would otherwise reach for with a keyboard: **＋** to open or create a note and **⌘** for the
-command palette. The sidebar becomes a drawer over the editor — it slides in from the left and
-closes again the moment you open a note, and tapping the dimmed editor or pressing Escape
-dismisses it.
+handle (**☰**), the name of the note you are on, the connection dot, today's daily note, and
+the two things you would otherwise reach for with a keyboard: the magnifier for the palette and
+**⌘** for its commands. On a phone the palette takes the whole screen — the field at the top,
+**Cancel** beside it, results down to the keyboard. The sidebar becomes a drawer over the editor,
+rail and all — it slides in from the left and closes again the moment you open a note or start
+a search, and tapping the dimmed editor or pressing Escape dismisses it.
 
 Only the focused pane is drawn. Split panes are not lost when the window narrows: they keep
 their tabs and scroll positions, and they come back as soon as there is room for them again.
@@ -335,8 +337,8 @@ an attachment. Files that arrive while the app is closed are picked up at the ne
 an `id:` keeps it, which is what makes moving a note between vault folders by hand a move
 rather than a copy.
 
-**Two file browsers.** The toolbar above the tree switches between them, and remembers which
-one you left it on:
+**Two file browsers.** The two buttons beside the *Files* heading switch between them, and
+remember which one you left it on:
 
 - **Single tree** — every vault as a root, folders and notes interleaved beneath it.
 - **Folders and notes** — folders on top, the selected folder's notes in a list below, like
@@ -407,13 +409,16 @@ one pane while editing its source in the other. It is saved with the layout, per
 **One sidebar, and the note itself.** The sidebar is about *finding* a note. Everything *about*
 the note you are reading is on the note's own page rather than in a panel beside it.
 
-**Left sidebar**: Files, Tags, Starred. Searching is not a tab here — that is the palette.
+**Left sidebar**: a rail of icons down its left edge, and the view it picks beside it. From the
+top: **search** (the palette, `Ctrl+K`), then the views — **Files**, **Tags**, **Starred**,
+**Attachments**, **Trash** — then **today's daily note** and **new note** (in the vault you are
+on). At the foot, the status dot and, when you are signed in, your initial, which opens the
+account menu. Searching is not a view here — that is the palette.
 
 - **Files** lists folders and their notes. Rows carry the date they last changed, and the list
   header switches between **Recent** and **Name** order. Where the server or relay cannot
-  answer with a listing, rows show no date and the order falls back to the alphabet. Its
-  toolbar starts with three views: the **single tree**, **folders and notes**, and the
-  **Trash** (below).
+  answer with a listing, rows show no date and the order falls back to the alphabet. The two
+  buttons beside its heading are the **single tree** and **folders and notes**.
 - **Tags** is a tree, because tags are one: `#projects/alpha` sits under `#projects`, named by
   its last segment alone, and folds like a folder does. A branch point is drawn even where
   nothing is tagged with it — a vault can use `#projects/alpha` and never `#projects`. Clicking
@@ -445,7 +450,7 @@ lives there and underneath it rather than in a column of its own:
 - **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
   the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
   declares — lower-cased, as they appear in the Tags pane and in search. Click one to list
-  every note that carries it, in the sidebar's Tags tab. **+** adds one, completing from the
+  every note that carries it, in the sidebar's Tags view. **+** adds one, completing from the
   tags the vault already uses: it is written into the note's `tags:` front matter, joining the
   list in whichever style the note already writes it (`[a, b]`, one `- item` per line, or
   `a, b`), and a note with no front matter gets one. Spaces become hyphens and the name is
@@ -469,7 +474,7 @@ lives there and underneath it rather than in a column of its own:
   mentions, outgoing links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).
 
-**Daily notes.** `Ctrl+Shift+D`, or the calendar button beside the search box (in the top bar on
+**Daily notes.** `Ctrl+Shift+D`, or the calendar on the sidebar's rail (in the top bar on
 a phone), opens `Daily/YYYY-MM-DD.md` for today — creating it from `Templates/Daily.md` if it
 does not exist yet. It goes in the vault of the note you are on. The path
 and format are fixed at present — the per-vault configuration, prev/next-day navigation and
@@ -496,7 +501,7 @@ Without a template, a new note starts as `# <title>`. There is no scripting.
 unreferenced files in the folder are ignored. Deleting an attachment that is still referenced
 restores it — drop the reference to drop the file.
 
-**Managing files.** The Files tab's paper-clip view lists every file in your vaults that is not
+**Managing files.** The paper-clip on the sidebar's rail lists every file in your vaults that is not
 a note — images, stylesheets, `_quarto.yml`, bibliographies, PDFs — as a tree of the folders
 that hold them, so a `Slides/` folder with one sub-folder per deck stays tidy. A folder shows
 how many files are inside; a file shows how many notes use it, or *vault* for the vault-wide
@@ -570,10 +575,10 @@ Snapshots are kept forever; the raw update log behind them is pruned after `--re
 
 **Trash.** *Move to trash* removes the note from the vault doc; the file disappears from every
 synced replica and the tab closes everywhere. The note's update log and versions stay in the
-store, so nothing is destroyed yet. The trash view — the trash-can beside the two layouts at the
-start of the Files toolbar, or *Show trash* in the palette — lists a vault's deleted notes,
+store, so nothing is destroyed yet. The trash view — the trash-can on the sidebar's rail, or
+*Show trash* in the palette — lists a vault's deleted notes,
 newest first, starting with the vault of the note you are on (a picker switches vaults when
-you have more than one). Pick either layout to go back to the files. **Restore**
+you have more than one). The folder on the rail goes back to the files. **Restore**
 puts a note back at its old path, or at `… (restored).md` if something has taken that path
 since, and opens it; on a synced vault its file comes back on every replica.
 
@@ -601,8 +606,8 @@ lemmate invite --server … --list                                  # unused / e
 lemmate invite --server … --revoke ID                             # unused ones only
 ```
 
-In the browser the same thing is under **Account, password and invites…**, in the menu your own
-name opens at the foot of the sidebar — the command palette (Ctrl+Shift+P) has it too. The link
+In the browser the same thing is under **Account, password and invites…**, in the menu your initial
+opens at the foot of the sidebar's rail — the command palette (Ctrl+Shift+P) has it too. The link
 is a credential and is not tied to an email address, so send it the way you would send a
 password.
 
@@ -649,7 +654,7 @@ Sharing needs a server with accounts. Against the desktop's local relay the dial
 
 **Presence and cursors.** Everyone editing the same note sees the others' cursors and
 selections with name labels (colour derived from the name). The note header shows "· with N
-others" and the sidebar footer shows how many people are editing. Your display name comes from
+others", and hovering the status dot says how many people are editing. Your display name comes from
 your account.
 
 ---
@@ -874,9 +879,9 @@ encryption, and peer-to-peer sync.
 
 ## 9. Troubleshooting
 
-**The status dot.** Bottom-left of the sidebar: green when the socket is `online`, amber when
-`connecting` or `offline`, followed by the note count and, while the vault doc is still
-catching up, "syncing…". Reconnection is automatic with exponential backoff up to 30 s.
+**The status dot.** At the foot of the sidebar's rail: green when the socket is `online`, amber
+when `connecting` or `offline`. Hover it for the words, the note count and, while the vault doc
+is still catching up, "syncing…". Reconnection is automatic with exponential backoff up to 30 s.
 
 **Offline.** On desktop and `lemmate sync`, everything keeps working: edits are journalled in
 `<vault>/.lemmate/local.db` and reconciled when the server returns. In the **browser** the notes
