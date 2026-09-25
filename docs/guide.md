@@ -919,9 +919,11 @@ diffed against the last projected text, so they compose with concurrent edits in
 overwriting them. Two notes concurrently moved to the same path get a ` (2)` suffix.
 
 **"Permission denied" on a doc.** The relay refuses `sync1` on a note you cannot read and drops
-updates on one you can only view. The UI does not surface that message yet, so the symptom is a
-note that stays empty or edits that quietly do not stick. Check your role on the vault
-(`GET /api/v1/vaults/{v}/members`) — a viewer cannot write.
+updates on one you can only view. The window says so in a red strip above the status line —
+"Permission denied by the server … your last change was not saved" — with **Reload** and
+**Dismiss**. Check your role on the vault (`GET /api/v1/vaults/{v}/members`): a viewer cannot
+write. On the desktop the refusal comes through the local relay, and a window opened after it
+is told too.
 
 **Where things live.**
 
