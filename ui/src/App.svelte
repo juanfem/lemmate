@@ -48,9 +48,9 @@
   /** A standalone app (SPEC §3.2): the relay behind this page has no server, so there is no
    *  connection to be online with and nobody else's changes to wait for. */
   let localOnly = $state(false)
-  /** Served by a local relay at all (standalone or syncing). Sharing, members and invites are
-   *  the server's to answer and the relay has no route for them, so they are not offered here;
-   *  the same account reaches them through the web client. */
+  /** Served by a local relay at all (standalone or syncing). Sharing and members are the
+   *  server's to answer: the relay carries them when it syncs as someone (`serverFeatures`), and
+   *  account settings open on the server in the browser. */
   let onRelay = $state(false)
   /** A standalone shell that can write a server into its own configuration (SPEC §3.2) — the
    *  desktop app, but not `lemmate serve`, which is configured by flags. */
@@ -200,6 +200,14 @@
   let sharedWithMe: SharedNote[] = $state([])
   let shareOpen = $state(false)
   let accountOpen = $state(false)
+  // `#/account` opens the account dialog: where the desktop app sends you for the settings its
+  // access token may not touch (password, tokens, invites).
+  $effect(() => {
+    if (location.hash === '#/account' && me && me.id !== 'local' && !onRelay) {
+      accountOpen = true
+      history.replaceState(history.state, '', location.pathname + location.search)
+    }
+  })
   /** Whichever right-click / drop-down menu is open: the account's, or a tag chip's. */
   let menu = $state<MenuState | null>(null)
   let importInto = $state<string | null | undefined>(undefined)
@@ -241,8 +249,10 @@
       ws.refresh().then((vaults) => {
         if (!focusVault && vaults.length) focusVault = vaults[0]!.id
       })
-      if (!onRelay) api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = []))
     })
+  })
+  $effect(() => {
+    if (workspace && serverFeatures) untrack(() => api.sharedWithMe().then((s) => (sharedWithMe = s)).catch(() => (sharedWithMe = [])))
   })
   onDestroy(() => {
     workspace?.destroy()
@@ -778,7 +788,20 @@
   }
   /** What the desktop shell hands every window it opens (`SHELL_SCRIPT` in crates/desktop); absent
    *  in a browser. */
-  const shell = (window as unknown as { lemmateShell?: { openWindow?: (route: string, x?: number, y?: number) => void; closeWindow?: () => void } }).lemmateShell
+  const shell = (window as unknown as { lemmateShell?: { openWindow?: (route: string, x?: number, y?: number) => void; closeWindow?: () => void; openExternal?: (url: string) => void } }).lemmateShell
+  /**
+   * The server's own features — sharing, members, notes shared with you. A browser always has
+   * them; the desktop app has them when it syncs with a server as someone (the relay carries
+   * them there, `local::upstream_proxy`), and a standalone one has nobody to share with.
+   */
+  let serverFeatures = $derived(!onRelay || (!!relayServer && !!me && me.id !== 'local'))
+  /** Where links to the server point: its own address, not the desktop relay's loopback one. */
+  let serverBase = $derived(onRelay && relayServer ? relayServer.replace(/\/+$/u, '') : location.origin)
+  /** A page of the server in the system browser (the desktop app), for what only a browser session
+   *  can do there: account settings, a note shared with you from a vault this app does not hold. */
+  function openOnServer(route: string) {
+    shell?.openExternal?.(`${serverBase}/${route}`)
+  }
 
   /**
    * Move a tab out into a window of its own (the `#/w/` route): from a menu, or dragged out of
@@ -884,7 +907,7 @@
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
     { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
-    ...(onRelay ? [] : [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }]),
+    ...(serverFeatures ? [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }] : []),
     ...(localOnly && canConnect ? [{ id: 'connect', label: 'Connect a server…', run: () => (connectOpen = true) }] : []),
     // Only a relay can merge vaults: it is the one thing that holds both engines (SPEC §3.2).
     ...(onRelay && vaults.length > 1 ? [{ id: 'merge', label: 'Merge a vault into another…', run: () => (mergeOpen = true) }] : []),
@@ -910,7 +933,13 @@
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
-    ...(me && me.id !== 'local' && !onRelay ? [{ id: 'account', label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) }] : []),
+    ...(me && me.id !== 'local'
+      ? [
+          onRelay
+            ? { id: 'account', label: 'Account settings (opens the browser)…', run: () => openOnServer('#/account') }
+            : { id: 'account', label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
+        ]
+      : []),
     ...(me && me.id !== 'local' && (!onRelay || canConnect) ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   /**
@@ -1410,6 +1439,7 @@
                     items: onRelay
                       ? [
                           { label: `${me?.email ?? ""} on ${relayServer.replace(/^https?:\/\//u, '')}`, run: () => {}, disabled: true },
+                          ...(shell?.openExternal ? [{ label: 'Account settings (opens the browser)…', run: () => openOnServer('#/account') }] : []),
                           // Only the desktop shell can sign out; `lemmate serve` is signed in by its flags.
                           ...(canConnect ? [{ separator: true, label: '' }, { label: 'Sign out', run: signOut, danger: true }] : []),
                         ]
@@ -1450,7 +1480,7 @@
                 onTrashNotes: trashNotes,
                 onOpenInTab: openInNewTab,
                 onOpenInPane: openInNewPane,
-                onShareNote: onRelay ? undefined : (id: string) => (open(id), (shareOpen = true)),
+                onShareNote: serverFeatures ? (id: string) => (open(id), (shareOpen = true)) : undefined,
                 onBookmarkNote: bookmarkNote,
                 onMove: moveDropped,
               }}
@@ -1488,7 +1518,11 @@
               <nav class="shared">
                 <p class="muted">Shared with me</p>
                 {#each sharedWithMe as n (n.id)}
-                  <button onclick={() => (location.hash = `#/n/${n.vault_id}/${n.id}`)} title={n.path}>{n.title ?? displayName(n.path)}</button>
+                  <!-- The desktop relay holds only your own vaults, so a note shared from someone else's
+                       opens on the server, in the browser. -->
+                  <button
+                    onclick={() => (onRelay ? openOnServer(`#/n/${n.vault_id}/${n.id}`) : (location.hash = `#/n/${n.vault_id}/${n.id}`))}
+                    title={n.path}>{n.title ?? displayName(n.path)}</button>
                 {/each}
               </nav>
             {/if}
@@ -1572,7 +1606,7 @@
           onClose={(id) => { focusedPane = i; close(id) }}
           onFocus={() => (focusedPane = i)}
           onBookmark={bookmarkActive}
-          onShare={onRelay ? undefined : () => (shareOpen = true)}
+          onShare={serverFeatures ? () => (shareOpen = true) : undefined}
           onRename={renameActive}
           onDelete={deleteActive}
           onTag={(t) => { focusedPane = i; filterByTag(t) }}
@@ -1633,7 +1667,7 @@
     />
   {/if}
   {#if shareOpen && active && session}
-    <ShareDialog vault={session.id} noteId={active} path={activePath} onClose={() => (shareOpen = false)} />
+    <ShareDialog vault={session.id} noteId={active} path={activePath} base={serverBase} onClose={() => (shareOpen = false)} />
   {/if}
   {#if uploading && uploadTarget}
     <UploadDialog

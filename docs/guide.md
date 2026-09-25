@@ -695,6 +695,14 @@ same account or another; another account's vaults sync into folders of their own
 account's folders are left as they are. The same screen appears if the server stops accepting the
 token, for instance after you revoke it in the web client.
 
+Connected and signed in, the desktop app has the server's features too: **Share note…** and the
+*Share* button, and the **Shared with me** list under the file tree. The app forwards those to
+the server as your account, and share links carry the server's address. Two things open on the
+server in your browser instead, where your session (or your identity provider's) signs you in:
+**Account settings** — password, access tokens and invites, which the app's own token is not
+allowed to touch — and a note shared with you from someone else's vault, which the app does not
+hold.
+
 **Changing a password.** Yours needs the current one; an admin can reset anyone's without it,
 which is the only recovery path — a self-hosted server has no mail and there is no reset-by-email
 link. Either way every *other* session of that account is signed out, so other devices have to

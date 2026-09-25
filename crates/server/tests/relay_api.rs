@@ -270,6 +270,13 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
                     }
                     req.call().unwrap()
                 }
+                "PUT" => {
+                    let mut req = agent.put(&url).header("content-type", "application/json");
+                    if let Some(t) = &bearer {
+                        req = req.header("authorization", &format!("Bearer {t}"));
+                    }
+                    req.send(body.unwrap_or(Value::Null).to_string().as_bytes()).unwrap()
+                }
                 _ => {
                     let mut req = agent.post(&url).header("content-type", "application/json");
                     if let Some(t) = &bearer {
@@ -336,6 +343,40 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
     assert_eq!(me["email"], "ann@example.org");
     assert_eq!(me["token"]["name"], "desktop");
 
+    // The server's own features pass through the relay as that account: share a note the relay
+    // created, once the server knows it, and list what is shared.
+    let (v, relay) = (signed_in.vault_id, format!("http://{}", signed_in.addr));
+    let (s, note) = send(
+        "POST",
+        format!("{relay}/api/v1/vaults/{v}/notes"),
+        None,
+        Some(serde_json::json!({"path": "Shared.md", "content": "# Shared\n"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    for i in 0..100 {
+        if state.store.lock().await.note_by_id(id.parse().unwrap()).unwrap().is_some() {
+            break;
+        }
+        assert!(i < 99, "the note never reached the server");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let shares = format!("{relay}/api/v1/vaults/{v}/notes/{id}/shares");
+    let (s, link) =
+        send("PUT", shares.clone(), None, Some(serde_json::json!({"kind": "link"}))).await.unwrap();
+    assert_eq!(s, 200, "{link}");
+    assert!(link["link"].as_str().unwrap().starts_with("/#/s/"));
+    let (s, list) = send("GET", shares, None, None).await.unwrap();
+    assert_eq!(s, 200);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let (s, mine) = send("GET", format!("{relay}/api/v1/shared-with-me"), None, None).await.unwrap();
+    assert_eq!((s, mine), (200, serde_json::json!([])));
+    let (s, members) = send("GET", format!("{relay}/api/v1/vaults/{v}/members"), None, None).await.unwrap();
+    assert_eq!(s, 200);
+    assert_eq!(members[0]["email"], "ann@example.org");
+
     // No token for a server that wants one: signed out, and of which server.
     let none = relay_with(None, d2.path().into(), None).await;
     let (s, body) = send("GET", format!("http://{}/api/v1/auth/me", none.addr), None, None).await.unwrap();
@@ -366,6 +407,9 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
     .unwrap();
     let (s, _) = send("GET", format!("http://{}/api/v1/auth/me", alone.addr), None, None).await.unwrap();
     assert_eq!(s, 404);
+    let (s, _) =
+        send("GET", format!("http://{}/api/v1/shared-with-me", alone.addr), None, None).await.unwrap();
+    assert_eq!(s, 404, "no server to ask");
 
     // A sign-out reaches the shell, and the page hears the shell's answer.
     let mut asks = signed_in.sign_out.take().unwrap();

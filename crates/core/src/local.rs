@@ -512,6 +512,14 @@ pub(crate) async fn serve(
         .route("/api/v1/local/connect", axum::routing::post(connect_server))
         .route("/api/v1/local/merge", axum::routing::post(merge_vaults))
         .route("/api/v1/auth/me", get(auth_me))
+        // The server's own features — sharing, members — answered by the server (`upstream`).
+        .route(
+            "/api/v1/vaults/{vault}/notes/{id}/shares",
+            get(upstream_proxy).put(upstream_proxy).delete(upstream_proxy),
+        )
+        .route("/api/v1/vaults/{vault}/members", get(upstream_proxy).put(upstream_proxy))
+        .route("/api/v1/vaults/{vault}/members/{user}", axum::routing::delete(upstream_proxy))
+        .route("/api/v1/shared-with-me", get(upstream_proxy))
         .route("/api/v1/auth/logout", axum::routing::post(sign_out))
         .route("/api/v1/vaults", get(vaults))
         .route("/api/v1/search", get(search_all))
@@ -1589,6 +1597,61 @@ async fn auth_me(State(s): State<Arc<LocalState>>) -> axum::response::Response {
             Err(_) => StatusCode::BAD_GATEWAY.into_response(),
         },
         Ok(Ok((401, _))) => signed_out(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// Forward a request for one of the server's own features — note shares, vault members, notes
+/// shared with you — to the server, as the account whose token the engines sync with, and hand
+/// back its answer. These are the server's to decide (roles, accounts, links), not the vault
+/// folder's, so the relay only carries them; a standalone relay has no server to ask (404).
+///
+/// Only the routes listed in `serve` come here. Anything on this machine can reach them — as it
+/// can every other route of a relay that listens unauthenticated on loopback.
+async fn upstream_proxy(
+    State(s): State<Arc<LocalState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(up) = s.upstream.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_owned();
+    let url = format!("{}{path}", crate::credentials::key(&up.url));
+    let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let answer = tokio::task::spawn_blocking(
+        move || -> std::result::Result<(u16, Option<String>, Vec<u8>), String> {
+            let agent = crate::tls::http_agent(up.ca_cert.as_deref()).map_err(|e| e.to_string())?;
+            let mut req = ureq::http::Request::builder().method(method.as_str()).uri(&url);
+            if let Some(t) = &up.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            if let Some(ct) = &content_type {
+                req = req.header("content-type", ct);
+            }
+            let req = req.body(body.to_vec()).map_err(|e| e.to_string())?;
+            match agent.run(req) {
+                Ok(mut r) => {
+                    let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                    let bytes = r.body_mut().read_to_vec().map_err(|e| e.to_string())?;
+                    Ok((r.status().as_u16(), ct, bytes))
+                }
+                Err(ureq::Error::StatusCode(code)) => Ok((code, None, Vec::new())),
+                Err(e) => Err(e.to_string()),
+            }
+        },
+    )
+    .await;
+    match answer {
+        Ok(Ok((status, ct, bytes))) => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            match ct {
+                Some(ct) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
+                None => (status, bytes).into_response(),
+            }
+        }
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }

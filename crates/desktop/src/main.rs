@@ -60,6 +60,27 @@ const RESTART_GRACE: Duration = Duration::from_millis(500);
 /// stopped on exit. `Option` because [`LocalHandle::abort`] is called exactly once.
 struct Relay(Mutex<Option<LocalHandle>>);
 
+/// The server the relay syncs with, if any: the one place besides the relay's own pages that a
+/// page may ask to open in the system browser — its account settings, a note shared with you.
+struct ServerOrigin(Mutex<Option<Url>>);
+
+impl ServerOrigin {
+    fn set(app: &tauri::AppHandle, cfg: &config::Config) {
+        let url = cfg.server_url.as_deref().and_then(|u| Url::parse(u).ok());
+        if let Some(state) = app.try_state::<ServerOrigin>()
+            && let Ok(mut guard) = state.0.lock()
+        {
+            *guard = url;
+        }
+    }
+
+    fn allows(app: &tauri::AppHandle, url: &Url) -> bool {
+        app.try_state::<ServerOrigin>().is_some_and(|s| {
+            s.0.lock().is_ok_and(|g| g.as_ref().is_some_and(|server| server.origin() == url.origin()))
+        })
+    }
+}
+
 impl Relay {
     /// Whether `url` is a page this relay serves: the only thing a window may be opened on.
     fn serves(&self, url: &Url) -> bool {
@@ -112,6 +133,8 @@ fn main() -> ExitCode {
 fn run(cfg: config::Config) -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         .setup(move |app| {
+            app.manage(ServerOrigin(Mutex::new(None)));
+            ServerOrigin::set(app.handle(), &cfg);
             let relay = start_relay(app, &cfg)?;
             app.manage(relay);
             Ok(())
@@ -150,6 +173,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                 .build()
                 .context("creating the setup window")?;
             app.manage(Relay(Mutex::new(None)));
+            app.manage(ServerOrigin(Mutex::new(None)));
 
             let handle = app.handle().clone();
             let config_path = ctx.config_path.clone();
@@ -175,6 +199,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                     let mut relay = start_relay_for(&cfg, web_dir).await?;
                     watch_for_connect(handle.clone(), &mut relay, cfg.config_path.clone());
                     watch_for_sign_out(handle.clone(), &mut relay, &cfg);
+                    ServerOrigin::set(&handle, &cfg);
                     let url: tauri::Url = window_url(&relay).parse()?;
                     if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
                         w.navigate(url).context("navigating to the relay")?;
@@ -280,10 +305,11 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
                         }
                     }
                     Some(ShellRequest::Open { url, position }) => open_note_window(&handle, url, position),
-                    // Only a page this relay serves: the page may send the browser there, and
-                    // nowhere else, whatever a script in it tried.
+                    // Only a page this relay serves, or of the server it syncs with: the page may
+                    // send the browser there, and nowhere else, whatever a script in it tried.
                     Some(ShellRequest::External(url))
-                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url)) =>
+                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url))
+                            || ServerOrigin::allows(&handle, &url) =>
                     {
                         open_in_browser(&url)
                     }

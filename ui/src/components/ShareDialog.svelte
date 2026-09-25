@@ -1,7 +1,20 @@
 <script lang="ts">
   import { api, ApiError, type Share } from '../lib/api.ts'
 
-  let { vault, noteId, path, onClose }: { vault: string; noteId: string; path: string; onClose: () => void } = $props()
+  let {
+    vault,
+    noteId,
+    path,
+    base = location.origin,
+    onClose,
+  }: {
+    vault: string
+    noteId: string
+    path: string
+    /** The server's address, which a link must carry — on the desktop, not the relay's. */
+    base?: string
+    onClose: () => void
+  } = $props()
   let shares: Share[] = $state([])
   let email = $state('')
   let role = $state('viewer')
@@ -32,7 +45,7 @@
   async function makeLink() {
     try {
       const s = await api.share(vault, noteId, { kind: 'link' })
-      newLink = s.link ? `${location.origin}${s.link}` : ''
+      newLink = s.link ? `${base}${s.link}` : ''
       reload()
     } catch (err) {
       error = String(err)
