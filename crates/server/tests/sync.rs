@@ -324,6 +324,55 @@ async fn export_uses_pandoc_or_says_so() {
     }
 }
 
+/// A note's own `bibliography:` reaches pandoc on the server, laid out from the blob store
+/// (SPEC §12). Skipped without a pandoc, since there is nothing to observe then.
+#[tokio::test]
+async fn export_cites_from_the_notes_own_bibliography() {
+    let pandoc = std::env::var_os("LEMMATE_TEST_PANDOC").map(std::path::PathBuf::from);
+    if !lemmate_core::pandoc::pandoc_available(pandoc.as_deref()) {
+        eprintln!("skipped: no pandoc");
+        return;
+    }
+    let blobs = tempfile::tempdir().unwrap();
+    let options =
+        ServerOptions { pandoc, attachments_dir: blobs.path().to_path_buf(), ..ServerOptions::default() };
+    let state = build_state(Store::open_in_memory().unwrap(), options);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}/api/v1/vaults/{}", VaultId::new());
+    let body = tokio::task::spawn_blocking(move || {
+        ureq::put(format!("{base}/files?path=Papers/refs.bib"))
+            .send(&b"@book{knuth84, author={Donald Knuth}, title={The TeXbook}, year={1984}}\n"[..])
+            .unwrap();
+        let mut r = ureq::post(format!("{base}/notes"))
+            .header("content-type", "application/json")
+            .send(
+                serde_json::json!({
+                    "path": "Papers/Essay.md",
+                    "content": "---\nbibliography: refs.bib\n---\n# Essay\n\nAs shown [@knuth84].\n",
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        let note: serde_json::Value = serde_json::from_str(&r.body_mut().read_to_string().unwrap()).unwrap();
+        let id = note["id"].as_str().unwrap();
+        ureq::post(format!("{base}/notes/{id}/export"))
+            .header("content-type", "application/json")
+            .send(r#"{"format":"html"}"#.as_bytes())
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(body.contains("Knuth") && body.contains("TeXbook"), "{body}");
+    assert!(!body.contains("[@knuth84]"), "the citation was resolved: {body}");
+}
+
 /// One note's rename must not date the whole vault. `derive_metadata` re-records *every* entry
 /// of a vault whenever the vault doc moves, so a stamp on each of those upserts made a single
 /// rename — or a single new note — look like every note in the vault had just been edited: the

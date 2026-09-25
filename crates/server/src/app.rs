@@ -1073,8 +1073,10 @@ struct ExportIn {
     view: bool,
 }
 
-/// Render a note through pandoc (SPEC §12). Attachments resolve against the server's blob
-/// store is future work; today links stay relative.
+/// Render a note through pandoc (SPEC §12). The note's bibliography — its own `bibliography:`,
+/// else the vault's `export/references.bib` — and citation style are laid out from the blob
+/// store for pandoc to read. Other attachments resolving against the blob store is future work;
+/// today image links stay relative.
 async fn export_note(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1096,16 +1098,39 @@ async fn export_note(
         RoomDoc::Note(d) => d.text(),
         RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
     };
-    let opts =
-        lemmate_core::pandoc::ExportOptions { pandoc: state.options.pandoc.clone(), ..Default::default() };
-    let (bytes, mime) =
-        tokio::task::spawn_blocking(move || lemmate_core::pandoc::render(&text, format, &opts))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map_err(|e| {
-                warn!(%e, "export");
-                StatusCode::UNPROCESSABLE_ENTITY
-            })?;
+    let entries: HashMap<String, String> = match &*vault_room(&state, vault).await?.doc.lock().await {
+        RoomDoc::Vault(v) => v.attachment_entries().into_iter().collect(),
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    let cites = lemmate_core::pandoc::citation_files(&row.path, &text, |p| entries.contains_key(p));
+    let blobs = state.attachments.clone();
+    let pandoc = state.options.pandoc.clone();
+    let (bytes, mime) = tokio::task::spawn_blocking(move || {
+        // Each file at its vault path under a scratch directory, removed afterwards.
+        let dir = std::env::temp_dir().join(format!("lemmate-export-{}", NoteId::new()));
+        let lay_out = |p: &String| -> Option<std::path::PathBuf> {
+            let bytes = blobs.get(vault, entries.get(p)?).ok().flatten()?;
+            let file = dir.join(p);
+            std::fs::create_dir_all(file.parent()?).ok()?;
+            std::fs::write(&file, bytes).ok()?;
+            Some(file)
+        };
+        let opts = lemmate_core::pandoc::ExportOptions {
+            pandoc,
+            bibliography: cites.bibliography.iter().filter_map(lay_out).collect(),
+            csl: cites.csl.as_ref().and_then(lay_out),
+            ..Default::default()
+        };
+        let out = lemmate_core::pandoc::render(&text, format, &opts);
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!(%e, "export");
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
     let stem = std::path::Path::new(&row.path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())

@@ -776,12 +776,16 @@ wikilinks, `$…$`, callouts and bracketed spans survive the trip. Front matter 
 before rendering. Pandoc is found on `PATH` unless you pass `--pandoc PATH` / `LEMMATE_PANDOC`;
 without it the endpoint answers **501**. `lemmate doctor` tells you whether it is installed.
 
-A vault-level `export/` folder is consulted when the exporter knows the vault directory:
-`defaults.yaml` (passed as `--defaults`), `references.bib` (turns on `--citeproc`), and
-`style.csl` next to it (`--csl`). Note that the **server-side** export path does not currently
-pass a vault directory, so today `export/` and image resource paths only apply where the
-exporter is given one — server exports render the note text alone, with links left relative.
-The local relay (desktop app, `lemmate serve`) passes its vault folder, so there they apply.
+**Citations.** `[@key]` is resolved (`--citeproc`) against the note's own bibliography when its
+front matter names one — `bibliography: refs.bib`, or a list, relative to the note as in Quarto
+(a leading `/` is the vault root) — and otherwise against the vault's `export/references.bib`.
+The style is the note's `csl:`, else `export/style.csl`, else pandoc's default (Chicago
+author-date). Only files in the vault count, so a note cannot point an export at other files on
+the host. This works on the server and on the local relay alike.
+
+`export/defaults.yaml` (passed as `--defaults`) and image resource paths apply only where the
+exporter has the vault folder — the local relay (desktop app, `lemmate serve`); server exports
+render the note text with image links left relative.
 
 ### Rendering with Quarto
 

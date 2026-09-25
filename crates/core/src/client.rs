@@ -2077,11 +2077,19 @@ impl Engine {
                 LocalQuery::MoveFile { from, to } => self.move_file(&from, &to)?,
                 LocalQuery::Export { id, format } => {
                     let Some(doc) = self.doc_for(id) else { return Ok(LocalReply::Written(None)) };
+                    let text = doc.text();
+                    let root = self.proj.root().to_path_buf();
+                    let note_path = self.notes.get(&id).map(|n| n.path.clone()).unwrap_or_default();
+                    let cites = crate::pandoc::citation_files(&note_path, &text, |p| {
+                        self.proj.resolve(p).is_ok_and(|f| f.is_file())
+                    });
                     let opts = crate::pandoc::ExportOptions {
-                        resource_dir: Some(self.proj.root().to_path_buf()),
+                        resource_dir: Some(root.clone()),
+                        bibliography: cites.bibliography.iter().map(|p| root.join(p)).collect(),
+                        csl: cites.csl.map(|p| root.join(p)),
                         ..Default::default()
                     };
-                    match crate::pandoc::render(&doc.text(), format, &opts) {
+                    match crate::pandoc::render(&text, format, &opts) {
                         Ok((bytes, mime)) => LocalReply::Exported(bytes, mime),
                         Err(e) => LocalReply::Error(e.to_string()),
                     }

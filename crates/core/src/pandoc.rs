@@ -68,18 +68,73 @@ pub const READER: &str = "markdown+wikilinks_title_after_pipe+tex_math_dollars+f
 pub struct ExportOptions {
     /// `pandoc` binary; `None` → `pandoc` on `PATH`.
     pub pandoc: Option<PathBuf>,
-    /// Vault directory, used to resolve images/attachments and the optional `export/` folder
-    /// (`defaults.yaml`, `references.bib`, `style.csl`, `template.*`).
+    /// Vault directory, used to resolve images/attachments and `export/defaults.yaml`.
     pub resource_dir: Option<PathBuf>,
     /// Drop the front matter block before rendering (ids are not for readers).
     pub strip_front_matter: bool,
     pub standalone: bool,
+    /// Bibliography files to cite from (`--citeproc`), on disk; see [`citation_files`].
+    pub bibliography: Vec<PathBuf>,
+    /// Citation style, on disk.
+    pub csl: Option<PathBuf>,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { pandoc: None, resource_dir: None, strip_front_matter: true, standalone: true }
+        Self {
+            pandoc: None,
+            resource_dir: None,
+            strip_front_matter: true,
+            standalone: true,
+            bibliography: Vec::new(),
+            csl: None,
+        }
     }
+}
+
+/// The vault's bibliography and citation style (SPEC §12), for notes that name none.
+pub const VAULT_BIBLIOGRAPHY: &str = "export/references.bib";
+pub const VAULT_CSL: &str = "export/style.csl";
+
+/// What an export of one note cites from, as vault paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Citations {
+    pub bibliography: Vec<String>,
+    pub csl: Option<String>,
+}
+
+/// The citation files for exporting the note at `note_path` (SPEC §12): the note's own
+/// `bibliography:` — one path or a list — and `csl:` from its front matter, relative to the
+/// note as Quarto reads them (a leading `/` is the vault root); failing that, the vault's
+/// `export/references.bib` and `export/style.csl`. Only files `exists` knows are returned, and
+/// nothing outside the vault, so an export cannot be pointed at other files on the host.
+pub fn citation_files(note_path: &str, markdown: &str, exists: impl Fn(&str) -> bool) -> Citations {
+    use crate::projection::Projection;
+    let meta: serde_yaml_ng::Value = crate::frontmatter::block(markdown)
+        .and_then(|(range, _)| serde_yaml_ng::from_str(&markdown[range]).ok())
+        .unwrap_or(serde_yaml_ng::Value::Null);
+    let resolve = |v: &serde_yaml_ng::Value| {
+        v.as_str().and_then(|p| Projection::normalize_relative(note_path, p.trim())).filter(|p| exists(p))
+    };
+    let own: Vec<String> = match meta.get("bibliography") {
+        Some(serde_yaml_ng::Value::Sequence(items)) => items.iter().filter_map(resolve).collect(),
+        Some(v) => resolve(v).into_iter().collect(),
+        None => Vec::new(),
+    };
+    let csl = meta.get("csl").and_then(resolve);
+    if !own.is_empty() {
+        return Citations {
+            bibliography: own,
+            csl: csl.or_else(|| exists(VAULT_CSL).then(|| VAULT_CSL.to_owned())),
+        };
+    }
+    if exists(VAULT_BIBLIOGRAPHY) {
+        return Citations {
+            bibliography: vec![VAULT_BIBLIOGRAPHY.to_owned()],
+            csl: csl.or_else(|| exists(VAULT_CSL).then(|| VAULT_CSL.to_owned())),
+        };
+    }
+    Citations::default()
 }
 
 pub fn pandoc_available(pandoc: Option<&Path>) -> bool {
@@ -115,11 +170,14 @@ pub fn render(markdown: &str, format: Format, opts: &ExportOptions) -> Result<(V
         if export.join("defaults.yaml").is_file() {
             cmd.arg("--defaults").arg(export.join("defaults.yaml"));
         }
-        if export.join("references.bib").is_file() {
-            cmd.arg("--citeproc").arg("--bibliography").arg(export.join("references.bib"));
-            if export.join("style.csl").is_file() {
-                cmd.arg("--csl").arg(export.join("style.csl"));
-            }
+    }
+    if !opts.bibliography.is_empty() {
+        cmd.arg("--citeproc");
+        for b in &opts.bibliography {
+            cmd.arg("--bibliography").arg(b);
+        }
+        if let Some(csl) = &opts.csl {
+            cmd.arg("--csl").arg(csl);
         }
     }
     let out_path = tmp.join(format!("out.{}", format.extension()));
@@ -193,5 +251,51 @@ mod tests {
         assert!(!html.contains("01X"), "front matter stripped");
         let (docx, mime) = render(md, Format::Docx, &opts).unwrap();
         assert!(mime.contains("wordprocessingml") && docx.starts_with(b"PK"));
+    }
+
+    #[test]
+    fn a_note_names_its_own_bibliography_or_gets_the_vaults() {
+        let files =
+            ["export/references.bib", "export/style.csl", "Papers/refs.bib", "Papers/more.bib", "apa.csl"];
+        let exists = |p: &str| files.contains(&p);
+        let vault = Citations {
+            bibliography: vec!["export/references.bib".into()],
+            csl: Some("export/style.csl".into()),
+        };
+        assert_eq!(citation_files("Papers/a.md", "# no front matter\n", exists), vault);
+        assert_eq!(
+            citation_files("Papers/a.md", "---\nbibliography: refs.bib\n---\n", exists).bibliography,
+            ["Papers/refs.bib"]
+        );
+        let both = citation_files(
+            "Papers/a.md",
+            "---\nbibliography: [refs.bib, more.bib]\ncsl: /apa.csl\n---\n",
+            exists,
+        );
+        assert_eq!(both.bibliography, ["Papers/refs.bib", "Papers/more.bib"]);
+        assert_eq!(both.csl.as_deref(), Some("apa.csl"));
+        // Missing files, and paths out of the vault, fall back to the vault's.
+        assert_eq!(citation_files("Papers/a.md", "---\nbibliography: ../../etc/x.bib\n---\n", exists), vault);
+        assert_eq!(citation_files("Papers/a.md", "---\nbibliography: gone.bib\n---\n", exists), vault);
+        assert_eq!(citation_files("a.md", "", |_| false), Citations::default());
+    }
+
+    #[test]
+    fn citations_render_from_the_given_bibliography() {
+        let Some(bin) = pandoc() else {
+            eprintln!("skipped: set LEMMATE_TEST_PANDOC");
+            return;
+        };
+        let dir = tempdir().unwrap();
+        let bib = dir.join("refs.bib");
+        std::fs::write(&bib, "@book{knuth84, author={Donald Knuth}, title={The TeXbook}, year={1984}}\n")
+            .unwrap();
+        let opts = ExportOptions { pandoc: Some(bin), bibliography: vec![bib], ..Default::default() };
+        let (html, _) =
+            render("---\nbibliography: refs.bib\n---\nAs shown [@knuth84].\n", Format::Html, &opts).unwrap();
+        let html = String::from_utf8(html).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(html.contains("Knuth") && html.contains("1984"), "{html}");
+        assert!(html.contains("TeXbook"), "a reference list: {html}");
     }
 }

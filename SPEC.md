@@ -640,8 +640,8 @@ Server-side (or local when the binary is installed) pandoc/quarto:
 - Export options: include front matter, resolve wikilinks to relative paths, embed images.
 - A per-vault `export/` folder may hold `defaults.yaml`, `template.tex`, `references.bib`,
   `style.csl`; the export uses them when present. Citations resolve against the single
-  vault-level `references.bib` **[decided]**; a per-note `bibliography:` override is an
-  export-time feature for later.
+  vault-level `references.bib` **[decided]**, unless the note's front matter names its own
+  `bibliography:` (and `csl:`), resolved relative to the note as Quarto does — vault files only.
 
 ---
 
@@ -794,7 +794,7 @@ citations, `.qmd` awareness + quarto render, REST API, CLI, MCP, embeds/transclu
 | Attachment placement | Single vault-level `attachments/` folder. |
 | `id:` in front matter | Written by default; renames/moves resolve by id. |
 | Update-log retention | 90 days. |
-| Citations | One `references.bib` per vault; per-note `bibliography:` as a later export feature. |
+| Citations | One `references.bib` per vault; a note's own `bibliography:` overrides it at export. |
 | Vim keymap | Not for now. |
 | Obsidian plugins in use | File Tree Alternative, Self-hosted LiveSync — both covered by built-ins (§9, §7). |
 | Native mobile apps (2026-09-03) | Dropped; the installed web client is the phone client — §14. |
