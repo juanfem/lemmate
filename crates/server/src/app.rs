@@ -140,6 +140,8 @@ pub struct AppState {
     next_conn: AtomicU64,
     /// The OIDC client, when `options.oidc` is set.
     pub oidc: Option<crate::oidc::Oidc>,
+    /// Native-app sign-ins approved and waiting to be collected (`apps.rs`).
+    pub app_grants: crate::apps::Grants,
 }
 
 struct Room {
@@ -203,6 +205,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         bus,
         next_conn: AtomicU64::new(1),
         oidc,
+        app_grants: Default::default(),
     })
 }
 
@@ -211,6 +214,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .merge(auth::router())
         .merge(crate::oidc::router())
+        .merge(crate::apps::router())
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))

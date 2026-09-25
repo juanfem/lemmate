@@ -140,8 +140,11 @@ lemmate sync  --vault ~/vault --server https://notes.example.org          # keep
 Windows Credential Manager, GNOME Keyring or KWallet), otherwise in `credentials.toml` in your
 configuration directory (mode 0600 where the OS supports it) — and `sync` picks it up
 automatically. `LEMMATE_KEYCHAIN=0` keeps it in the file. On a server that signs in only through
-an identity provider there is no password to give: make an access token in the web client
-(**Account → Access tokens**, §4) and `lemmate login --server … --token lmt_…`. First run **publishes** the folder as a new vault and prints the id; to
+an identity provider there is no password to give: `lemmate login --server … --browser` opens the
+server's sign-in page in your browser, asks you to allow *lemmate CLI on <host>*, and brings an
+access token back (§4). `--token lmt_…` saves one made by hand instead.
+
+First run **publishes** the folder as a new vault and prints the id; to
 join an existing vault into an empty folder, pass `--vault-id <ULID>`. Add `--once` to sync and
 exit. Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the local relay, which serves
 the sync socket, the API and the web client on loopback — this is exactly what the desktop app
@@ -656,6 +659,14 @@ lemmate login --server https://notes.example.org --token lmt_…     # saves it 
 curl -H "Authorization: Bearer lmt_…" https://notes.example.org/api/v1/vaults
 ```
 
+**Signing an app in through the browser.** The desktop app (**Sign in with your browser**, in its
+setup and *Connect a server…* dialogs) and `lemmate login --browser` can fetch a token themselves:
+they open the server's page, you sign in the usual way — straight through the identity provider,
+if that is how the server signs in, with nothing to type if you already have its session — and
+confirm **Allow Lemmate desktop on <host>**. The app then holds an access token named after the
+device, listed and revocable with the others. The answer only ever goes to the app on the same
+machine (a loopback address), and only the app that started the sign-in can redeem it.
+
 **Inviting someone.** An admin mints a single-use link; the person opening it picks their own
 email and password and lands in the app signed in. It works once — a second attempt is refused —
 and an invited account is never an admin.
@@ -770,6 +781,7 @@ notes <command>
 | Command | What it does |
 |---|---|
 | `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token — in the system keychain, or `credentials.toml` in your configuration directory where there is none. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
+| `lemmate login --server URL --browser` | Sign in through the server's page in your browser (`$BROWSER` if set) — its identity provider, if it has one — and save the access token it hands this machine. |
 | `lemmate login --server URL --token lmt_…` | Save an access token made in the web client instead (checked against the server first): the way in when the server signs in only through an identity provider. |
 | `lemmate logout --server URL` | Forget the saved token for that server. |
 | `lemmate passwd --server URL [--email E]` | Change your password (prompts for the current one), or reset another account's as an admin. Signs every other session of that account out. |

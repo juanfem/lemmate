@@ -31,7 +31,8 @@
   import UploadDialog from './components/UploadDialog.svelte'
   import { fileTab, isFileTab, parseFileTab } from './lib/filetabs.ts'
   import { isRenderTab, renderTab, tabNote } from './lib/rendertabs.ts'
-  import { renderReturn } from './lib/next.ts'
+  import { appAuthorize, renderReturn } from './lib/next.ts'
+  import AuthorizeApp from './components/AuthorizeApp.svelte'
   import type { FileEntry } from './lib/api.ts'
   import ShareDialog from './components/ShareDialog.svelte'
   import SharedView from './components/SharedView.svelte'
@@ -79,6 +80,9 @@
         },
       )
       .catch(() => {})
+
+  /** A native app asking to be signed in: this page is only the approval, never the workspace. */
+  const appAuth = appAuthorize(location.search)
 
   // ---- account: the API answers 401 until signed in (never with --no-auth or the relay)
   let authRequired = $state(false)
@@ -204,7 +208,7 @@
 
   // Everything else runs in the workspace, created once and kept for the session.
   $effect(() => {
-    if (publicToken || noteOnly || workspace) return
+    if (publicToken || noteOnly || workspace || appAuth) return
     untrack(() => {
       const ws = new Workspace()
       workspace = ws
@@ -1295,6 +1299,8 @@
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
 {:else if authRequired || (invite && !me)}
   <Login {invite} stay={signedOut} onDone={signedIn} />
+{:else if appAuth}
+  {#if me}<AuthorizeApp request={appAuth} {me} />{:else}<main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>{/if}
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}

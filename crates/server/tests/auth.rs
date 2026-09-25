@@ -847,3 +847,71 @@ async fn password_login_can_be_turned_off() {
     assert_eq!(post(addr, "/api/v1/auth/register", creds.clone(), None).await.0, 403);
     assert_eq!(post(addr, "/api/v1/auth/login", creds, None).await.0, 403);
 }
+
+/// A native app signing in through the browser (`apps.rs`): the page approves with the
+/// session, the app trades the code for a token named after the device.
+#[tokio::test]
+async fn an_app_signs_in_through_the_browser() {
+    let (addr, _) = start().await;
+    let ann = admin(addr).await;
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: the only test in this binary that touches these variables.
+    unsafe {
+        std::env::set_var("LEMMATE_CONFIG_DIR", dir.path());
+        std::env::set_var("LEMMATE_KEYCHAIN", "0");
+    }
+    let server = format!("http://{addr}");
+    let flow = lemmate_core::credentials::BrowserSignIn::start(
+        &server,
+        "http://127.0.0.1/lemmate-callback",
+        "Lemmate desktop on test",
+    )
+    .unwrap();
+    // What the page reads off its own address.
+    let q: std::collections::HashMap<String, String> =
+        url::Url::parse(&flow.url).unwrap().query_pairs().into_owned().collect();
+    assert_eq!(q["authorize"], "app");
+    let approve = |redirect: &str, token: &str| {
+        let body = json!({
+            "redirect_uri": redirect, "state": q["state"], "code_challenge": q["code_challenge"], "device": q["device"],
+        });
+        let token = token.to_owned();
+        async move { post(addr, "/api/v1/auth/app/approve", body, Some(&token)).await }
+    };
+    assert_eq!(approve("https://evil.example/cb", &ann).await.0, 400, "only a loopback redirect");
+    let (s, out) = approve(&q["redirect_uri"], &ann).await;
+    assert_eq!(s, 200, "{out}");
+    let redirect = out["redirect"].as_str().unwrap().to_owned();
+    assert!(flow.is_callback(&redirect), "{redirect}");
+    let query = url::Url::parse(&redirect).unwrap().query().unwrap().to_owned();
+
+    // A code is spent once, and only with the verifier behind its challenge.
+    let (s, _) = post(
+        addr,
+        "/api/v1/auth/app/token",
+        json!({"code": query.split('&').next().unwrap().trim_start_matches("code="), "code_verifier": "wrong".repeat(10), "redirect_uri": q["redirect_uri"]}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 400);
+    let (s, out) = approve(&q["redirect_uri"], &ann).await; // the wrong guess burnt that code
+    assert_eq!(s, 200);
+    let query = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap().query().unwrap().to_owned();
+    let email = tokio::task::spawn_blocking({
+        let (flow, query) = (flow.clone(), query.clone());
+        move || flow.finish(&query, None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(email, "ann@example.org");
+    let again = tokio::task::spawn_blocking(move || flow.finish(&query, None)).await.unwrap();
+    assert!(again.is_err(), "replayed");
+
+    let token = lemmate_core::credentials::load(&server).unwrap();
+    assert!(token.starts_with("lmt_"));
+    let (_, me) = get(addr, "/api/v1/auth/me", Some(&token)).await;
+    assert_eq!(me["token"]["name"], "Lemmate desktop on test");
+    // …and that token cannot approve another app in turn.
+    assert_eq!(approve(&q["redirect_uri"], &token).await.0, 403);
+}

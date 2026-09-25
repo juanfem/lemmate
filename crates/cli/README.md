@@ -56,8 +56,10 @@ content and applies the difference as CRDT edits, so they merge with whoever els
 
 ```sh
 lemmate login --server https://notes.example.org --email you@example.org
-# or, on a server that signs in through an identity provider (or for a script or MCP, with a
-# token limited to one vault and to reading):
+# or, on a server that signs in through an identity provider — in your browser:
+lemmate login --server https://notes.example.org --browser
+# or, for a script or MCP, with a token made in the web client and limited to one vault and to
+# reading:
 lemmate login --server https://notes.example.org --token lmt_…
 export LEMMATE_SERVER=https://notes.example.org
 lemmate vaults

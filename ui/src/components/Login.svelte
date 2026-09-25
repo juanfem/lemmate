@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { api, ApiError, type AuthConfig } from '../lib/api.ts'
-  import { renderReturn } from '../lib/next.ts'
+  import { appAuthorize, renderReturn } from '../lib/next.ts'
 
   let {
     onDone,
@@ -26,8 +26,9 @@
     )
   })
   let passwords = $derived(config?.password_login ?? true)
-  // A render opened without a session comes back to itself after the round trip.
-  const next = renderReturn(location.search)
+  // A render opened without a session comes back to itself after the round trip, and so does an
+  // app's sign-in request (`?authorize=app…`), which is this very page.
+  const next = renderReturn(location.search) ?? (appAuthorize(location.search) ? location.pathname + location.search : null)
   let oidcHref = $derived.by(() => {
     const q = new URLSearchParams()
     if (invite) q.set('invite', invite)

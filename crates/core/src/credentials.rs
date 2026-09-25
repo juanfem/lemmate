@@ -216,6 +216,98 @@ pub fn login_with_token(server: &str, token: &str, ca_cert: Option<&std::path::P
     Ok(email)
 }
 
+/// A sign-in through the browser in progress (the server's `apps.rs`): open [`Self::url`] in a
+/// browser or a webview, catch the redirect to `redirect_uri`, and hand its query to
+/// [`BrowserSignIn::finish`]. The verifier never leaves this process; the browser only ever
+/// sees its hash.
+#[derive(Debug, Clone)]
+pub struct BrowserSignIn {
+    pub server: String,
+    pub redirect_uri: String,
+    pub url: String,
+    state: String,
+    verifier: String,
+}
+
+fn random_hex(bytes: usize) -> Result<String> {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf).map_err(|e| Error::Sync(format!("no randomness: {e}")))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+impl BrowserSignIn {
+    /// Start one. `redirect_uri` is where this program will catch the answer — `http://` on a
+    /// loopback address; `device` is how the token will be named in the account's list.
+    pub fn start(server: &str, redirect_uri: &str, device: &str) -> Result<Self> {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let server = key(server);
+        let (state, verifier) = (random_hex(16)?, random_hex(32)?);
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        let mut url = url::Url::parse(&format!("{server}/"))
+            .map_err(|e| Error::Sync(format!("{server} is not a URL: {e}")))?;
+        url.query_pairs_mut()
+            .append_pair("authorize", "app")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", &state)
+            .append_pair("code_challenge", &challenge)
+            .append_pair("device", device);
+        Ok(Self { server, redirect_uri: redirect_uri.to_owned(), url: url.into(), state, verifier })
+    }
+
+    /// Whether `url` is the redirect this sign-in is waiting for.
+    pub fn is_callback(&self, url: &str) -> bool {
+        let strip = |u: &str| u.split(['?', '#']).next().unwrap_or("").trim_end_matches('/').to_owned();
+        strip(url) == strip(&self.redirect_uri)
+    }
+
+    /// Finish with the query of the redirect (`code=…&state=…`, or `error=…`): trade the code for
+    /// a token, save it for the server, and return the account's email.
+    pub fn finish(&self, query: &str, ca_cert: Option<&std::path::Path>) -> Result<String> {
+        let pairs: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query.trim_start_matches('?').as_bytes()).into_owned().collect();
+        if let Some(e) = pairs.get("error") {
+            return Err(Error::Sync(if e == "access_denied" {
+                "sign-in was cancelled".into()
+            } else {
+                e.clone()
+            }));
+        }
+        if pairs.get("state") != Some(&self.state) {
+            return Err(Error::Sync("the answer does not belong to this sign-in".into()));
+        }
+        let code = pairs.get("code").ok_or_else(|| Error::Sync("the answer carries no code".into()))?;
+        let agent = crate::tls::http_agent(ca_cert)?;
+        let body = serde_json::json!({
+            "code": code,
+            "code_verifier": self.verifier,
+            "redirect_uri": self.redirect_uri,
+        });
+        let mut resp = agent
+            .post(format!("{}/api/v1/auth/app/token", self.server))
+            .header("content-type", "application/json")
+            .send(body.to_string().as_bytes())
+            .map_err(|e| Error::Sync(format!("the server did not hand out a token: {e}")))?;
+        let text = resp.body_mut().read_to_string().map_err(|e| Error::Sync(e.to_string()))?;
+        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| Error::Sync(e.to_string()))?;
+        let token = json["token"].as_str().ok_or_else(|| Error::Sync("the server sent no token".into()))?;
+        save(&self.server, token)?;
+        Ok(json["email"].as_str().unwrap_or_default().to_owned())
+    }
+}
+
+/// This machine's name, for naming what it signs in as.
+pub fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "this computer".into())
+}
+
 /// The token out of an invite the admin sent, which may be the whole URL
 /// (`https://notes.example.org/#/invite/<token>`) or just the token. Pasting the link is what
 /// people actually do, so accept both rather than making them edit it.

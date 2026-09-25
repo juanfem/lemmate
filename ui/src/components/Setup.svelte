@@ -19,11 +19,38 @@
   let register = $state(false)
   let invite = $state('')
   let token = $state('')
+  /** The desktop shell's sign-in window (`sign_in_window` in crates/desktop), where there is one. */
+  const shell = (window as unknown as { lemmateShell?: { signIn?: (server: string, ca: string) => void } }).lemmateShell
+  let signedInAs = $state('')
+  /** Sign in through the server's own page — its identity provider, if it has one — and go on
+   *  with the token that leaves behind, as if it had been pasted. */
+  function browserSignIn() {
+    const server = serverUrl.trim().replace(/\/+$/u, '')
+    if (!server) {
+      error = 'Enter the server URL first.'
+      return
+    }
+    error = ''
+    busy = true
+    const onResult = (e: Event) => {
+      window.removeEventListener('lemmate-sign-in', onResult)
+      const d = (e as CustomEvent<{ ok: boolean; email?: string; error?: string }>).detail
+      if (d.ok) {
+        signedInAs = d.email ?? ''
+        void submit()
+      } else {
+        busy = false
+        error = d.error ?? 'Sign-in failed.'
+      }
+    }
+    window.addEventListener('lemmate-sign-in', onResult)
+    shell?.signIn?.(server, '')
+  }
   let error = $state('')
   let busy = $state(false)
 
-  async function submit(e: Event) {
-    e.preventDefault()
+  async function submit(e?: Event) {
+    e?.preventDefault()
     busy = true
     error = ''
     try {
@@ -62,6 +89,11 @@
       <label>Server URL <input bind:value={serverUrl} placeholder="https://notes.example.org" required /></label>
       <fieldset>
         <legend>Account on the server</legend>
+        {#if shell?.signIn}
+          <button type="button" class="primary" onclick={browserSignIn} disabled={busy}>Sign in with your browser</button>
+          {#if signedInAs}<p class="hint">Signed in as {signedInAs}.</p>{/if}
+          <p class="hint">Opens the server’s sign-in page — its identity provider, if it has one — and brings a token back. Or:</p>
+        {/if}
         <label>Email <input type="email" bind:value={email} autocomplete="username" /></label>
         <label>Password <input type="password" bind:value={password} autocomplete="current-password" /></label>
         <label class="check"><input type="checkbox" bind:checked={register} /> Create this account (first account on a new server)</label>

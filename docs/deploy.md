@@ -266,9 +266,10 @@ default; the server then reads it from the userinfo endpoint.
 
 `--disable-password-login` removes email + password sign-in, password registration and
 password changes; the server refuses to start with it and no OIDC issuer. The CLI, MCP and the
-desktop app then sign in with an **access token** made in the web client (*Account → Access
-tokens*): `lemmate login --server … --token lmt_…`, or the token field in the desktop app's
-setup and *Connect a server…* dialogs.
+desktop app then sign in through the browser instead — the desktop app's **Sign in with your
+browser** button, `lemmate login --server … --browser` — which goes through the provider and
+leaves an access token named after the device; or with a token made by hand in the web client
+(*Account → Access tokens*) and given to `--token` or the dialogs' token field.
 
 ### Invites
 

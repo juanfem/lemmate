@@ -2,6 +2,7 @@
 //! See `main.rs` for the binary entry point.
 
 pub mod app;
+pub mod apps;
 pub mod auth;
 pub mod oidc;
 

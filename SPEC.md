@@ -581,6 +581,9 @@ Editing features:
   claims (issuer, audience, expiry, nonce) are checked. An identity is tied to an account by its
   issuer-qualified `sub`; on first sign-in, a *verified* email matching an account ties to it,
   and otherwise the registration doors below decide (an invite link carries through the flow).
+- Native apps sign in through the browser (RFC 8252): the web client at `/?authorize=app` asks
+  the person to allow the app, and a single-use code sent to the app's loopback address is
+  traded, with the PKCE verifier, for an access token named after the device.
 - **Registration has four doors** and no others: the user table is empty (that account becomes
   the admin), `--allow-registration` is on, an admin makes the request, or the request carries a
   valid invite.

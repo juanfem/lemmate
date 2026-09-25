@@ -37,6 +37,11 @@ const SHELL_PREFIX: &str = "/.lemmate-shell/";
 const CLOSE_PATH: &str = "/.lemmate-shell/close-window";
 const OPEN_PATH: &str = "/.lemmate-shell/open-window";
 const EXTERNAL_PATH: &str = "/.lemmate-shell/open-external";
+const SIGN_IN_PATH: &str = "/.lemmate-shell/sign-in";
+/// Where the server sends the sign-in window back to. Never loaded: the window's navigation
+/// handler catches it first (`BrowserSignIn::is_callback`), so no port need be listening.
+const SIGN_IN_CALLBACK: &str = "http://127.0.0.1/lemmate-callback";
+const SIGN_IN_LABEL: &str = "sign-in";
 /// What every relay window's page gets as `window.lemmateShell`: the two requests, as navigations.
 const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
   closeWindow: () => location.assign("/.lemmate-shell/close-window"),
@@ -46,6 +51,7 @@ const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
     location.assign("/.lemmate-shell/open-window?" + q)
   },
   openExternal: (url) => location.assign("/.lemmate-shell/open-external?" + new URLSearchParams({ url: new URL(url, location.href).href })),
+  signIn: (server, ca) => location.assign("/.lemmate-shell/sign-in?" + new URLSearchParams({ server, ca: ca || "" })),
 }"#;
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
@@ -244,8 +250,20 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
         .disable_drag_drop_handler()
         .initialization_script(SHELL_SCRIPT)
         .on_navigation(move |url| {
+            if !url.path().starts_with(SHELL_PREFIX) {
+                return true;
+            }
+            // Signing in is asked for by the setup page too, which no relay serves yet: any page
+            // of this machine's may ask, and the window it opens only ever shows the server.
+            if let Some(ShellRequest::SignIn { server, ca_cert }) = ShellRequest::parse(url)
+                && is_loopback(url)
+            {
+                let (handle, me) = (navigator.clone(), me.clone());
+                tauri::async_runtime::spawn(async move { sign_in_window(&handle, &me, &server, ca_cert) });
+                return false;
+            }
             let served = || navigator.try_state::<Relay>().is_some_and(|r| r.serves(url));
-            if !url.path().starts_with(SHELL_PREFIX) || !served() {
+            if !served() {
                 return true;
             }
             // Acted on once this callback has returned rather than inside it: the callback runs
@@ -293,6 +311,11 @@ enum ShellRequest {
         url: Url,
         position: Option<(f64, f64)>,
     },
+    /// Sign in to `server` through its web page (`sign_in_window`).
+    SignIn {
+        server: String,
+        ca_cert: Option<PathBuf>,
+    },
 }
 
 impl ShellRequest {
@@ -312,6 +335,16 @@ impl ShellRequest {
                 let coord = |name| arg(name).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
                 let position = coord("x").zip(coord("y"));
                 Some(Self::Open { url: target, position })
+            }
+            SIGN_IN_PATH => {
+                let arg =
+                    |name: &str| url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned());
+                let server = arg("server").filter(|s| {
+                    Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+                })?;
+                let ca_cert =
+                    arg("ca").map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).map(PathBuf::from);
+                Some(Self::SignIn { server, ca_cert })
             }
             EXTERNAL_PATH => {
                 let target = url.query_pairs().find(|(k, _)| k == "url").map(|(_, v)| v.into_owned())?;
@@ -356,6 +389,92 @@ fn open_note_window(app: &tauri::AppHandle, url: Url, position: Option<(f64, f64
     }
     if let Err(e) = builder.build() {
         tracing::warn!(error = %e, "could not open a note window");
+    }
+}
+
+/// A page served from this machine: the relay, or the setup server before there is one.
+fn is_loopback(url: &Url) -> bool {
+    url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))
+}
+
+/// Sign in to `server` in a window of its own (the server's `apps.rs`): its web page signs in
+/// however the server does — straight through the identity provider, if that is the only way —
+/// and asks to allow this app; the answer is a redirect to [`SIGN_IN_CALLBACK`], caught here
+/// before it loads, and traded for an access token that is saved like `lemmate login` saves one.
+///
+/// The page that asked hears how it went as a `lemmate-sign-in` event on its window, with
+/// `detail` `{ ok: true, email }` or `{ ok: false, error }` — closing the window counts as a
+/// cancel. Nothing crosses Tauri IPC: the answer is a script evaluated in that page.
+fn sign_in_window(app: &tauri::AppHandle, asker: &str, server: &str, ca_cert: Option<PathBuf>) {
+    let report = {
+        let (app, asker) = (app.clone(), asker.to_owned());
+        move |result: Result<String, String>| {
+            let detail = match result {
+                Ok(email) => serde_json::json!({ "ok": true, "email": email }),
+                Err(error) => serde_json::json!({ "ok": false, "error": error }),
+            };
+            let js =
+                format!("window.dispatchEvent(new CustomEvent('lemmate-sign-in', {{ detail: {detail} }}))");
+            if let Some(w) = app.get_webview_window(&asker) {
+                let _ = w.eval(&js);
+            }
+        }
+    };
+    let device = format!("Lemmate desktop on {}", lemmate_core::credentials::hostname());
+    let flow = match lemmate_core::credentials::BrowserSignIn::start(server, SIGN_IN_CALLBACK, &device) {
+        Ok(f) => f,
+        Err(e) => return report(Err(e.to_string())),
+    };
+    let url: Url = match flow.url.parse() {
+        Ok(u) => u,
+        Err(e) => return report(Err(format!("{e}"))),
+    };
+    // One sign-in at a time: a second request replaces the first.
+    if let Some(old) = app.get_webview_window(SIGN_IN_LABEL) {
+        let _ = old.destroy();
+    }
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (on_nav_done, on_close_done) = (done.clone(), done.clone());
+    let (on_nav_report, on_close_report) = (report.clone(), report);
+    let nav_app = app.clone();
+    let built = WebviewWindowBuilder::new(app, SIGN_IN_LABEL, WebviewUrl::External(url))
+        .title(format!("Sign in to {}", lemmate_core::credentials::key(server)))
+        .inner_size(520.0, 720.0)
+        .on_navigation(move |url| {
+            if !flow.is_callback(url.as_str()) {
+                return true;
+            }
+            on_nav_done.store(true, Ordering::SeqCst);
+            let (flow, query, ca, report, app) = (
+                flow.clone(),
+                url.query().unwrap_or("").to_owned(),
+                ca_cert.clone(),
+                on_nav_report.clone(),
+                nav_app.clone(),
+            );
+            tauri::async_runtime::spawn(async move {
+                if let Some(w) = app.get_webview_window(SIGN_IN_LABEL) {
+                    let _ = w.close();
+                }
+                let result = tauri::async_runtime::spawn_blocking(move || flow.finish(&query, ca.as_deref()))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+                report(result);
+            });
+            false
+        })
+        .build();
+    match built {
+        Ok(window) => window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) && !on_close_done.swap(true, Ordering::SeqCst) {
+                on_close_report(Err("sign-in was cancelled".into()));
+            }
+        }),
+        Err(e) => {
+            done.store(true, Ordering::SeqCst);
+            tracing::warn!(error = %e, "could not open the sign-in window");
+        }
     }
 }
 
@@ -614,6 +733,14 @@ mod tests {
             Some(ShellRequest::Open { url: url("/#/w/01J/01K"), position: None })
         );
         // Only a note window's route, and nothing outside the two paths.
+        assert!(SIGN_IN_PATH.starts_with(SHELL_PREFIX) && SHELL_SCRIPT.contains(SIGN_IN_PATH));
+        assert_eq!(
+            ShellRequest::parse(&url(&format!("{SIGN_IN_PATH}?server=https%3A%2F%2Fnotes.example.org&ca="))),
+            Some(ShellRequest::SignIn { server: "https://notes.example.org".into(), ca_cert: None })
+        );
+        assert_eq!(ShellRequest::parse(&url(&format!("{SIGN_IN_PATH}?server=file%3A%2F%2F%2Fetc"))), None);
+        assert_eq!(ShellRequest::parse(&url(SIGN_IN_PATH)), None);
+        assert!(is_loopback(&url("/")) && !is_loopback(&Url::parse("https://notes.example.org/").unwrap()));
         assert_eq!(ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fv%2F01J"))), None);
         assert_eq!(ShellRequest::parse(&url(OPEN_PATH)), None);
         assert_eq!(ShellRequest::parse(&url("/.lemmate-shell/other")), None);

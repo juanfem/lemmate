@@ -93,7 +93,7 @@ enum Cmd {
         /// Server base URL, e.g. https://notes.example.org
         #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
-        #[arg(long, required_unless_present = "token")]
+        #[arg(long, required_unless_present_any = ["token", "browser"])]
         email: Option<String>,
         /// Password (prompted when omitted).
         #[arg(long, env = "LEMMATE_PASSWORD")]
@@ -101,8 +101,12 @@ enum Cmd {
         /// Save a personal access token instead of signing in with a password — made in the web
         /// client (Account → Access tokens). The way in when the server only signs in through
         /// an identity provider.
-        #[arg(long, conflicts_with_all = ["email", "password", "register", "invite"])]
+        #[arg(long, conflicts_with_all = ["email", "password", "register", "invite", "browser"])]
         token: Option<String>,
+        /// Sign in through the server's web page in your browser — with the identity provider,
+        /// if the server uses one — and save the access token it hands this machine.
+        #[arg(long, conflicts_with_all = ["email", "password", "register", "invite"])]
+        browser: bool,
         /// Create the account instead of signing in (first account, or when registration is open).
         #[arg(long)]
         register: bool,
@@ -400,7 +404,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Login { server, email, password, token, register, invite, ca_cert } => {
+        Cmd::Login { server, email, password, token, browser, register, invite, ca_cert } => {
+            if browser {
+                let device = format!("lemmate CLI on {}", hostname());
+                let email = lemmate_cli::browser::login(&server, &device, ca_cert.as_deref())?;
+                println!(
+                    "signed in as {email} on {}; token saved to {}",
+                    credentials::key(&server),
+                    credentials::location(&server)
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             if let Some(token) = token {
                 let email = credentials::login_with_token(&server, &token, ca_cert.as_deref())?;
                 println!(
@@ -410,7 +424,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 );
                 return Ok(ExitCode::SUCCESS);
             }
-            let email = email.expect("clap: required unless --token");
+            let email = email.expect("clap: required unless --token or --browser");
             let password = match password {
                 Some(p) => p,
                 None => rpassword::prompt_password("Password: ").context("reading password")?,
