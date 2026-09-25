@@ -1,256 +1,140 @@
 # Lemmate
 
-Self-hosted, open-source, multi-user markdown notes. See [SPEC.md](SPEC.md) for the full
-specification; this README covers the repository and the current milestone.
+Self-hosted, open-source, multi-user markdown notes — a replacement for Obsidian that you run
+yourself and can write in together.
 
-## Status: M3 — power features (in progress)
+## What makes it different
+
+**Your notes are plain files, and they never conflict.** A vault is always a folder of `.md`
+files plus their attachments: zip it, `grep` it, open it in vim, point pandoc at it. Underneath,
+every note is a CRDT (Yjs/yrs), and the file is a *projection* of it. Edits from two laptops
+that were offline for a week, from a colleague typing in the same paragraph, or from vim on the
+file itself all merge — there are no `conflicted copy` files and no conflict markers. Leaving
+Lemmate never needs an export step.
+
+**Real-time collaboration on your own server.** Share a whole vault or a single note with other
+people as owner, editor or viewer, or publish a read-only public link. Everyone in a note sees
+the others' cursors. It is one small binary with one SQLite file and no third-party service, shipped
+as a Docker image that runs on a machine at home or any small rented server.
+
+**A server is optional, and not a mode.** The desktop app runs fully standalone: search,
+backlinks, tags, history, trash, daily notes, templates, attachments, import and export all
+work from a local sidecar, with nothing on the network. When you want your other devices or
+other people, *Connect a server…* uploads every vault — history included — and the app carries
+on. Two vaults that should have been one can be **merged**, keeping note ids, history and
+links.
+
+**Offline everywhere.** The desktop app keeps a full local copy and journals edits until the
+server is back. On a phone, the web client installs to the home screen, pulls the whole vault
+into IndexedDB, and reads, edits and searches with the network down.
+
+**Every vault at once.** One window shows every vault you can read as roots of one tree, with
+one search across all of them, tabs and split panes mixing notes from any of them.
+
+**Pandoc-flavoured markdown, rendered properly.** Maths, citations, fenced divs, callouts,
+tables, footnotes, wikilinks and note transclusion, in a CodeMirror 6 *live preview* that never
+rewrites syntax it does not understand. Export any note through **pandoc** (HTML, DOCX, PDF,
+reveal.js, Beamer), or render it with **Quarto** into a pane beside the note — reveal.js decks
+included, with a speaker view, and PDF through Typst with no LaTeX install.
+
+**Scriptable instead of pluggable.** No plugin system, on purpose. Instead: a REST API, a
+`lemmate` CLI that works on local folders and remote vaults alike, and an **MCP server** so AI
+agents can search, read and write notes (edits are diff-merged into the CRDT like anyone else's).
+
+**Coming from Obsidian is one command.** Import converts callouts, embeds, bookmarks and
+daily-note settings — from the CLI, or from the app by picking the folder.
+
+What it deliberately is not: no graph view, canvas or query language, no WYSIWYG, no
+peer-to-peer sync, no end-to-end encryption (the server needs to read notes to search, share and
+render them — encrypt the disk). [SPEC.md](SPEC.md) explains each decision.
+
+## Getting started
+
+Ready-made, unsigned builds for Linux, macOS and Windows — the server and CLI with the web
+client, plus desktop installers (`.deb`/`.rpm`/AppImage, `.dmg`, `.msi`/NSIS) — are produced
+by CI on every push to `main`, and a `v*` tag drafts a release from them. To build from source,
+see [docs/install.md](docs/install.md).
+
+**Just me, one machine.** Start `lemmate-desktop`, pick a notes folder, and leave *Sync with a
+server* unticked. Or, headless in a browser:
+
+```sh
+lemmate serve --root ~/lemmate --web-dir ui/dist
+```
+
+**A server for my devices, or for a team.**
+
+```sh
+docker build -t lemmate . && docker run -p 8080:8080 -v lemmate_data:/data lemmate
+# or, without Docker:
+lemmate-server --data-dir ./data --web-dir ui/dist
+```
+
+The first account to register becomes the admin; after that, accounts come from admins or
+single-use invites (`lemmate invite`). Put it behind a TLS reverse proxy —
+[docs/deploy.md](docs/deploy.md) covers Docker with Caddy (at home or on a rented server), backups, and every flag.
+Then open the server in a browser, point the desktop app at it, or keep a plain folder in sync
+from the command line:
+
+```sh
+lemmate login --server https://notes.example.org --email you@example.org
+lemmate sync  --vault ~/vault --server https://notes.example.org
+```
+
+The [user guide](docs/guide.md) covers writing, organising, sharing, keyboard shortcuts, the
+phone layout, the CLI, export and rendering, and migrating from Obsidian.
+
+## Status
+
+**M0–M2 are done:** the sync core and file projection, the web and desktop clients, accounts,
+roles, sharing and presence. **M3** (power features) has landed pandoc export, Quarto rendering,
+REST and relay writes, the MCP server and remote CLI, the all-vaults workspace, Obsidian import
+from the UI, transclusion, a file manager for non-note files, and the installable offline web
+client with a phone layout. Still owed: an on-screen keyboard toolbar for phones.
+
+There is no native mobile app, by decision: a Tauri mobile shell existed and was removed in
+favour of the installed web client, which already does everything it was for (SPEC §14).
+
+## Repository
 
 | Crate / package | Path | What it is |
 |---|---|---|
-| `lemmate-core` | `crates/core` | Shared engine: yrs CRDT docs (note + vault), text-diff application, SQLite update log + snapshots + FTS, on-disk projection and external-edit ingestion, watcher, markdown indexer, attachments, TLS, the client sync engine (`client::run`) and its **local relay** (`client::start`), Obsidian import, zip export. |
-| `lemmate-server` | `crates/server` | axum: WebSocket sync relay with persistence and retention policy, derived notes/tags/FTS, content-addressed attachments with orphan purge, accounts/sessions/vault roles enforced on REST and the relay, REST (`/api/v1`, including vault deletion for merges), serves the web client. |
-| `lemmate-cli` | `crates/cli` | `lemmate` binary: `login`/`logout`/`passwd`/`invite`, `sync` (with `--serve` relay), `serve` (standalone relay, no server), remote `vaults/ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp` (Model Context Protocol server over stdio), `index`, `search`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
-| `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: starts the relay for every vault under the configured root — with a server, or standalone with none — and opens one window on it. |
-| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client: live preview (headings, emphasis, code, links, wikilinks, image embeds and note transclusion, math, tags, tasks, quotes, callouts, tables, folded front matter), `[[`/`#` autocomplete, **every vault in one tree**, tabs and split panes, one ⌘K palette over notes/folders/full text/commands, a file manager for everything that is not a note (upload to a chosen folder, edit stylesheets, rename with links rewritten), tags, a margin outline, backlinks and tags at the foot of the page, bookmarks, version history in a pane, daily notes + templates, paste/drop attachments, Obsidian import, connecting a server and merging vaults (SPEC §3.2), sharing (users, public links), presence, login. Installable, and works with the network down (service worker, cached notes, offline edits and offline search). Also the markdown indexer sharing `corpus/` with `lemmate-core`. |
-| corpus | `corpus/` | Markdown conformance cases both indexers must satisfy. |
+| `lemmate-core` | `crates/core` | The engine everything shares: CRDT docs for notes and vaults, the SQLite update log with snapshots and FTS, file projection and external-edit ingestion, the markdown indexer, attachments, the sync client and its **local relay**, import, export, pandoc and Quarto. |
+| `lemmate-server` | `crates/server` | axum: the WebSocket sync relay with persistence and retention, derived notes/tags/search, content-addressed attachments, accounts, roles and shares, the REST API, and the web client. |
+| `lemmate-cli` | `crates/cli` | The `lemmate` binary: account commands, `sync`, `serve`, remote `ls/cat/new/edit/mv/rm/daily/find/backlinks/tags`, `mcp`, `import obsidian`, `export zip`, `doctor` — see [crates/cli/README.md](crates/cli/README.md). |
+| `lemmate-desktop` | `crates/desktop` | Tauri 2 shell: runs one sync engine per vault behind one local relay — with a server or without — and opens the web client on it. |
+| `lemmate-ui` | `ui/` | Svelte 5 + CodeMirror 6 client, used by the browser and the desktop app alike, and the TypeScript markdown indexer. |
+| corpus | `corpus/` | Markdown cases the Rust and TypeScript indexers must agree on. |
 
-M0, M1 and M2 are complete (split panes and the desktop setup screen included); see
-`docs/deploy.md` for Docker and fly.io. M3 so far: pandoc export, REST/relay writes, MCP server,
-remote CLI, the all-vaults workspace, Obsidian import from the UI, note transclusion, rendering
-with Quarto, and an installable web client that works offline; the on-screen keyboard toolbar
-remains. The
-native mobile shell was dropped — see [Still to come](#still-to-come).
+### How it fits together
 
-Verification: `cargo test --workspace --exclude lemmate-desktop`
-(Rust — the Tauri crate needs webkit2gtk and an existing `ui/dist`, so CI type-checks it in a
-job that has them), `cd ui && npm test` (corpus plus live e2e when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at built
-binaries), and `ui/scripts/cdp.mjs` for headless-Chrome smoke runs against a running server —
-including `offline:` steps that cut the network on a live page. CI additionally compiles the
-whole workspace, the Tauri shell included, on macOS and Windows.
+The desktop app does not talk to the server directly. It embeds a **local relay** — the same
+protocol and API the server speaks, answered from each vault's `.lemmate/` sidecar — and the
+window is the ordinary web client pointed at it. That is why the desktop works offline, why
+standalone is the full app, and why there is only one UI to maintain.
 
-Install: CI packages unsigned builds for Linux, macOS and Windows on every push to `main` — the
-binaries plus `web/` in one archive, and the desktop installers (`.deb`/`.rpm`/AppImage, `.dmg`,
-`.msi`/NSIS) beside it — and a `v*` tag drafts a release from them; to build instead, see
-[`docs/install.md`](docs/install.md). User guide (writing, organising, sharing, shortcuts, CLI,
-export, Obsidian migration): [`docs/guide.md`](docs/guide.md).
-
-## Without a server
-
-The desktop app does not need one. Leave `server_url` out of `desktop.toml` — or answer the
-setup screen without ticking *Sync with a server* — and it runs **standalone**: each vault is a
-folder under the root you picked, and nothing goes on the network.
-
-```sh
-lemmate-desktop --root-dir ~/lemmate                       # standalone desktop app
-lemmate serve --root ~/lemmate --web-dir ui/dist           # …the same, headless, in a browser
-```
-
-This is not a cut-down mode. The relay the window talks to already answers everything the UI
-asks — the tree, cross-vault search, backlinks, tags, outline, trash, history, daily notes,
-templates, attachments, Obsidian import, pandoc export — out of each vault's `.lemmate/`
-sidecar, because that is what makes the app work offline. What a server adds is what a server
-is for: your other devices, other people, sharing and public links, accounts. Those are not
-offered in a standalone window, and the status line reads `local` rather than `online`.
-
-**Adding a server later** is a command in the palette: *Connect a server…*. It signs in (or
-registers, or redeems an invite), checks the server actually answers before touching anything,
-writes `desktop.toml` and restarts the app onto it. Every vault on the machine then goes up as
-its own vault, notes, history and attachments included — a vault nobody owns is claimed by the
-account that syncs it. Wrong password, unreachable host, untrusted private CA: all reported in
-the dialog rather than discovered after a restart that syncs nothing. If a vault id already
-belongs to somebody else, the server's refusal is shown in the window instead of being swallowed
-by the loopback socket.
-
-**Or fold one vault into another**: *Merge a vault into another…* in the palette moves every
-note of one vault into a folder of the other — **keeping their ids**, their history and their
-attachments, so links and backlinks still resolve — and then erases the vault they came from,
-here and on the server. It shows the plan first: where each note lands, which names collided and
-were numbered, which attachments are copied, renamed (with the notes that point at them
-rewritten) or already identical. A vault whose server is unreachable refuses to be merged away,
-since the last step is deleting it there.
-
-## Accounts and access
-
-`lemmate-server` has accounts on by default. The first account to register becomes the admin;
-after that only admins create accounts unless `--allow-registration` is set. Sessions are
-opaque tokens (hashed at rest), sent as `Authorization: Bearer …` by native clients and as an
-HttpOnly cookie by the browser. Vaults have members with roles — **owner** (manages members),
-**editor**, **viewer** — and a vault nobody owns yet is claimed by the first user who syncs it.
-The relay checks every frame: viewers can read, editors write. `--no-auth` turns all of this
-off for local development (the server warns loudly; never expose it that way).
-
-On a server with registration closed, `lemmate invite` mints **single-use registration invites**
-(admin only; `--list`, `--revoke`, `--expires-days`). The recipient redeems one with `lemmate
-login --invite <link-or-token>`, which implies `--register`, or by opening the link in a browser.
-`lemmate passwd` changes a password: your own, which asks for the current one and drops your
-other sessions, or — with `--email`, as an admin — someone else's, which does not.
-
-```sh
-lemmate-server --data-dir ./data --web-dir ui/dist            # accounts on
-lemmate login --server https://notes.example.org --email you@example.org --register   # first account
-lemmate sync  --vault ~/vault --server https://notes.example.org   # uses the saved token
-```
-
-## Vaults in the client
-
-The web and desktop clients show **every vault you can read at once**: the tree's roots are the
-vaults, tabs may hold notes from different ones, the palette lists them all, and search
-runs across them (`GET /api/v1/search`). Tags, history, trash and sharing are per vault and
-follow the focused note. It is all one WebSocket — frames are addressed by doc id, so the
-connection was never per vault. A vault can be given a name (stored in the vault doc, shared
-with every replica); without one the tree shows a short form of its id.
-
-The desktop is the same workspace, not a cut-down one: its local relay holds **one sync engine
-per vault** — each with its own folder under the root you picked, its own sidecar and its own
-connection — so the tree has the same roots the web client shows, and every one of them keeps
-working with the server unreachable.
-
-The Files sidebar offers two browsers over the same folders, switched from its toolbar: the
-interleaved **tree**, and a **folders/notes split** after Obsidian's *File Tree Alternative*
-(folders on top, the selected folder's notes below, with a toggle for reaching into
-subfolders). The toolbar also expands and collapses everything and reveals the open note. The
-sidebar itself, and the split inside it, are draggable.
-
-Both browsers **multi-select** (Ctrl/Cmd-click, Shift-click for a range), **drag** notes and
-folders onto any folder or vault row, and carry a **right-click menu**. A move inside a vault
-is a rename and `[[links]]` follow it; a move to another vault is a copy plus a delete — new
-id, attachments carried over — and is confirmed first.
-
-Each **pane** shows its note in one of three views (SPEC §8), switched in the note header or
-with `Ctrl+E`: **live** preview, plain **source**, or **reading** (rendered, read-only). All
-three are the same CodeMirror view reconfigured, so there is no second renderer to drift.
-
-Opening a note **reuses the current tab**, so browsing does not accumulate tabs; the displaced
-one goes on the `Ctrl+Shift+T` stack. Pinned tabs are never displaced. The ＋ on the tab strip
-opens an empty tab, and the right-click menu can open into a new tab or a new pane.
-
-**Importing an Obsidian vault** is a command in the palette, or the ⇥ button on a vault row:
-pick the folder and the browser uploads it in batches to `POST /api/v1/vaults/{vault}/import`,
-which runs the same conversion as `lemmate import obsidian` (callouts → fenced divs, image
-embeds → `![](…)`, bookmarks and daily-note settings kept). Re-uploading skips paths the vault
-already has, so an interrupted import is resumed by running it again.
-
-## Offline
-
-The web client is **installable** — "Add to Home Screen" on iOS, the install button in a
-Chromium browser — and starts with no network: a service worker precaches the built shell, and
-`y-indexeddb` holds the vault doc and the notes. `/api/` and `/ws` are never cached, so they
-fail honestly and the client shows its offline state instead of a stale answer.
-
-Once installed, the client fetches the whole vault in the background and re-checks the listing
-when the vault doc syncs, every minute, and whenever the app returns to the foreground, so the
-copies do not freeze at whatever was opened first. A plain browser tab caches only what you
-open — a tab is often someone else's machine.
-
-Offline you can read and edit what is on the device and search it: each cached note is indexed
-with the same markdown parser the server runs and kept in IndexedDB. Those results are broader
-and more crudely ordered than the server's (substring matching, occurrence counts rather than
-FTS5 and bm25), and the pane says `offline` while they are in use. Edits outlive the view that
-made them — a note edited and closed stays subscribed until the server acknowledges it, across
-restarts. Backlinks, tags, trash, history, sharing and un-fetched attachments still need the
-server (SPEC §6.4).
-
-## Export
-
-`POST /api/v1/vaults/{v}/notes/{id}/export {"format": "html"|"docx"|"pdf"|"revealjs"|"beamer"|"markdown"}`
-renders a note through **pandoc** (`--pandoc PATH` / `LEMMATE_PANDOC`, default: on `PATH`; 501 when
-absent) with the SPEC §5 reader extensions, wikilinks included; a vault `export/` folder may
-provide `defaults.yaml`, `references.bib`, `style.csl`. PDF/Beamer need a LaTeX engine next to
-pandoc.
-
-**Render with Quarto** (SPEC §5.6) is `POST …/notes/{id}/render {"format": "html"|"pdf"|"docx"|"revealjs"}`,
-on the server and the local relay alike: the note with its own front matter and the attachments
-it references, through `quarto render --no-execute` (`--quarto PATH` / `LEMMATE_QUARTO`, default
-on `PATH`; 501 when absent). The UI shows the HTML in a sandboxed pane beside the note. PDF goes
-through Typst, so it needs no LaTeX. A server can refuse renders with `--disable-quarto` /
-`LEMMATE_DISABLE_QUARTO` — front matter can name Lua filters, and those would run on the host.
-The Docker image ships Quarto (and uses its pandoc for export).
-
-## Desktop
-
-`lemmate-desktop` reads `desktop.toml` from the per-user configuration directory
-(`~/.config/lemmate`, `~/Library/Application Support/lemmate`, `%APPDATA%\lemmate`;
-`LEMMATE_CONFIG_DIR` overrides); without one it opens a setup screen
-(notes folder, and an optional server with its account) and writes it. That folder is a *root*:
-every vault the account can read is opened in its own subfolder below it — standalone, the
-subfolders that are there — and `vault_dir` still opens exactly one. Sessions come from
-`lemmate login` or the setup screen. The window is the web client served by the embedded relay,
-so it works offline, and with no server at all.
-
-## `lemmate sync`
-
-```sh
-# machine 1: publish a folder as a new vault (prints the vault id; also stored in .lemmate/)
-lemmate sync --vault ~/vault --server http://127.0.0.1:8080 --once
-
-# machine 2: join it into an empty folder, then keep watching
-lemmate sync --vault ~/vault --server http://127.0.0.1:8080 --vault-id <ULID>
-```
-
-Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the **local relay**: the engine
-serves the sync socket, the API (from the local store), and the web client on loopback, so a UI
-at `http://127.0.0.1:8081/` keeps working with the server unreachable; edits are journaled and
-pushed when it returns. This is what the desktop app embeds.
-
-Without `--once` the command runs until interrupted, reconnecting with backoff; while offline,
-edits are journaled in `<vault>/.lemmate/local.db` and reconciled on reconnect. Renames are
-detected by content hash within 2 s; deletions go to the trash (the note's history is kept).
-
-**Attachments.** Any local file a note references — `![[logo.png]]`, `![alt](img/x.png)`,
-`[pdf](../attachments/paper.pdf)` — is an attachment: it is uploaded (content-addressed, blake3)
-and recorded in the vault doc as *path → hash*, so other replicas fetch it to the same relative
-place. Unreferenced files are not synced. Editing an attachment re-uploads it; deleting one
-that is still referenced restores it (drop the reference to drop the file).
-
-**TLS.** `--server https://…` uses `wss://` for sync and `https://` for transfers. A private CA
-is trusted with `--ca-cert ca.pem` (`LEMMATE_CA_CERT`); the server itself expects a reverse proxy
-or platform TLS in front of it.
-
-**History.** Every update is journaled. A snapshot is taken after 500 updates or 10 minutes;
-updates older than 90 days that a snapshot makes redundant are pruned (server flags
-`--snapshot-every-updates`, `--snapshot-every-minutes`, `--retain-days`).
+Sync is one WebSocket per client. Each binary frame is `u16 doc-id length | doc id | Yjs v1
+message`, where the doc id is a note ULID or `vault:<ulid>`, so every vault shares the one
+socket. A client sends `SyncStep1` per doc; the server answers with what the client is missing
+and its own state vector; after that both sides exchange updates, which the server persists and
+fans out. Permission checks gate reads on `SyncStep1` and writes on `Update`. Server-side
+metadata — note list, tags, links, full-text index — is derived from that stream, never a second
+source of truth.
 
 ## Build and test
 
 ```sh
 cargo build --workspace --exclude lemmate-desktop
 cargo test  --workspace --exclude lemmate-desktop
-cargo check -p lemmate-desktop                        # webkit2gtk; ui/dist must exist
-cargo run -p lemmate-cli -- doctor
-cargo run -p lemmate-cli -- index corpus/basic.md --json
-cargo run -p lemmate-cli -- search /path/to/vault "quick fox"
-cargo run -p lemmate-cli -- sync --vault /path/to/vault --server http://127.0.0.1:8080 --once
-cargo run -p lemmate-cli -- serve --root /path/to/notes --web-dir ui/dist   # no server at all
-cargo run -p lemmate-server -- --data-dir ./data        # http://127.0.0.1:8080/healthz
-cargo run -p lemmate-desktop -- --vault-dir /path/to/vault --server-url http://127.0.0.1:8080
-(cd ui && npm install && npm test)                    # TypeScript side of the corpus test
+cargo check -p lemmate-desktop                 # needs webkit2gtk, and an existing ui/dist
+(cd ui && npm install && npm run build && npm test)
+cargo run -p lemmate-server -- --data-dir ./data --web-dir ui/dist    # http://127.0.0.1:8080
 ```
 
-Requires Rust 1.95+ and, for the web assets, Node 24+. SQLite is bundled. `pandoc`/`quarto` are
-optional and only used for export. Per-platform prerequisites, `cargo install`, and the desktop
-bundles (`.deb`/AppImage, `.dmg`, `.msi`) are in [`docs/install.md`](docs/install.md).
-
-## Sync protocol in one paragraph
-
-One WebSocket per client. Each binary message is a frame: `u16 doc-id length | doc id |
-Yjs v1 protocol message`. Doc ids are note ULIDs or `vault:<ulid>`. A client sends
-`SyncStep1(state vector)` per doc it wants; the server replies with `SyncStep2` (what the client
-is missing) and its own `SyncStep1`; thereafter both sides exchange `Update` messages, which the
-server persists and fans out to other subscribers of that doc. Awareness messages are relayed
-as-is. Permission checks (M2) gate `SyncStep1` (read) and `Update` (write).
-
-## Still to come
-
-Everything in the table above exists today. What M3 still owes: the on-screen keyboard
-toolbar.
-
-**The native mobile shell is gone.** There was a `crates/mobile` — a Tauri 2 shell that got as
-far as an unsigned Android APK that assembled but had never run on a device, with iOS untried
-for want of a Mac. It was drifting away from the desktop and web behaviour faster than it was
-gaining ground, and the phone case is already covered: the web client installs to the home
-screen, holds the whole vault in IndexedDB, and works with the network down. It was removed in
-favour of that, and its history is in git if a native shell is ever wanted again — though the
-sane starting point then is the web client, not the old crate.
+Requires Rust 1.95+ and Node 24+; SQLite is bundled; `pandoc` and `quarto` are optional. The
+UI tests run live end-to-end suites too when `LEMMATE_SERVER_BIN`/`LEMMATE_CLI_BIN` point at
+built binaries, and `ui/scripts/cdp.mjs` drives headless Chrome against a running server. CI
+also compiles the whole workspace, the Tauri shell included, on macOS and Windows.
 
 ## License
 
