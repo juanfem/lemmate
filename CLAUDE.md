@@ -11,7 +11,7 @@ format and keeps its name.
 re-litigate: CRDT is the truth and files are a projection; CodeMirror 6 live preview, not
 WYSIWYG; Tauri 2 desktop shell, and no native mobile one — §14; no P2P, no plugins, no E2E
 encryption). `README.md` has the
-milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Docker/fly.io.
+milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Docker behind Caddy, at home or on a rented server.
 
 ## Layout
 

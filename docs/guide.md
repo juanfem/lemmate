@@ -36,7 +36,7 @@ You need one to reach your notes from more than one device, to share anything, o
 web client and the phone. For one computer, skip to §1b and leave the server out: the desktop
 app runs standalone and nothing goes on the network.
 
-See [`deploy.md`](deploy.md) for Docker, a Caddy reverse proxy, fly.io, and backups. The short
+See [`deploy.md`](deploy.md) for Docker, a Caddy reverse proxy, running on a rented server, and backups. The short
 version:
 
 ```sh

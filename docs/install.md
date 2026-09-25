@@ -70,7 +70,7 @@ cargo install --path crates/server     # lemmate-server
 
 `ui/dist` is *not* installed with the server: keep the checkout, or copy the folder somewhere
 stable and point `--web-dir` (`LEMMATE_WEB_DIR`) at it. See [`deploy.md`](deploy.md) for running
-the server for real — Docker, a reverse proxy, fly.io, backups.
+the server for real — Docker, a reverse proxy, a rented server, backups.
 
 ## Building the desktop app
 

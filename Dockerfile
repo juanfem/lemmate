@@ -101,7 +101,7 @@ COPY --from=build /src/target/release/lemmate        /usr/local/bin/lemmate
 COPY --from=ui    /ui/dist                         /app/web
 
 # lemmate.db + attachments/ live here. Created (and owned) before VOLUME so a fresh named volume
-# inherits the ownership. Bind mounts and fly.io volumes are root-owned and need a manual chown
+# inherits the ownership. Bind mounts are root-owned and need a manual chown
 # — see docs/deploy.md.
 RUN mkdir -p /data && chown -R 10001:10001 /data
 VOLUME ["/data"]

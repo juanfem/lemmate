@@ -3,12 +3,11 @@
 `lemmate-server` is a single binary. It keeps everything in one directory (`--data-dir`):
 `lemmate.db` (SQLite: update log, snapshots, derived index, accounts, sessions) and
 `attachments/` (content-addressed blobs). It speaks plain HTTP and expects **TLS to be
-terminated in front of it** — a reverse proxy on a home server, or the platform's terminator on
-fly.io.
+terminated in front of it** — a reverse proxy, Caddy in the recipe below.
 
-Two deployment shapes are covered here. Both use the [`Dockerfile`](../Dockerfile) at the repo
-root, which builds the web client (`ui/dist`), `lemmate-server`, and the `lemmate` CLI, and ships
-them on `debian:bookworm-slim` as uid `10001`.
+The recipe is the same on a machine at home and on a rented one — see (b). It uses the
+[`Dockerfile`](../Dockerfile) at the repo root, which builds the web client (`ui/dist`),
+`lemmate-server`, and the `lemmate` CLI, and ships them on `debian:bookworm-slim` as uid `10001`.
 
 ## Flags and environment variables
 
@@ -39,7 +38,7 @@ error: invalid value '1' for '--no-auth'
 ```
 
 `LEMMATE_SECURE_COOKIES=false` is valid and equivalent to leaving the variable unset. Use the
-spelled-out words in Compose files, `fly.toml`, and systemd units.
+spelled-out words in Compose files and systemd units.
 
 Log verbosity is `RUST_LOG` (`tracing_subscriber::EnvFilter`), defaulting to
 `info,tower_http=debug`.
@@ -57,7 +56,7 @@ Liveness endpoint: `GET /healthz` → `ok`, unauthenticated.
 
 ---
 
-## (a) Docker on a home server, behind Caddy
+## (a) Docker behind Caddy
 
 ### Run the container
 
@@ -131,52 +130,33 @@ lemmate sync  --vault ~/vault --server https://notes.example.org
 
 ---
 
-## (b) fly.io
+## (b) Without a machine at home
 
-[`fly.toml`](../fly.toml) at the repo root is a ready template; replace the `app` name and
-`primary_region` placeholders first.
+Rent a small Linux server with a persistent disk and run (a) on it unchanged:
+Docker, the container, Caddy in front, a DNS name pointing at it. Nothing in Lemmate is tied to
+a provider, and there is no platform-specific configuration to keep up to date. A few things to
+look for when choosing one:
 
-```sh
-# 1. Claim the app name. --no-deploy stops fly from building before the volume exists;
-#    answer "no" when it offers to overwrite fly.toml.
-fly launch --no-deploy
+- **Size.** The server itself is small — one process, one SQLite file. A single vCPU and 1 GB of
+  RAM is plenty for a handful of users; Quarto renders are the heaviest thing it does. The disk
+  holds the history and every attachment, so size it for those.
+- **It must stay up.** Clients hold a sync socket open. A platform that suspends idle
+  containers or scales to zero looks like an outage to them and pushes every client into
+  reconnect backoff — pick a plain virtual machine, or turn that behaviour off.
+- **One machine only.** `lemmate.db` is a single SQLite file on a single disk; two instances
+  cannot share it. Scale up, never out.
+- **Ports 80 and 443 reachable**, so Caddy can obtain its certificate.
 
-# 2. Create the volume the [[mounts]] block refers to, in the app's primary region.
-#    3 GB is a comfortable start; `fly volumes extend` grows it later.
-fly volumes create lemmate_data --size 3
-
-# 3. Build the Dockerfile and release it.
-fly deploy
-
-# 4. Watch it come up; the [checks] block polls /healthz.
-fly status
-fly logs
-```
-
-Then register the first account against the deployed URL:
+Build the image on your own machine rather than on the server: compiling the Rust workspace
+wants several GB of RAM, which a small VM does not have. Then copy it across:
 
 ```sh
-lemmate login --server https://lemmate-yourname.fly.dev --email you@example.org --register
-lemmate sync  --vault ~/vault --server https://lemmate-yourname.fly.dev
+docker build -t notes .
+docker save notes | gzip | ssh you@server 'gunzip | docker load'
 ```
 
-`fly.toml` sets `LEMMATE_SECURE_COOKIES = "true"` because `force_https = true` guarantees HTTPS,
-and `auto_stop_machines = "off"` with `min_machines_running = 1` because the relay must stay
-reachable for clients holding sync sockets — a suspended machine looks like an outage and
-pushes every client into reconnect backoff.
-
-**One machine only.** `lemmate.db` is a single SQLite file on a single volume; two machines cannot
-share it and Fly will not attach one volume to two machines. Scale up (`fly scale vm`), never
-out (`fly scale count`).
-
-**Volume ownership on Fly.** Fly attaches volumes as an empty root-owned filesystem, so the
-non-root container cannot write to `/data` on the very first boot. If the first deploy crashes
-with a permission error creating `lemmate.db`, fix it once:
-
-```sh
-fly ssh console --user root -C "chown -R 10001:10001 /data"
-fly apps restart lemmate-yourname
-```
+Register the first account as soon as the server answers — (e) explains why — and set up
+backups as in (c): a rented disk is no safer than one at home.
 
 ---
 
@@ -213,9 +193,8 @@ docker run --rm -v lemmate_data:/data -v "$PWD/backup:/backup" alpine:3 \
 Both commands are safe to run against a live server: `.backup` takes a consistent snapshot
 through SQLite itself, and blobs are never rewritten in place.
 
-On fly.io, `fly volumes snapshots list <volume-id>` shows the automatic daily snapshots
-(retained 5 days by default); `fly ssh console` + the `.backup` command above gets you an
-off-platform copy, which the snapshots are not a substitute for.
+If the provider offers disk snapshots, they are a useful extra but not a backup: they live on
+the same platform as the server. Keep a `.backup` copy somewhere else.
 
 Restoring is the reverse: stop the server, put `lemmate.db` and `attachments/` back in the data
 directory, start it. Sync clients reconcile from their own journals on reconnect, so a restore
@@ -284,7 +263,7 @@ running on their machines, which then need `lemmate login` again.
 `AuthMode::Disabled`, and every request — REST, relay frames, attachment uploads — is then
 treated as a local owner with no token at all. Anyone who can reach the port owns every vault.
 The server logs a warning at startup when it is on. The same applies to `LEMMATE_NO_AUTH`, which
-is the same switch by another name; keep it out of Compose files and `fly secrets`.
+is the same switch by another name; keep it out of Compose files and environment files.
 
 **The first registered account is the admin.** Registration is allowed when *any* of these hold
 (`crates/server/src/auth.rs`): the user table is empty, `--allow-registration` is set, the
@@ -293,7 +272,7 @@ server the very first `POST /api/v1/auth/register` — i.e. `lemmate login --reg
 without credentials and creates an admin; every later attempt is `403` unless one of the other
 three conditions applies.
 
-Deploy and register immediately. Between `fly deploy` and your first `lemmate login --register`,
+Deploy and register immediately. Between starting the server and your first `lemmate login --register`,
 whoever reaches the URL first becomes the admin.
 
 **`--allow-registration` opens self-service signup to the whole internet.** Leave it off for a

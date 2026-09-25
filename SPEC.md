@@ -28,7 +28,7 @@ Extensibility is provided by an HTTP API, a CLI, and an MCP server instead.
    ordinary edits.
 3. **Lossless editing.** The editor never rewrites syntax it does not understand.
 4. **Self-hosted first.** One binary, one SQLite file, one attachments directory. No mandatory
-   third-party services. A fly.io recipe exists for people without a home server.
+   third-party services. Without a home server, the same Docker recipe runs on any rented VM.
 5. **Keyboard first.** Every navigation action has a shortcut; the command palette reaches
    every command.
 6. **Small surface.** A feature is added only if it removes friction from the workflows in §1.
@@ -734,8 +734,8 @@ little more than an icon the web client also has.
 If a native shell is ever wanted again, the starting point is the web client — a Tauri window
 around the bundle that already works there — not the removed crate. Its history stays in git.
 
-Minimum: single-binary server on Linux amd64/arm64; Docker image; `fly.toml` with a
-persistent volume for `lemmate.db` and attachments.
+Minimum: single-binary server on Linux amd64/arm64; Docker image with a
+persistent volume for `lemmate.db` and attachments, runnable on any Linux host.
 
 ---
 
@@ -768,7 +768,7 @@ desktops. Usable as a daily driver.
 
 **M2 — Multi-user and web**
 Accounts, OIDC, vault roles, per-note shares, public links, real-time cursors/presence,
-version history, trash, web client, Docker + fly.io recipe.
+version history, trash, web client, Docker recipe.
 
 **M3 — The phone, and power features**
 An installable offline web client — which is what the phone gets, the native mobile apps having
