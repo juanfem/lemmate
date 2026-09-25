@@ -638,8 +638,11 @@ page shows **Sign in with <provider>**. The first time an identity signs in:
 
 After that the identity always signs into the same account, whatever its email becomes. A
 server can turn passwords off entirely (`--disable-password-login`); the password fields, the
-password change and password registration then disappear, and invites create accounts through
-the provider.
+password change and password registration then disappear, invites create accounts through the
+provider, and opening the site goes straight to the provider with no page in between — except
+right after signing out (the provider's own session would sign you straight back in) or after a
+failed attempt, when the page stays to show why. A render link opened without a session comes
+back to that render once you are signed in.
 
 **Access tokens** are for the CLI, scripts, MCP and the desktop app, and are the way to reach a
 server with passwords turned off from any of them. Make one under **Account, password, tokens and

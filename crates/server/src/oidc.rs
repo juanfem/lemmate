@@ -99,6 +99,8 @@ struct Pending {
     nonce: String,
     verifier: String,
     invite: Option<String>,
+    /// Where to send the browser once signed in (`local_path`).
+    next: Option<String>,
     created: Instant,
 }
 
@@ -176,6 +178,20 @@ struct StartParams {
     /// needs an account.
     #[serde(default)]
     invite: Option<String>,
+    /// A page of this site to come back to after signing in, e.g. a render opened without a
+    /// session. Anything but a local path is ignored.
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// `next` if it is a path on this site — `/…`, never `//host/…` or anything a browser could
+/// read as another origin — so the parameter cannot turn sign-in into an open redirect.
+fn local_path(next: &str) -> Option<String> {
+    let ok = next.starts_with('/')
+        && !next.starts_with("//")
+        && !next.contains('\\')
+        && !next.chars().any(|c| c.is_control() || c.is_whitespace());
+    ok.then(|| next.to_owned())
 }
 
 async fn start(State(state): State<Arc<AppState>>, Query(p): Query<StartParams>) -> Response {
@@ -208,7 +224,8 @@ async fn start(State(state): State<Arc<AppState>>, Query(p): Query<StartParams>)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
     let invite = p.invite.map(|i| lemmate_core::credentials::invite_token(&i)).filter(|t| !t.is_empty());
-    oidc.remember(csrf, Pending { nonce, verifier, invite, created: Instant::now() });
+    let next = p.next.as_deref().and_then(local_path);
+    oidc.remember(csrf, Pending { nonce, verifier, invite, next, created: Instant::now() });
     Redirect::to(url.as_str()).into_response()
 }
 
@@ -277,7 +294,7 @@ async fn callback(State(state): State<Arc<AppState>>, Query(p): Query<CallbackPa
     };
     drop(store);
     info!(user = %user.email, "signed in through OIDC");
-    let mut resp = Redirect::to("/").into_response();
+    let mut resp = Redirect::to(pending.next.as_deref().unwrap_or("/")).into_response();
     if let Ok(v) = HeaderValue::from_str(&auth::session_cookie(&state, &token)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
@@ -568,6 +585,20 @@ mod tests {
         );
         assert!(check_claims(&with("nonce", "n2".into()), "https://idp", "app", "n1", now).is_err());
         assert!(check_claims(&with("sub", "".into()), "https://idp", "app", "n1", now).is_err());
+    }
+
+    #[test]
+    fn only_local_paths_are_followed_after_sign_in() {
+        assert_eq!(
+            local_path("/api/v1/vaults/X/notes/Y/render?format=html").as_deref(),
+            Some("/api/v1/vaults/X/notes/Y/render?format=html")
+        );
+        assert_eq!(local_path("/"), Some("/".into()));
+        for bad in
+            ["//evil.example/", "https://evil.example/", "/\\evil.example", "evil", "/a b", "/a\nb", ""]
+        {
+            assert_eq!(local_path(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

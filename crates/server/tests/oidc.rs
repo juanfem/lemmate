@@ -143,10 +143,12 @@ impl World {
     /// Run one sign-in as the identity `claims` describes (iss/aud/nonce filled in), optionally
     /// through an invite. Returns the callback's redirect target and the session cookie it set.
     async fn sign_in(&self, claims: Value, invite: Option<&str>) -> (String, Option<String>) {
-        let start = match invite {
-            Some(i) => format!("http://{}/api/v1/auth/oidc/start?invite={i}", self.lemmate),
-            None => format!("http://{}/api/v1/auth/oidc/start", self.lemmate),
-        };
+        self.sign_in_with(claims, &invite.map(|i| format!("invite={i}")).unwrap_or_default()).await
+    }
+
+    /// As [`World::sign_in`], with `query` on the start URL.
+    async fn sign_in_with(&self, claims: Value, query_string: &str) -> (String, Option<String>) {
+        let start = format!("http://{}/api/v1/auth/oidc/start?{query_string}", self.lemmate);
         let (status, to_provider, _, _) = fetch(start, None).await;
         assert!((300..400).contains(&status), "{status}");
         let q = query(&to_provider);
@@ -293,4 +295,21 @@ async fn a_token_for_another_sign_in_is_refused() {
     let (to, cookie) = w.sign_in(json!({"sub": "x", "email": "x@x.org"}), None).await;
     assert_eq!(to, "/");
     assert!(cookie.is_some());
+}
+
+/// A sign-in that began on the way to a page (a render opened without a session) ends on that
+/// page — but only on a page of this site.
+#[tokio::test]
+async fn a_sign_in_returns_to_the_page_it_began_on() {
+    let w = world(true, false).await;
+    let page =
+        "/api/v1/vaults/01M3BY7DBTH2MBSFPHBNWQ1X4C/notes/01M3BY7DBTH2MBSFPHBNWQ1X4D/render?format=html";
+    let q = url::form_urlencoded::Serializer::new(String::new()).append_pair("next", page).finish();
+    let (to, cookie) = w.sign_in_with(json!({"sub": "a", "email": "a@x.org"}), &q).await;
+    assert_eq!(to, page);
+    assert!(cookie.is_some());
+    let q =
+        url::form_urlencoded::Serializer::new(String::new()).append_pair("next", "//evil.example/").finish();
+    let (to, _) = w.sign_in_with(json!({"sub": "a", "email": "a@x.org"}), &q).await;
+    assert_eq!(to, "/", "another origin is never followed");
 }

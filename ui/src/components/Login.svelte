@@ -1,16 +1,39 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { api, ApiError, type AuthConfig } from '../lib/api.ts'
+  import { renderReturn } from '../lib/next.ts'
 
-  let { onDone, invite = null }: { onDone: () => void; invite?: string | null } = $props()
+  let {
+    onDone,
+    invite = null,
+    stay = false,
+  }: {
+    onDone: () => void
+    invite?: string | null
+    /** Just signed out: offer the provider, do not go to it (its session would sign us back in). */
+    stay?: boolean
+  } = $props()
   // What the server offers: passwords, an identity provider, or both. Until it answers, assume
   // passwords, which is what every server without OIDC does.
   let config = $state<AuthConfig | null>(null)
+  // Nothing is drawn until the server has said what it offers, so a provider-only server never
+  // flashes a password form on its way to the provider.
+  let loaded = $state(false)
   $effect(() => {
-    api.authConfig().then((c) => (config = c), () => {})
+    api.authConfig().then(
+      (c) => ((config = c), (loaded = true)),
+      () => (loaded = true),
+    )
   })
   let passwords = $derived(config?.password_login ?? true)
-  let oidcHref = $derived(`/api/v1/auth/oidc/start${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`)
+  // A render opened without a session comes back to itself after the round trip.
+  const next = renderReturn(location.search)
+  let oidcHref = $derived.by(() => {
+    const q = new URLSearchParams()
+    if (invite) q.set('invite', invite)
+    if (next) q.set('next', next)
+    return `/api/v1/auth/oidc/start${q.size ? `?${q}` : ''}`
+  })
   // A sign-in through the identity provider that failed comes back as `?signin_error=…`: show
   // it once, and take it out of the address bar so a reload does not show it again.
   const signinError = new URLSearchParams(location.search).get('signin_error')
@@ -25,6 +48,12 @@
   let password = $state('')
   let name = $state('')
   let error = $state(untrack(() => signinError ?? ''))
+  // When the identity provider is the only way in, this page has nothing to ask: go straight
+  // there. Not after a failed attempt, though — that would loop, and the reason would never show.
+  let redirecting = $derived(!!config?.oidc && !config.password_login && !signinError && !stay)
+  $effect(() => {
+    if (redirecting) location.replace(oidcHref)
+  })
   let busy = $state(false)
 
   async function submit(e: Event) {
@@ -56,7 +85,10 @@
 <main class="login">
   <form onsubmit={submit}>
     <h1>Lemmate</h1>
-    {#if config?.oidc}
+    {#if !loaded || redirecting}
+      <p class="muted">{redirecting ? `Signing in with ${config?.oidc}…` : 'Loading…'}</p>
+    {:else if config?.oidc}
+      {#if stay && !passwords}<p class="muted">You are signed out.</p>{/if}
       <a class="primary sso" href={oidcHref}>{invite ? 'Accept the invite with' : 'Sign in with'} {config.oidc}</a>
       {#if !passwords}
         <p class="muted">{invite ? 'The invite creates your account the first time you sign in; it works once.' : 'This server signs in through your identity provider.'}</p>
@@ -65,7 +97,7 @@
         <p class="or">or with a password</p>
       {/if}
     {/if}
-    {#if passwords}
+    {#if loaded && passwords}
     <p class="muted">
       {#if mode === 'login'}Sign in to your server.
       {:else if invite}You were invited. Pick an email and a password; the link works once.

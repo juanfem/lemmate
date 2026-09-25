@@ -108,8 +108,11 @@
     me = await api.me().catch(() => null)
     workspace?.refresh()
   }
+  /** Signed out here, so the sign-in page must not bounce straight back through the provider. */
+  let signedOut = $state(false)
   async function signOut() {
     await api.logout().catch(() => {})
+    signedOut = true
     me = null
     location.hash = ''
     authRequired = true
@@ -1291,7 +1294,7 @@
 {:else if setupStarting}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
 {:else if authRequired || (invite && !me)}
-  <Login {invite} onDone={signedIn} />
+  <Login {invite} stay={signedOut} onDone={signedIn} />
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
