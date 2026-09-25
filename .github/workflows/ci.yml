@@ -72,7 +72,7 @@ jobs:
   # macOS and Windows never run the full suite here — no runner has a vault, a server or a
   # webview to drive — but they do have to compile, including the Tauri shell (WKWebView and
   # WebView2 need no extra system packages). The credentials tests come along because they are
-  # what pins the per-user config directory down on each platform.
+  # what pins the per-user config directory and the OS keychain down on each platform.
   cross:
     name: Rust (${{ matrix.os }}, check only)
     runs-on: ${{ matrix.os }}
@@ -99,8 +99,11 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets
 
-      - name: cargo test (paths)
-        run: "cargo test -p lemmate-core credentials::"
+      # The ignored test writes a throwaway entry to the runner's real keychain (Keychain on
+      # macOS, Credential Manager on Windows) and removes it: the one place the keychain
+      # backend is exercised for real, since no Linux runner has an unlocked Secret Service.
+      - name: cargo test (paths, keychain)
+        run: "cargo test -p lemmate-core --features keychain credentials:: -- --include-ignored"
 
   # Svelte type-check plus the markdown corpus tests. ui/test also holds live end-to-end tests
   # that skip themselves unless LEMMATE_SERVER_BIN / LEMMATE_CLI_BIN point at built binaries, so

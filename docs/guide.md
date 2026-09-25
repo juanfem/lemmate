@@ -949,7 +949,7 @@ is told too.
 | `<vault>/.lemmate/local.db` | Local update log, snapshots, index, and the vault id for this folder |
 | `<vault>/.lemmate/attachments/` | Content-addressed attachment cache |
 | `<vault>/attachments/` | The human-readable projection of referenced attachments |
-| `<config>/credentials.toml` | Saved session tokens, one per server (mode 0600 on Unix) |
+| `<config>/credentials.toml` | Saved session tokens, one per server (mode 0600 on Unix) — or, when the token is in the system keychain (service `lemmate`), just a note saying so |
 | `<config>/desktop.toml` | Desktop app configuration (`root_dir`, the folder the vault folders live in) |
 | `<data-dir>/lemmate.db`, `<data-dir>/attachments/` | Everything on the server |
 

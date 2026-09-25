@@ -1,10 +1,72 @@
 //! Saved sessions for native clients: `credentials.toml` in the per-user configuration directory
-//! (`crate::paths::config_dir`), one `[servers."<base url>"]` table per server holding `token`.
-//! Written by `lemmate login`, read by `lemmate sync` and the desktop app.
+//! (`crate::paths::config_dir`), one `[servers."<base url>"]` table per server. Written by
+//! `lemmate login`, read by `lemmate sync` and the desktop app.
+//!
+//! The token itself goes into the operating system's keychain when there is one (SPEC §11.1) —
+//! macOS Keychain, Windows Credential Manager, the Secret Service (GNOME Keyring, KWallet) on
+//! Linux — and the table then says only `keychain = true`. Where there is none (a headless box
+//! with no D-Bus session, a build without the `keychain` feature, or `LEMMATE_KEYCHAIN=0`) the
+//! table holds `token` instead, in a file only its owner can read. Either shape is read back, so
+//! a file written before the keychain existed keeps working.
 
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
+
+/// The keychain service name entries are filed under; the account is the server's [`key`].
+pub const KEYCHAIN_SERVICE: &str = "lemmate";
+
+/// Somewhere to keep a secret by name: the system keychain, or a stand-in in tests.
+pub trait Secrets {
+    fn set(&self, account: &str, secret: &str) -> std::result::Result<(), String>;
+    fn get(&self, account: &str) -> std::result::Result<Option<String>, String>;
+    fn delete(&self, account: &str) -> std::result::Result<(), String>;
+}
+
+/// The operating system's keychain, via the `keyring` crate.
+#[cfg(feature = "keychain")]
+pub struct Keychain {
+    pub service: &'static str,
+}
+
+#[cfg(feature = "keychain")]
+impl Secrets for Keychain {
+    fn set(&self, account: &str, secret: &str) -> std::result::Result<(), String> {
+        keyring::Entry::new(self.service, account)
+            .and_then(|e| e.set_password(secret))
+            .map_err(|e| e.to_string())
+    }
+    fn get(&self, account: &str) -> std::result::Result<Option<String>, String> {
+        match keyring::Entry::new(self.service, account).and_then(|e| e.get_password()) {
+            Ok(s) => Ok(Some(s)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    fn delete(&self, account: &str) -> std::result::Result<(), String> {
+        match keyring::Entry::new(self.service, account).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// The keychain this process should use, if any: compiled in, and not turned off with
+/// `LEMMATE_KEYCHAIN=0` (or `no`, `false`, `off`).
+pub fn system_secrets() -> Option<&'static dyn Secrets> {
+    let off = std::env::var("LEMMATE_KEYCHAIN")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "no" | "false" | "off"));
+    if off {
+        return None;
+    }
+    #[cfg(feature = "keychain")]
+    {
+        static KEYCHAIN: Keychain = Keychain { service: KEYCHAIN_SERVICE };
+        Some(&KEYCHAIN)
+    }
+    #[cfg(not(feature = "keychain"))]
+    None
+}
 
 pub fn path() -> PathBuf {
     crate::paths::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("credentials.toml")
@@ -21,23 +83,73 @@ pub fn key(server: &str) -> String {
 }
 
 pub fn load(server: &str) -> Option<String> {
-    read().get("servers")?.get(key(server))?.get("token")?.as_str().map(str::to_owned)
+    load_with(system_secrets(), server)
+}
+
+pub fn load_with(secrets: Option<&dyn Secrets>, server: &str) -> Option<String> {
+    let key = key(server);
+    let root = read();
+    let entry = root.get("servers")?.get(&key)?;
+    if let Some(t) = entry.get("token").and_then(|v| v.as_str()) {
+        return Some(t.to_owned());
+    }
+    if entry.get("keychain").and_then(|v| v.as_bool()) == Some(true) {
+        let Some(secrets) = secrets else {
+            tracing::warn!(server = %key, "the token for this server is in the keychain, which is turned off here");
+            return None;
+        };
+        return match secrets.get(&key) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(server = %key, %e, "could not read the token from the keychain");
+                None
+            }
+        };
+    }
+    None
+}
+
+/// Where the saved token for `server` lives, for messages: the keychain or the file's path.
+pub fn location(server: &str) -> String {
+    let in_keychain = read().get("servers").and_then(|v| v.get(key(server))).and_then(|e| e.get("keychain"))
+        == Some(&toml::Value::Boolean(true));
+    if in_keychain { "the system keychain".to_owned() } else { path().display().to_string() }
 }
 
 pub fn save(server: &str, token: &str) -> Result<()> {
+    save_with(system_secrets(), server, token)
+}
+
+/// Save a token: into `secrets` if it takes it, else into the file.
+pub fn save_with(secrets: Option<&dyn Secrets>, server: &str, token: &str) -> Result<()> {
+    let key = key(server);
     let mut root = read();
     let servers = root.entry("servers").or_insert_with(|| toml::Value::Table(toml::Table::new()));
     let Some(servers) = servers.as_table_mut() else {
         return Err(Error::Sync("credentials file is malformed".into()));
     };
     let mut entry = toml::Table::new();
-    entry.insert("token".into(), toml::Value::String(token.to_owned()));
-    servers.insert(key(server), toml::Value::Table(entry));
+    match secrets.map(|s| s.set(&key, token)) {
+        Some(Ok(())) => {
+            entry.insert("keychain".into(), toml::Value::Boolean(true));
+        }
+        other => {
+            if let Some(Err(e)) = other {
+                tracing::info!(server = %key, %e, "no keychain to hand; keeping the token in the credentials file");
+            }
+            entry.insert("token".into(), toml::Value::String(token.to_owned()));
+        }
+    }
+    servers.insert(key, toml::Value::Table(entry));
+    write(&root)
+}
+
+fn write(root: &toml::Table) -> Result<()> {
     let p = path();
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&p, toml::to_string(&root).map_err(|e| Error::Sync(e.to_string()))?)?;
+    std::fs::write(&p, toml::to_string(root).map_err(|e| Error::Sync(e.to_string()))?)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -90,18 +202,51 @@ pub fn invite_token(invite: &str) -> String {
 }
 
 pub fn forget(server: &str) -> Result<()> {
+    forget_with(system_secrets(), server)
+}
+
+pub fn forget_with(secrets: Option<&dyn Secrets>, server: &str) -> Result<()> {
+    let key = key(server);
     let mut root = read();
-    if let Some(servers) = root.get_mut("servers").and_then(|v| v.as_table_mut()) {
-        servers.remove(&key(server));
+    let in_keychain = root
+        .get("servers")
+        .and_then(|v| v.get(&key))
+        .and_then(|e| e.get("keychain"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    if in_keychain && let Some(Err(e)) = secrets.map(|s| s.delete(&key)) {
+        tracing::warn!(server = %key, %e, "could not remove the token from the keychain");
     }
-    std::fs::write(path(), toml::to_string(&root).map_err(|e| Error::Sync(e.to_string()))?)?;
-    Ok(())
+    if let Some(servers) = root.get_mut("servers").and_then(|v| v.as_table_mut()) {
+        servers.remove(&key);
+    }
+    write(&root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A keychain that remembers in memory, or refuses everything (a headless box).
+    struct Mem(std::sync::Mutex<std::collections::HashMap<String, String>>, bool);
+    impl Secrets for Mem {
+        fn set(&self, a: &str, s: &str) -> std::result::Result<(), String> {
+            if !self.1 {
+                return Err("no secret service".into());
+            }
+            self.0.lock().unwrap().insert(a.into(), s.into());
+            Ok(())
+        }
+        fn get(&self, a: &str) -> std::result::Result<Option<String>, String> {
+            Ok(self.0.lock().unwrap().get(a).cloned())
+        }
+        fn delete(&self, a: &str) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().remove(a);
+            Ok(())
+        }
+    }
+
+    /// One test, because every case shares the one credentials file.
     #[test]
     fn round_trip_in_a_temp_home() {
         let dir = tempfile::tempdir().unwrap();
@@ -110,14 +255,50 @@ mod tests {
         // would resolve to the real `~/.config`, `~/Library/Application Support` or `%APPDATA%`.
         unsafe { std::env::set_var("LEMMATE_CONFIG_DIR", dir.path()) };
         assert_eq!(path().parent(), Some(dir.path()));
-        assert_eq!(load("https://x.example"), None);
-        save("https://x.example/", "tok1").unwrap();
-        save("https://y.example", "tok2").unwrap();
-        assert_eq!(load("https://x.example").as_deref(), Some("tok1"));
-        assert_eq!(load("https://x.example/ws").as_deref(), Some("tok1"));
-        forget("https://x.example").unwrap();
-        assert_eq!(load("https://x.example"), None);
-        assert_eq!(load("https://y.example").as_deref(), Some("tok2"));
+
+        // No keychain: the token is in the file.
+        assert_eq!(load_with(None, "https://x.example"), None);
+        save_with(None, "https://x.example/", "tok1").unwrap();
+        save_with(None, "https://y.example", "tok2").unwrap();
+        assert_eq!(load_with(None, "https://x.example").as_deref(), Some("tok1"));
+        assert_eq!(load_with(None, "https://x.example/ws").as_deref(), Some("tok1"));
+        forget_with(None, "https://x.example").unwrap();
+        assert_eq!(load_with(None, "https://x.example"), None);
+        assert_eq!(load_with(None, "https://y.example").as_deref(), Some("tok2"));
+
+        // A keychain that works: the file only says where the token is.
+        let kc = Mem(Default::default(), true);
+        save_with(Some(&kc), "https://k.example", "secret-k").unwrap();
+        let text = std::fs::read_to_string(path()).unwrap();
+        assert!(!text.contains("secret-k"), "{text}");
+        assert!(text.contains("keychain = true"), "{text}");
+        assert_eq!(load_with(Some(&kc), "https://k.example").as_deref(), Some("secret-k"));
+        assert_eq!(load_with(None, "https://k.example"), None, "the keychain turned off afterwards");
+        // …and a file token written before the keychain is still read with one.
+        assert_eq!(load_with(Some(&kc), "https://y.example").as_deref(), Some("tok2"));
+        forget_with(Some(&kc), "https://k.example").unwrap();
+        assert!(kc.0.lock().unwrap().is_empty(), "forget empties the keychain too");
+
+        // A keychain that refuses (no D-Bus session): the file, as before.
+        let broken = Mem(Default::default(), false);
+        save_with(Some(&broken), "https://z.example", "tok3").unwrap();
+        assert_eq!(load_with(Some(&broken), "https://z.example").as_deref(), Some("tok3"));
+    }
+
+    /// The real keychain, with a throwaway service name. Ignored by default — it writes to the
+    /// keychain of whoever runs it; `cargo test -p lemmate-core --features keychain
+    /// credentials::real -- --ignored` on a desktop session.
+    #[cfg(feature = "keychain")]
+    #[test]
+    #[ignore]
+    fn real_keychain_round_trip() {
+        let kc = Keychain { service: "lemmate-test" };
+        let account = format!("https://test-{}.invalid", std::process::id());
+        kc.set(&account, "s3cret").unwrap();
+        assert_eq!(kc.get(&account).unwrap().as_deref(), Some("s3cret"));
+        kc.delete(&account).unwrap();
+        assert_eq!(kc.get(&account).unwrap(), None);
+        kc.delete(&account).unwrap(); // idempotent
     }
 
     #[test]

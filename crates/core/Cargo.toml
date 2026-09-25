@@ -11,6 +11,7 @@ axum = { version = "0.8", features = ["ws", "multipart"] }
 blake3 = "1"
 dirs = "6"
 futures-util = "0.3"
+keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 markdown = "1"
 mime_guess = "2"
 notify = "8"
@@ -32,6 +33,11 @@ ureq = "3"
 webpki-roots = "1"
 yrs = { version = "0.27", features = ["sync"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[features]
+# Keep saved tokens in the OS keychain (credentials.rs). The CLI and the desktop app turn it on;
+# the server, which saves no tokens, does not.
+keychain = ["dep:keyring"]
 
 [dev-dependencies]
 tempfile = "3"

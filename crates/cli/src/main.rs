@@ -413,7 +413,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ca_cert.as_deref(),
                 &hostname(),
             )?;
-            println!("signed in as {email} on {base}; token saved to {}", credentials::path().display());
+            println!("signed in as {email} on {base}; token saved to {}", credentials::location(&base));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Passwd { server, email, token, ca_cert } => {

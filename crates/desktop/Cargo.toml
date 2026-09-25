@@ -16,7 +16,7 @@ tauri-build = "2"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-lemmate-core.workspace = true
+lemmate-core = { workspace = true, features = ["keychain"] }
 serde = { version = "1", features = ["derive"] }
 tauri = "2"
 toml = "1"
