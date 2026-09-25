@@ -885,7 +885,7 @@
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
-    ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password and invites…', run: () => (accountOpen = true) }] : []),
+    ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) }] : []),
     ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   /**
@@ -1375,7 +1375,7 @@
                     x: r.right + 4,
                     y: r.bottom,
                     items: [
-                      { label: 'Account, password and invites…', run: () => (accountOpen = true) },
+                      { label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
                       { separator: true, label: '' },
                       { label: 'Sign out', run: signOut, danger: true },
                     ],
@@ -1633,7 +1633,7 @@
 {/if}
 
 {#if accountOpen && me}
-  <AccountDialog {me} onClose={() => (accountOpen = false)} />
+  <AccountDialog {me} vaults={vaults.map((v) => ({ id: v.id, label: v.label }))} onClose={() => (accountOpen = false)} />
 {/if}
 
 {#if menu}

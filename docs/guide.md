@@ -136,9 +136,12 @@ lemmate login --server https://notes.example.org --email you@example.org --regis
 lemmate sync  --vault ~/vault --server https://notes.example.org          # keeps running
 ```
 
-`login` stores a session token in `credentials.toml` in your configuration directory (mode 0600
-where the OS supports it); `sync` picks
-it up automatically. First run **publishes** the folder as a new vault and prints the id; to
+`login` saves a session token — in the system keychain when there is one (macOS Keychain,
+Windows Credential Manager, GNOME Keyring or KWallet), otherwise in `credentials.toml` in your
+configuration directory (mode 0600 where the OS supports it) — and `sync` picks it up
+automatically. `LEMMATE_KEYCHAIN=0` keeps it in the file. On a server that signs in only through
+an identity provider there is no password to give: make an access token in the web client
+(**Account → Access tokens**, §4) and `lemmate login --server … --token lmt_…`. First run **publishes** the folder as a new vault and prints the id; to
 join an existing vault into an empty folder, pass `--vault-id <ULID>`. Add `--once` to sync and
 exit. Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the local relay, which serves
 the sync socket, the API and the web client on loopback — this is exactly what the desktop app
@@ -619,9 +622,36 @@ after the same period; referencing one again before then rescues it. A standalon
 
 ## 4. Collaboration
 
-**Accounts.** Email + password, sessions as opaque bearer tokens (hashed at rest) — sent as
-`Authorization: Bearer …` by native clients and as an HttpOnly cookie by the browser. OIDC is
-specified but not implemented.
+**Accounts.** Email + password, or an OpenID Connect provider (Authelia, Keycloak, Google, …) —
+or both. Sessions are opaque bearer tokens (hashed at rest), sent as `Authorization: Bearer …`
+by native clients and as an HttpOnly cookie by the browser.
+
+**Signing in with an identity provider.** With OIDC set up (see `docs/deploy.md`), the sign-in
+page shows **Sign in with <provider>**. The first time an identity signs in:
+
+- if an account has the same email *and the provider says the address is verified*, the identity
+  is tied to that account — which is how password accounts move over;
+- otherwise an account is created when anyone could register (an empty server, whose first
+  account is the admin, or `--allow-registration`), or when the sign-in started from an invite
+  link;
+- otherwise it is refused, with the reason on the sign-in page.
+
+After that the identity always signs into the same account, whatever its email becomes. A
+server can turn passwords off entirely (`--disable-password-login`); the password fields, the
+password change and password registration then disappear, and invites create accounts through
+the provider.
+
+**Access tokens** are for the CLI, scripts, MCP and the desktop app, and are the way to reach a
+server with passwords turned off from any of them. Make one under **Account, password, tokens and
+invites…**: give it a name, optionally tick the vaults it may reach, optionally make it read
+only, optionally let it expire. The token (`lmt_…`) is shown once. A token never carries admin
+rights and cannot make, list or revoke tokens or change the password; changing your password does
+not revoke tokens — revoke them in the same dialog, which also says when each was last used.
+
+```sh
+lemmate login --server https://notes.example.org --token lmt_…     # saves it like a session
+curl -H "Authorization: Bearer lmt_…" https://notes.example.org/api/v1/vaults
+```
 
 **Inviting someone.** An admin mints a single-use link; the person opening it picks their own
 email and password and lands in the app signed in. It works once — a second attempt is refused —
@@ -634,7 +664,7 @@ lemmate invite --server … --list                                  # unused / e
 lemmate invite --server … --revoke ID                             # unused ones only
 ```
 
-In the browser the same thing is under **Account, password and invites…**, in the menu your initial
+In the browser the same thing is under **Account, password, tokens and invites…**, in the menu your initial
 opens at the foot of the sidebar's rail — the command palette (Ctrl+Shift+P) has it too. The link
 is a credential and is not tied to an email address, so send it the way you would send a
 password.
@@ -736,7 +766,8 @@ notes <command>
 
 | Command | What it does |
 |---|---|
-| `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token to `credentials.toml` in your configuration directory. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
+| `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token — in the system keychain, or `credentials.toml` in your configuration directory where there is none. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
+| `lemmate login --server URL --token lmt_…` | Save an access token made in the web client instead (checked against the server first): the way in when the server signs in only through an identity provider. |
 | `lemmate logout --server URL` | Forget the saved token for that server. |
 | `lemmate passwd --server URL [--email E]` | Change your password (prompts for the current one), or reset another account's as an admin. Signs every other session of that account out. |
 | `lemmate invite --server URL [--expires-days N] [--list] [--revoke ID] [--json]` | Mint, list, or revoke single-use registration links. Admin only. |

@@ -1,7 +1,4 @@
 //! lemmate-server — sync relay, persistence, and REST API (SPEC §3.1, §7, §13).
-//!
-//! M0 scope: an unauthenticated single-process relay suitable for local development. Accounts,
-//! roles, and per-doc permission checks (SPEC §11) arrive in M2 and slot into `handle_frame`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,6 +7,7 @@ use anyhow::Context;
 use clap::Parser;
 use lemmate_core::RetentionPolicy;
 use lemmate_core::Store;
+use lemmate_server::oidc::OidcConfig;
 use lemmate_server::{AuthMode, ServerOptions, build_state, purge_orphans, router};
 use std::time::Duration;
 use tracing::info;
@@ -59,6 +57,64 @@ struct Config {
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "LEMMATE_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
+    /// Turn off email + password sign-in; accounts then come only from the OIDC provider.
+    /// Refused without --oidc-issuer, which would leave no way in.
+    #[arg(long, env = "LEMMATE_DISABLE_PASSWORD_LOGIN", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    disable_password_login: bool,
+    /// The address people reach this server at, e.g. https://notes.example.org. Needed for OIDC:
+    /// the provider sends the browser back to <public-url>/api/v1/auth/oidc/callback.
+    #[arg(long, env = "LEMMATE_PUBLIC_URL")]
+    public_url: Option<String>,
+    /// OpenID Connect issuer URL (Authelia, Keycloak, Google, …); setting it turns OIDC sign-in on.
+    #[arg(long, env = "LEMMATE_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    /// The client id registered with the provider.
+    #[arg(long, env = "LEMMATE_OIDC_CLIENT_ID")]
+    oidc_client_id: Option<String>,
+    /// The client secret (omit for a public client).
+    #[arg(long, env = "LEMMATE_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    oidc_client_secret: Option<String>,
+    /// Read the client secret from this file instead (a Docker or systemd secret).
+    #[arg(long, env = "LEMMATE_OIDC_CLIENT_SECRET_FILE")]
+    oidc_client_secret_file: Option<PathBuf>,
+    /// What the sign-in button calls the provider.
+    #[arg(long, env = "LEMMATE_OIDC_NAME", default_value = "single sign-on")]
+    oidc_name: String,
+    /// Scopes to ask for.
+    #[arg(long, env = "LEMMATE_OIDC_SCOPES", default_value = "openid email profile")]
+    oidc_scopes: String,
+}
+
+/// The OIDC settings, if any were given, checked for consistency.
+fn oidc_config(cfg: &Config) -> anyhow::Result<Option<OidcConfig>> {
+    let Some(issuer) = cfg.oidc_issuer.clone() else {
+        if cfg.oidc_client_id.is_some() {
+            anyhow::bail!("--oidc-client-id is set but --oidc-issuer is not");
+        }
+        return Ok(None);
+    };
+    let client_id = cfg.oidc_client_id.clone().context("--oidc-issuer needs --oidc-client-id")?;
+    let public = cfg.public_url.as_deref().context("--oidc-issuer needs --public-url")?;
+    let client_secret = match (&cfg.oidc_client_secret, &cfg.oidc_client_secret_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("give the OIDC client secret once, not both inline and as a file")
+        }
+        (Some(s), None) => Some(s.clone()),
+        (None, Some(p)) => Some(
+            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?.trim().to_owned(),
+        ),
+        (None, None) => None,
+    };
+    let config = OidcConfig {
+        issuer,
+        client_id,
+        client_secret,
+        redirect_url: format!("{}/api/v1/auth/oidc/callback", public.trim_end_matches('/')),
+        display_name: cfg.oidc_name.clone(),
+        scopes: cfg.oidc_scopes.clone(),
+    };
+    config.validate().map_err(anyhow::Error::msg)?;
+    Ok(Some(config))
 }
 
 #[tokio::main]
@@ -70,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cfg = Config::parse();
+    let oidc = oidc_config(&cfg)?;
+    if cfg.disable_password_login && oidc.is_none() && !cfg.no_auth {
+        anyhow::bail!("--disable-password-login without --oidc-issuer would leave no way to sign in");
+    }
     std::fs::create_dir_all(&cfg.data_dir).with_context(|| format!("creating {}", cfg.data_dir.display()))?;
     std::fs::create_dir_all(cfg.data_dir.join("attachments"))?;
     let mut store = Store::open(cfg.data_dir.join("lemmate.db")).context("opening lemmate.db")?;
@@ -83,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
         pandoc: cfg.pandoc.clone(),
         quarto: cfg.quarto.clone(),
         quarto_enabled: !cfg.disable_quarto,
+        password_login: !cfg.disable_password_login,
+        oidc: oidc.clone(),
         auth: if cfg.no_auth {
             AuthMode::Disabled
         } else {
@@ -118,6 +180,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     if cfg.no_auth {
         tracing::warn!("authentication disabled (--no-auth): do not expose this server to a network");
+    }
+    if let Some(o) = &oidc {
+        info!(issuer = %o.issuer, callback = %o.redirect_url, password_login = !cfg.disable_password_login, "OIDC sign-in on");
     }
     info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), auth = !cfg.no_auth, "lemmate-server listening");
     axum::serve(listener, app).await?;

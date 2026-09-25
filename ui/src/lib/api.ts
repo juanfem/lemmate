@@ -68,6 +68,29 @@ export interface User {
   is_admin: boolean
 }
 
+/** What the sign-in page offers (`GET /auth/config`). */
+export interface AuthConfig {
+  accounts: boolean
+  password_login: boolean
+  /** An uninvited visitor may create an account (open registration, or an empty server). */
+  registration: boolean
+  /** The identity provider's label, when OIDC sign-in is set up. */
+  oidc: string | null
+}
+
+/** A personal access token (SPEC §11.1). `token` is only there in the answer that mints it. */
+export interface AccessToken {
+  id: string
+  name: string
+  /** Vault ids it may reach; null = every vault the account can. */
+  vaults: string[] | null
+  read_only: boolean
+  created_ms: number
+  expires_ms: number | null
+  last_used_ms: number | null
+  token: string | null
+}
+
 /** Set when any call comes back 401; the shell shows the login screen. */
 export const authState = { onUnauthorized: () => {} }
 
@@ -177,6 +200,11 @@ export const api = {
   /** Own password (send `current`), or an admin resetting `email` (do not). */
   changePassword: (new_password: string, current?: string, email?: string) =>
     post<{ sessions_revoked: number }>('/auth/password', { new_password, current_password: current, email }),
+  authConfig: () => get<AuthConfig>('/auth/config'),
+  tokens: () => get<AccessToken[]>('/tokens'),
+  createToken: (body: { name: string; vaults?: string[] | null; read_only?: boolean; expires_days?: number }) =>
+    post<AccessToken>('/tokens', body),
+  revokeToken: (id: string) => del(`/tokens/${id}`),
   invites: () => get<Invite[]>('/invites'),
   createInvite: (expires_days?: number) => post<Invite>('/invites', { expires_days }),
   revokeInvite: (id: string) => del(`/invites/${id}`),

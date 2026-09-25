@@ -193,6 +193,29 @@ pub fn login(
     Ok(token)
 }
 
+/// Save a token made elsewhere — a personal access token from the web client's account dialog,
+/// which is how a server with password sign-in turned off (OIDC only) is reached from here —
+/// once the server has confirmed it. Returns the email of the account it belongs to.
+pub fn login_with_token(server: &str, token: &str, ca_cert: Option<&std::path::Path>) -> Result<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(Error::Sync("the token is empty".into()));
+    }
+    let agent = crate::tls::http_agent(ca_cert)?;
+    let base = key(server);
+    let mut resp = agent
+        .get(format!("{base}/api/v1/auth/me"))
+        .header("authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| Error::Sync(format!("the server did not accept the token: {e}")))?;
+    let text = resp.body_mut().read_to_string().map_err(|e| Error::Sync(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| Error::Sync(e.to_string()))?;
+    let email =
+        json["email"].as_str().ok_or_else(|| Error::Sync("the server named no account".into()))?.to_owned();
+    save(&base, token)?;
+    Ok(email)
+}
+
 /// The token out of an invite the admin sent, which may be the whole URL
 /// (`https://notes.example.org/#/invite/<token>`) or just the token. Pasting the link is what
 /// people actually do, so accept both rather than making them edit it.

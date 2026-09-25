@@ -2630,6 +2630,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures-util",
  "lemmate-core",
@@ -2637,6 +2638,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -2644,6 +2646,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "url",
  "yrs",
 ]
 

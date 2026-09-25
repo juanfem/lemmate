@@ -704,3 +704,146 @@ async fn a_render_page_without_a_session_goes_to_the_sign_in() {
     .await;
     assert_eq!(code, 401);
 }
+
+/// Personal access tokens (SPEC §11.1): narrowed to vaults and to reading, over REST and the
+/// socket alike, and unable to widen themselves.
+#[tokio::test]
+async fn access_tokens_are_scoped_and_cannot_mint_more() {
+    let (addr, _) = start().await;
+    let ann = admin(addr).await;
+    // Two vaults, made the way a client makes them: by syncing a new id.
+    let (a, b) = (VaultId::new(), VaultId::new());
+    let mut ws = connect(addr, &ann).await;
+    for v in [a, b] {
+        send(
+            &mut ws,
+            &format!("vault:{v}"),
+            Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector())),
+        )
+        .await;
+        assert!(matches!(recv(&mut ws).await, Some((_, Message::Sync(SyncMessage::SyncStep2(_))))));
+        assert!(matches!(recv(&mut ws).await, Some((_, Message::Sync(SyncMessage::SyncStep1(_))))));
+    }
+    let (s, _) = post(
+        addr,
+        &format!("/api/v1/vaults/{a}/notes"),
+        json!({"path": "a.md", "content": "# A\n"}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 201);
+
+    // Minting: a session can; a vault you are not in is refused; the token is shown once.
+    let (s, full) = post(addr, "/api/v1/tokens", json!({"name": "laptop"}), Some(&ann)).await;
+    assert_eq!(s, 200, "{full}");
+    let full = full["token"].as_str().unwrap().to_owned();
+    assert!(full.starts_with("lmt_"));
+    let (s, ro) = post(
+        addr,
+        "/api/v1/tokens",
+        json!({"name": "mcp", "vaults": [a.to_string()], "read_only": true}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let ro_id = ro["id"].as_str().unwrap().to_owned();
+    let ro = ro["token"].as_str().unwrap().to_owned();
+    let (_, only_b) =
+        post(addr, "/api/v1/tokens", json!({"name": "b", "vaults": [b.to_string()]}), Some(&ann)).await;
+    let only_b = only_b["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/tokens",
+            json!({"name": "x", "vaults": [VaultId::new().to_string()]}),
+            Some(&ann)
+        )
+        .await
+        .0,
+        404
+    );
+    let (_, listed) = get(addr, "/api/v1/tokens", Some(&ann)).await;
+    assert_eq!(listed.as_array().unwrap().len(), 3);
+    assert!(listed.as_array().unwrap().iter().all(|t| t["token"].is_null()), "never listed again: {listed}");
+
+    // An unscoped token is its user, minus admin rights.
+    assert_eq!(get(addr, "/api/v1/vaults", Some(&full)).await.1.as_array().unwrap().len(), 2);
+    let (_, me) = get(addr, "/api/v1/auth/me", Some(&full)).await;
+    assert_eq!(me["is_admin"], false);
+    assert_eq!(me["token"]["name"], "laptop");
+    assert_eq!(post(addr, "/api/v1/invites", json!({}), Some(&full)).await.0, 403);
+
+    // The read-only one sees vault A, reads it, and writes nothing — not over REST…
+    let (_, vaults) = get(addr, "/api/v1/vaults", Some(&ro)).await;
+    assert_eq!(vaults.as_array().unwrap().len(), 1);
+    assert_eq!(vaults[0]["id"], a.to_string());
+    assert_eq!(get(addr, &format!("/api/v1/vaults/{a}/notes"), Some(&ro)).await.0, 200);
+    assert_eq!(
+        post(addr, &format!("/api/v1/vaults/{a}/notes"), json!({"path": "no.md", "content": "x"}), Some(&ro))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(get(addr, &format!("/api/v1/vaults/{b}/notes"), Some(&ro)).await.0, 404);
+    // …nor over the socket, where it cannot claim a new vault either.
+    let mut r = connect(addr, &ro).await;
+    let vdoc = format!("vault:{a}");
+    send(&mut r, &vdoc, Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector()))).await;
+    assert!(matches!(recv(&mut r).await, Some((_, Message::Sync(SyncMessage::SyncStep2(_))))));
+    let _ = recv(&mut r).await; // the server's own SyncStep1
+    let edit = VaultDoc::new().set_path(NoteId::new(), "sneaky.md");
+    send(&mut r, &vdoc, Message::Sync(SyncMessage::Update(edit))).await;
+    assert!(matches!(recv(&mut r).await, Some((_, Message::Auth(Some(_))))), "a viewer's write is denied");
+    let fresh = format!("vault:{}", VaultId::new());
+    send(&mut r, &fresh, Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector()))).await;
+    assert!(matches!(recv(&mut r).await, Some((_, Message::Auth(Some(_))))), "no claiming");
+
+    // A token scoped to B does not reach A, even with Ann's full rights there.
+    assert_eq!(get(addr, &format!("/api/v1/vaults/{a}/notes"), Some(&only_b)).await.0, 404);
+    assert_eq!(get(addr, &format!("/api/v1/vaults/{b}/notes"), Some(&only_b)).await.0, 200);
+
+    // No token can manage tokens or the password, however wide it is.
+    assert_eq!(get(addr, "/api/v1/tokens", Some(&full)).await.0, 403);
+    assert_eq!(post(addr, "/api/v1/tokens", json!({"name": "wider"}), Some(&ro)).await.0, 403);
+    assert_eq!(del(addr, &format!("/api/v1/tokens/{ro_id}"), &full).await, 403);
+    assert_eq!(
+        post(
+            addr,
+            "/api/v1/auth/password",
+            json!({"current_password": "first pass", "new_password": "hijacked!"}),
+            Some(&full)
+        )
+        .await
+        .0,
+        403
+    );
+
+    // Revoked is gone.
+    assert_eq!(del(addr, &format!("/api/v1/tokens/{ro_id}"), &ann).await, 204);
+    assert_eq!(get(addr, "/api/v1/vaults", Some(&ro)).await.0, 401);
+    assert_eq!(del(addr, &format!("/api/v1/tokens/{ro_id}"), &ann).await, 404);
+}
+
+/// With password login off, the password routes are closed and the sign-in page is told so.
+#[tokio::test]
+async fn password_login_can_be_turned_off() {
+    let options = ServerOptions {
+        auth: AuthMode::Enabled { allow_registration: true, secure_cookies: false },
+        password_login: false,
+        ..ServerOptions::default()
+    };
+    let state = build_state(Store::open_in_memory().unwrap(), options);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (s, config) = get(addr, "/api/v1/auth/config", None).await;
+    assert_eq!(s, 200);
+    assert_eq!(config["password_login"], false);
+    assert_eq!(config["registration"], true);
+    assert_eq!(config["oidc"], Value::Null);
+    let creds = json!({"email": "ann@example.org", "password": "first pass"});
+    assert_eq!(post(addr, "/api/v1/auth/register", creds.clone(), None).await.0, 403);
+    assert_eq!(post(addr, "/api/v1/auth/login", creds, None).await.0, 403);
+}

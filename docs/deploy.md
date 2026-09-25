@@ -29,8 +29,16 @@ either way. From `crates/server/src/main.rs`:
 | `--snapshot-every-minutes <N>` | `LEMMATE_SNAPSHOT_EVERY_MINUTES` | `10` |
 | `--retain-days <N>` | `LEMMATE_RETAIN_DAYS` | `90` |
 | `--attachment-grace-days <N>` | `LEMMATE_ATTACHMENT_GRACE_DAYS` | `30` |
+| `--public-url <URL>` | `LEMMATE_PUBLIC_URL` | unset — the address people reach the server at; needed for OIDC |
+| `--oidc-issuer <URL>` | `LEMMATE_OIDC_ISSUER` | unset — setting it turns OIDC sign-in on (§d) |
+| `--oidc-client-id <ID>` | `LEMMATE_OIDC_CLIENT_ID` | unset |
+| `--oidc-client-secret <S>` | `LEMMATE_OIDC_CLIENT_SECRET` | unset (a public client) |
+| `--oidc-client-secret-file <F>` | `LEMMATE_OIDC_CLIENT_SECRET_FILE` | unset — the secret from a file, for Docker/systemd secrets |
+| `--oidc-name <TEXT>` | `LEMMATE_OIDC_NAME` | `single sign-on` — the sign-in button says *Sign in with …* |
+| `--oidc-scopes <S>` | `LEMMATE_OIDC_SCOPES` | `openid email profile` |
+| `--disable-password-login` | `LEMMATE_DISABLE_PASSWORD_LOGIN` | off — set it to sign in through OIDC only |
 
-The five boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
+The six boolean flags accept **`true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`)** when set through the environment —
 
 ```
 error: invalid value '1' for '--no-auth'
@@ -209,8 +217,58 @@ losing fine-grained history older than that window.
 
 ## (d) Letting people in, and changing passwords
 
-Both of these exist because a self-hosted server has no mail: there is no confirmation email and
-no reset-by-email link, and none is planned (SPEC §15).
+Invites and admin password resets exist because a self-hosted server has no mail: there is no
+confirmation email and no reset-by-email link, and none is planned (SPEC §15). If you already run
+an identity provider, let it do this instead (below).
+
+### Signing in through an identity provider (OIDC)
+
+Register Lemmate with the provider as a confidential client using the authorization-code flow,
+with the redirect URI `https://notes.example.org/api/v1/auth/oidc/callback`, the scopes `openid
+email profile`, and client authentication `client_secret_basic`. Then:
+
+```yaml
+    environment:
+      LEMMATE_PUBLIC_URL: https://notes.example.org
+      LEMMATE_OIDC_ISSUER: https://auth.example.org        # exactly as its discovery document says
+      LEMMATE_OIDC_CLIENT_ID: lemmate
+      LEMMATE_OIDC_CLIENT_SECRET_FILE: /run/secrets/lemmate_oidc
+      LEMMATE_OIDC_NAME: Authelia
+      # LEMMATE_DISABLE_PASSWORD_LOGIN: "true"             # once everyone has signed in through it
+```
+
+For Authelia, the client entry is roughly:
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: lemmate
+        client_name: Lemmate
+        client_secret: '$pbkdf2-sha512$…'                  # the hash of the secret Lemmate is given
+        redirect_uris: [https://notes.example.org/api/v1/auth/oidc/callback]
+        scopes: [openid, email, profile]
+        authorization_policy: two_factor
+        token_endpoint_auth_method: client_secret_basic
+```
+
+The server fetches the provider's discovery document on the first sign-in, not at startup, so it
+starts even when the provider is not up yet. It needs to reach the provider over HTTPS itself —
+the ID token is taken from the token endpoint over that connection, which is what lets the server
+skip checking its signature (OIDC Core §3.1.3.7); issuer, audience, expiry and nonce are checked.
+Plain `http://` issuers are refused except on a loopback address.
+
+Who gets an account: an identity whose **verified** email matches an existing account is tied to
+it (so a password account moves over on its first OIDC sign-in); a new identity gets an account
+only on an empty server (the admin), with `--allow-registration`, or through an invite link —
+the invite page offers *Accept the invite with …*. Authelia keeps the email out of the ID token by
+default; the server then reads it from the userinfo endpoint.
+
+`--disable-password-login` removes email + password sign-in, password registration and
+password changes; the server refuses to start with it and no OIDC issuer. The CLI, MCP and the
+desktop app then sign in with an **access token** made in the web client (*Account → Access
+tokens*): `lemmate login --server … --token lmt_…`, or the token field in the desktop app's
+setup and *Connect a server…* dialogs.
 
 ### Invites
 
@@ -227,7 +285,7 @@ lemmate invite --server … --list             # id, and whether each is unused,
 lemmate invite --server … --revoke <id>      # unused ones only
 ```
 
-The same thing lives in the web client under **Account, password and invites…** (the command
+The same thing lives in the web client under **Account, password, tokens and invites…** (the command
 palette, or the link on the vault-picker screen).
 
 Opening the link shows the sign-up form; the recipient picks their own email and password. A few
@@ -294,7 +352,9 @@ then answer 501 and the app says rendering is unavailable.
 
 - Set `--secure-cookies` on every HTTPS deployment (see above).
 - Sessions are opaque bearer tokens, hashed at rest. `lemmate logout --server <url>` forgets the
-  local copy.
+  local copy. Access tokens (`lmt_…`) are hashed the same way; give each script its own, scoped
+  to the vaults it needs and read only where it can be, and revoke it when it is done. None of
+  them carries admin rights.
 - There is no end-to-end encryption by design (SPEC §15) — the server reads note content in
   order to index, search, and share it. Encrypt the disk or volume if that matters.
 - Vault roles (owner / editor / viewer) are enforced on both REST and every relay frame, but a

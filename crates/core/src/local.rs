@@ -1250,6 +1250,10 @@ pub struct SetupRequest {
     /// account on a server where registration is closed. The whole URL or the bare token.
     #[serde(default)]
     pub invite: Option<String>,
+    /// A personal access token to save instead of signing in with a password: the way onto a
+    /// server that signs in only through an identity provider.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1471,7 +1475,8 @@ async fn merge_vaults(
 /// What the UI sends to give a running standalone app a server.
 ///
 /// The account is optional the same way it is at setup: a server started with `--no-auth` wants
-/// none, and a token saved earlier by `lemmate login` is used when no password is given.
+/// none, and a token saved earlier by `lemmate login` is used when neither a password nor a
+/// token is given.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectRequest {
     pub server_url: String,
@@ -1485,6 +1490,9 @@ pub struct ConnectRequest {
     pub register: bool,
     #[serde(default)]
     pub invite: Option<String>,
+    /// As in [`SetupRequest::token`].
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// One such request, with the channel the shell answers on.

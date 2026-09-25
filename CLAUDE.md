@@ -18,11 +18,11 @@ milestone status; `docs/guide.md` is the user guide; `docs/deploy.md` covers Doc
 | Path | What |
 |---|---|
 | `crates/core` | Everything shared: yrs CRDT docs (`doc.rs`, `vault_doc.rs`), SQLite store (`store.rs`), sync engine + local relay (`client.rs`, `local.rs`), projection/watcher, markdown indexer, attachments, TLS, credentials + per-platform config paths (`paths.rs`), import/export, pandoc |
-| `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares (`auth.rs`), REST |
+| `crates/server` | axum server: WebSocket relay (`app.rs`), accounts/roles/shares/access tokens (`auth.rs`), OIDC sign-in (`oidc.rs`), REST |
 | `crates/cli` | `lemmate` binary: local commands, remote commands (`remote.rs`), MCP server (`mcp.rs`) |
 | `crates/desktop` | Tauri 2 shell: starts the relay for every vault the account can read — one engine and folder each, under `root_dir` — and opens one window on it. `server_url` is optional: with none it runs standalone (SPEC §3.2), and `SyncOptions::server_url: None` skips the connection and the transfer worker entirely (`client::run_standalone`). *Connect a server…* in the UI arrives here through `LocalHandle::connect` → `watch_for_connect` → login + `Config::set_server` + `AppHandle::restart` |
 | `ui/` | Svelte 5 + CodeMirror 6 client: `src/lib/` (`sync.ts` frame protocol, `vault.svelte.ts` one vault, `workspace.svelte.ts` all of them on one socket, `api.ts`, `import.ts`, `editor/`), `src/components/`, and `src/markdown/index.ts` — the TS indexer that must agree with the Rust one |
-| `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on |
+| `corpus/` | Markdown fixtures both indexers (Rust and TS) must agree on; `daily-formats.json` does the same for the daily-note date formatter (`core/src/daily.rs` ↔ `ui/src/lib/daily.ts`), generated from real Moment.js |
 
 ## Commands
 
@@ -67,6 +67,18 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   one uploaded file, the server creates notes through the room docs, the relay writes them into
   the vault folder. The UI only batches the upload (`ui/src/lib/import.ts`).
 - `apply_update` reports "changed" using state vector *and* delete set — deletions are changes.
+- Every role decision goes through `auth::role_or_claim` / `auth::note_role`, which apply a
+  personal access token's scope (vaults, read-only). A handler that lists vaults by itself
+  (`vaults_of`) must filter with `AuthUser::reaches`. Tokens (`lmt_…`) never carry admin rights
+  and cannot reach `/tokens` or the password — `auth::session_only`.
+- Daily-note settings live in the vault doc's `meta` map (`daily_folder`, `daily_format`,
+  `daily_template`); the server, the relay and the UI all file a day through them, never a
+  hardcoded `Daily/`.
+- `lemmate-core`'s `keychain` feature (the `keyring` crate, pure-Rust Secret Service on Linux)
+  is on for the CLI and desktop, off for the server. Credentials tests go through
+  `load_with`/`save_with` with a stand-in; the real keychain test is `#[ignore]`d — this
+  machine's GNOME login keyring was locked when that was written (2026-09-25), which exercises
+  the file fallback, not the keychain.
 - Standalone, an attachment's vault-doc entry is written by the engine itself (no upload can
   write it), so the sidecar keeps an `attachments_local_only` marker and the first connected run
   backfills every blob — without it the server holds entries whose bytes nobody has.

@@ -93,11 +93,16 @@ enum Cmd {
         /// Server base URL, e.g. https://notes.example.org
         #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
-        #[arg(long)]
-        email: String,
+        #[arg(long, required_unless_present = "token")]
+        email: Option<String>,
         /// Password (prompted when omitted).
         #[arg(long, env = "LEMMATE_PASSWORD")]
         password: Option<String>,
+        /// Save a personal access token instead of signing in with a password — made in the web
+        /// client (Account → Access tokens). The way in when the server only signs in through
+        /// an identity provider.
+        #[arg(long, conflicts_with_all = ["email", "password", "register", "invite"])]
+        token: Option<String>,
         /// Create the account instead of signing in (first account, or when registration is open).
         #[arg(long)]
         register: bool,
@@ -395,7 +400,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Login { server, email, password, register, invite, ca_cert } => {
+        Cmd::Login { server, email, password, token, register, invite, ca_cert } => {
+            if let Some(token) = token {
+                let email = credentials::login_with_token(&server, &token, ca_cert.as_deref())?;
+                println!(
+                    "token for {email} on {} saved to {}",
+                    credentials::key(&server),
+                    credentials::location(&server)
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            let email = email.expect("clap: required unless --token");
             let password = match password {
                 Some(p) => p,
                 None => rpassword::prompt_password("Password: ").context("reading password")?,

@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod oidc;
 
 pub use app::{AppState, PurgeReport, ServerOptions, build_state, purge_orphans, router};
 pub use auth::{AuthMode, AuthUser};

@@ -13,7 +13,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::{self, NoteIndex};
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// `meta` key holding the [`markdown::INDEX_VERSION`] the derived rows were written with.
 const INDEX_VERSION_KEY: &str = "index_version";
@@ -83,7 +83,9 @@ CREATE TABLE IF NOT EXISTS users (
     display_name  TEXT NOT NULL,
     password_hash TEXT,
     is_admin      INTEGER NOT NULL DEFAULT 0,
-    created_ms    INTEGER NOT NULL
+    created_ms    INTEGER NOT NULL,
+    -- The `sub` claim of the OIDC account this user signs in with (SPEC §11.1), if any.
+    oidc_subject  TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash  TEXT PRIMARY KEY,
@@ -125,6 +127,20 @@ CREATE TABLE IF NOT EXISTS invites (
     used_ms    INTEGER,
     used_by    TEXT
 );
+-- Personal access tokens (SPEC §11.1) for the CLI, the API and MCP. Like a session, only the
+-- hash is kept, and it doubles as the id to list and revoke by. `vaults` narrows the token to
+-- a JSON array of vault ids (NULL = whatever its user can reach); `read_only` caps it at viewer.
+CREATE TABLE IF NOT EXISTS access_tokens (
+    token_hash   TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    vaults       TEXT,
+    read_only    INTEGER NOT NULL DEFAULT 0,
+    created_ms   INTEGER NOT NULL,
+    expires_ms   INTEGER,
+    last_used_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS access_tokens_user ON access_tokens (user_id);
 "#;
 
 pub struct Store {
@@ -229,6 +245,20 @@ pub struct InviteRow {
     pub used_by: Option<String>,
 }
 
+/// One personal access token, as listed (the token itself is never stored).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessTokenRow {
+    pub token_hash: String,
+    pub user_id: String,
+    pub name: String,
+    /// The vaults it may reach; `None` = every vault its user can.
+    pub vaults: Option<Vec<VaultId>>,
+    pub read_only: bool,
+    pub created_ms: i64,
+    pub expires_ms: Option<i64>,
+    pub last_used_ms: Option<i64>,
+}
+
 impl InviteRow {
     /// Still redeemable: never used, and either no expiry or one still in the future.
     pub fn usable_at(&self, now: i64) -> bool {
@@ -321,6 +351,17 @@ impl Store {
         }
         if version < SCHEMA_VERSION {
             conn.execute_batch(SCHEMA)?;
+            // v9: `users.oidc_subject`. Checked rather than keyed on the version, because
+            // `users` itself arrived partway through the pre-release schemas.
+            let has_subject = conn
+                .prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'oidc_subject'")?
+                .exists([])?;
+            if !has_subject {
+                conn.execute_batch("ALTER TABLE users ADD COLUMN oidc_subject TEXT;")?;
+            }
+            conn.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users (oidc_subject) WHERE oidc_subject IS NOT NULL;",
+            )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })
@@ -1117,6 +1158,124 @@ impl Store {
         )?)
     }
 
+    // ---- OIDC identities (SPEC §11.1) -------------------------------------------------------
+
+    pub fn user_by_oidc_subject(&self, subject: &str) -> Result<Option<UserRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, email, display_name, password_hash, is_admin FROM users WHERE oidc_subject = ?1",
+                params![subject],
+                row_to_user,
+            )
+            .optional()?)
+    }
+
+    /// Tie a user to an OIDC `sub`. A subject belongs to one user; tying it to a second fails
+    /// on the unique index rather than silently moving it.
+    pub fn set_oidc_subject(&mut self, user_id: &str, subject: &str) -> Result<()> {
+        self.conn.execute("UPDATE users SET oidc_subject = ?2 WHERE id = ?1", params![user_id, subject])?;
+        Ok(())
+    }
+
+    pub fn oidc_subject_of(&self, user_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT oidc_subject FROM users WHERE id = ?1", params![user_id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    // ---- Personal access tokens (SPEC §11.1) ------------------------------------------------
+
+    pub fn create_access_token(
+        &mut self,
+        token_hash: &str,
+        user_id: &str,
+        name: &str,
+        vaults: Option<&[VaultId]>,
+        read_only: bool,
+        expires_ms: Option<i64>,
+    ) -> Result<AccessTokenRow> {
+        let now = now_ms();
+        let json = vaults.map(|v| {
+            serde_json::to_string(&v.iter().map(ToString::to_string).collect::<Vec<_>>()).expect("strings")
+        });
+        self.conn.execute(
+            "INSERT INTO access_tokens (token_hash, user_id, name, vaults, read_only, created_ms, expires_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![token_hash, user_id, name, json, read_only as i32, now, expires_ms],
+        )?;
+        Ok(AccessTokenRow {
+            token_hash: token_hash.to_owned(),
+            user_id: user_id.to_owned(),
+            name: name.to_owned(),
+            vaults: vaults.map(<[VaultId]>::to_vec),
+            read_only,
+            created_ms: now,
+            expires_ms,
+            last_used_ms: None,
+        })
+    }
+
+    /// A user's tokens, newest first, expired ones included (so they can be seen and removed).
+    pub fn access_tokens_of(&self, user_id: &str) -> Result<Vec<AccessTokenRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT token_hash, user_id, name, vaults, read_only, created_ms, expires_ms, last_used_ms
+             FROM access_tokens WHERE user_id = ?1 ORDER BY created_ms DESC",
+        )?;
+        let rows =
+            stmt.query_map(params![user_id], row_to_access_token)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Revoke one of a user's tokens; false when that user has no such token.
+    pub fn delete_access_token(&mut self, user_id: &str, token_hash: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM access_tokens WHERE user_id = ?1 AND token_hash = ?2",
+            params![user_id, token_hash],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The user and token behind a live access-token hash, recording the use (to the minute:
+    /// a sync connection authenticates once, but the REST API does on every request).
+    pub fn access_token_user(&mut self, token_hash: &str) -> Result<Option<(UserRow, AccessTokenRow)>> {
+        let now = now_ms();
+        let found = self
+            .conn
+            .query_row(
+                "SELECT u.id, u.email, u.display_name, u.password_hash, u.is_admin,
+                        t.token_hash, t.user_id, t.name, t.vaults, t.read_only, t.created_ms, t.expires_ms, t.last_used_ms
+                 FROM access_tokens t JOIN users u ON u.id = t.user_id
+                 WHERE t.token_hash = ?1 AND (t.expires_ms IS NULL OR t.expires_ms > ?2)",
+                params![token_hash, now],
+                |r| {
+                    let user = row_to_user(r)?;
+                    let token = AccessTokenRow {
+                        token_hash: r.get(5)?,
+                        user_id: r.get(6)?,
+                        name: r.get(7)?,
+                        vaults: parse_vault_list(r.get(8)?),
+                        read_only: r.get::<_, i32>(9)? != 0,
+                        created_ms: r.get(10)?,
+                        expires_ms: r.get(11)?,
+                        last_used_ms: r.get(12)?,
+                    };
+                    Ok((user, token))
+                },
+            )
+            .optional()?;
+        if found.is_some() {
+            self.conn.execute(
+                "UPDATE access_tokens SET last_used_ms = ?2
+                 WHERE token_hash = ?1 AND (last_used_ms IS NULL OR last_used_ms < ?2 - 60000)",
+                params![token_hash, now],
+            )?;
+        }
+        Ok(found)
+    }
+
     // ---- Registration invites (SPEC §11.1) -------------------------------------------------
 
     pub fn create_invite(
@@ -1452,6 +1611,24 @@ fn row_to_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRow> {
         display_name: r.get(2)?,
         password_hash: r.get(3)?,
         is_admin: r.get::<_, i32>(4)? != 0,
+    })
+}
+
+fn parse_vault_list(json: Option<String>) -> Option<Vec<VaultId>> {
+    let ids: Vec<String> = serde_json::from_str(&json?).ok()?;
+    Some(ids.iter().filter_map(|s| s.parse().ok()).collect())
+}
+
+fn row_to_access_token(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccessTokenRow> {
+    Ok(AccessTokenRow {
+        token_hash: r.get(0)?,
+        user_id: r.get(1)?,
+        name: r.get(2)?,
+        vaults: parse_vault_list(r.get(3)?),
+        read_only: r.get::<_, i32>(4)? != 0,
+        created_ms: r.get(5)?,
+        expires_ms: r.get(6)?,
+        last_used_ms: r.get(7)?,
     })
 }
 
@@ -1956,5 +2133,57 @@ mod tests {
         // No `keep` (an admin reset) takes the last one too.
         assert_eq!(store.delete_sessions_of("u1", None).unwrap(), 1);
         assert!(store.session_user("t-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn access_tokens_are_scoped_listed_expired_and_revoked() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_user("u1", "ann@example.org", "Ann", Some("h"), true).unwrap();
+        store.create_user("u2", "bob@example.org", "Bob", Some("h"), false).unwrap();
+        let v = VaultId::new();
+        store.create_access_token("h-all", "u1", "laptop", None, false, None).unwrap();
+        store.create_access_token("h-one", "u1", "mcp", Some(&[v]), true, None).unwrap();
+        store.create_access_token("h-old", "u1", "old", None, false, Some(now_ms() - 1)).unwrap();
+
+        let (user, all) = store.access_token_user("h-all").unwrap().unwrap();
+        assert_eq!(user.id, "u1");
+        assert_eq!(all.vaults, None);
+        assert!(!all.read_only);
+        let (_, one) = store.access_token_user("h-one").unwrap().unwrap();
+        assert_eq!(one.vaults, Some(vec![v]));
+        assert!(one.read_only);
+        assert!(store.access_token_user("h-old").unwrap().is_none(), "expired");
+        assert!(store.session_user("h-all").unwrap().is_none(), "a token is not a session");
+
+        let listed = store.access_tokens_of("u1").unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.iter().find(|t| t.token_hash == "h-all").unwrap().last_used_ms.is_some());
+        assert!(!store.delete_access_token("u2", "h-all").unwrap(), "only the owner revokes");
+        assert!(store.delete_access_token("u1", "h-all").unwrap());
+        assert!(store.access_token_user("h-all").unwrap().is_none());
+    }
+
+    #[test]
+    fn oidc_subjects_are_unique_and_a_v8_database_gains_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            // The users table as schema v8 had it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+                 password_hash TEXT, is_admin INTEGER NOT NULL DEFAULT 0, created_ms INTEGER NOT NULL);
+                 INSERT INTO users VALUES ('u1', 'ann@example.org', 'Ann', 'h', 1, 0);
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        store.create_user("u2", "bob@example.org", "Bob", None, false).unwrap();
+        store.set_oidc_subject("u1", "sub-1").unwrap();
+        assert_eq!(store.user_by_oidc_subject("sub-1").unwrap().unwrap().id, "u1");
+        assert_eq!(store.oidc_subject_of("u1").unwrap().as_deref(), Some("sub-1"));
+        assert!(store.set_oidc_subject("u2", "sub-1").is_err(), "one subject, one user");
+        assert!(store.user_by_oidc_subject("sub-2").unwrap().is_none());
     }
 }

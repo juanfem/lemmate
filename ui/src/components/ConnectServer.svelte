@@ -13,6 +13,7 @@
   let password = $state('')
   let register = $state(false)
   let invite = $state('')
+  let token = $state('')
   let caCert = $state('')
   let error = $state('')
   let busy = $state(false)
@@ -33,6 +34,7 @@
           password: password || null,
           register,
           invite: invite.trim() || null,
+          token: token.trim() || null,
         }),
       })
       if (!r.ok) throw new Error((await r.text()).trim() || `${r.status} ${r.statusText}`)
@@ -66,6 +68,9 @@
           {#if register}
             <label>Invite <input bind:value={invite} placeholder="paste the invite link, if you were sent one" /></label>
           {/if}
+          <label>Or an access token <span class="hint">(Account → Access tokens on the server; for one that signs in through an identity provider)</span>
+            <input bind:value={token} placeholder="lmt_…" autocomplete="off" spellcheck="false" />
+          </label>
           <p class="hint">Leave empty for a server started with <code>--no-auth</code>, or if you have already signed in with <code>lemmate login</code>.</p>
         </fieldset>
         <label>Private CA <span class="hint">(optional)</span> <input bind:value={caCert} placeholder="/etc/ssl/private-ca.pem" /></label>

@@ -151,24 +151,17 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                 let Ok(req) = rx.await else { return };
                 let result: anyhow::Result<()> = async {
                     // Standalone setups name no server, so there is nothing to sign in to.
-                    if let (Some(server), Some(email), Some(password)) =
-                        (req.server_url.as_deref(), req.email.as_deref(), req.password.as_deref())
-                        && !email.is_empty()
-                    {
+                    if let Some(server) = req.server_url.as_deref().filter(|s| !s.is_empty()) {
                         let ca = req.ca_cert.as_deref().filter(|c| !c.is_empty()).map(Path::new);
-                        let device = std::fs::read_to_string("/etc/hostname")
-                            .map(|s| s.trim().to_owned())
-                            .unwrap_or_else(|_| "desktop".into());
-                        lemmate_core::credentials::login(
+                        sign_in(
                             server,
-                            email,
-                            password,
+                            req.email.as_deref(),
+                            req.password.as_deref(),
+                            req.token.as_deref(),
                             req.register,
                             req.invite.as_deref(),
                             ca,
-                            &device,
-                        )
-                        .context("signing in")?;
+                        )?;
                     }
                     config::Config::write_setup(&config_path, &req)?;
                     let cfg = config::Config::resolve(config::Cli::parse())
@@ -462,6 +455,35 @@ fn watch_for_connect(app: tauri::AppHandle, relay: &mut LocalHandle, config_path
     });
 }
 
+/// Save a session for `server` from whatever the dialog was given: a pasted access token, or an
+/// email and password (signing in, or registering). Given neither, nothing happens — a server
+/// with `--no-auth`, or a token saved earlier by `lemmate login`.
+fn sign_in(
+    server: &str,
+    email: Option<&str>,
+    password: Option<&str>,
+    token: Option<&str>,
+    register: bool,
+    invite: Option<&str>,
+    ca: Option<&Path>,
+) -> anyhow::Result<()> {
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
+        lemmate_core::credentials::login_with_token(server, token, ca)
+            .context("checking the access token")?;
+        return Ok(());
+    }
+    if let (Some(email), Some(password)) = (email, password)
+        && !email.is_empty()
+    {
+        let device = std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_else(|_| "desktop".into());
+        lemmate_core::credentials::login(server, email, password, register, invite, ca, &device)
+            .context("signing in")?;
+    }
+    Ok(())
+}
+
 /// Sign in if asked, prove the server answers, then write it into the configuration file.
 ///
 /// Validating before writing is the point: a typo, an unreachable host, a private CA that is not
@@ -470,23 +492,15 @@ fn watch_for_connect(app: tauri::AppHandle, relay: &mut LocalHandle, config_path
 fn connect_server(config_path: &Path, req: &ConnectRequest) -> anyhow::Result<()> {
     let url = req.server_url.trim().trim_end_matches('/');
     let ca = req.ca_cert.as_deref().map(str::trim).filter(|c| !c.is_empty());
-    if let (Some(email), Some(password)) = (req.email.as_deref(), req.password.as_deref())
-        && !email.is_empty()
-    {
-        let device = std::fs::read_to_string("/etc/hostname")
-            .map(|s| s.trim().to_owned())
-            .unwrap_or_else(|_| "desktop".into());
-        lemmate_core::credentials::login(
-            url,
-            email,
-            password,
-            req.register,
-            req.invite.as_deref(),
-            ca.map(Path::new),
-            &device,
-        )
-        .context("signing in")?;
-    }
+    sign_in(
+        url,
+        req.email.as_deref(),
+        req.password.as_deref(),
+        req.token.as_deref(),
+        req.register,
+        req.invite.as_deref(),
+        ca.map(Path::new),
+    )?;
     let token = lemmate_core::credentials::load(url);
     vaults::remote_ids(url, token.as_deref(), ca.map(Path::new))
         .context("asking the server which vaults this account can read")?;

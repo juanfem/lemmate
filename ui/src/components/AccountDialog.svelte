@@ -2,10 +2,64 @@
   // Account settings (SPEC §11.1): change your own password, and — for an admin — reset someone
   // else's and hand out single-use registration links. There is no mail on a self-hosted server,
   // so the admin reset *is* the password recovery story and the invite link is the only way in
-  // when registration is closed.
-  import { api, ApiError, type Invite, type User } from '../lib/api.ts'
+  // when registration is closed. And personal access tokens, for the CLI, scripts and MCP — and
+  // for the desktop app, on a server that signs in only through an identity provider.
+  import { api, ApiError, type AccessToken, type AuthConfig, type Invite, type User } from '../lib/api.ts'
 
-  let { me, onClose }: { me: User; onClose: () => void } = $props()
+  let { me, vaults, onClose }: { me: User; vaults: { id: string; label: string }[]; onClose: () => void } = $props()
+
+  let config = $state<AuthConfig | null>(null)
+  $effect(() => {
+    api.authConfig().then((c) => (config = c), () => {})
+  })
+  let passwords = $derived(config?.password_login ?? true)
+
+  let tokens: AccessToken[] = $state([])
+  let tokName = $state('')
+  /** Empty = every vault. */
+  let tokVaults: string[] = $state([])
+  let tokReadOnly = $state(false)
+  let tokDays = $state('')
+  let tokNew = $state('')
+  let tokError = $state('')
+  async function reloadTokens() {
+    try {
+      tokens = await api.tokens()
+      tokError = ''
+    } catch (err) {
+      tokError = String(err)
+    }
+  }
+  $effect(() => {
+    reloadTokens()
+  })
+  async function mintToken(e: Event) {
+    e.preventDefault()
+    tokError = ''
+    try {
+      const days = Number.parseInt(tokDays, 10)
+      const t = await api.createToken({
+        name: tokName.trim(),
+        vaults: tokVaults.length ? tokVaults : null,
+        read_only: tokReadOnly,
+        expires_days: Number.isFinite(days) && days > 0 ? days : undefined,
+      })
+      tokNew = t.token ?? ''
+      tokName = ''
+      reloadTokens()
+    } catch (err) {
+      tokError = err instanceof ApiError && err.status === 400 ? 'Give the token a name.' : String(err)
+    }
+  }
+  async function revokeToken(id: string) {
+    try {
+      await api.revokeToken(id)
+      reloadTokens()
+    } catch (err) {
+      tokError = String(err)
+    }
+  }
+  const vaultLabel = (id: string) => vaults.find((v) => v.id === id)?.label ?? id.slice(-6)
 
   let current = $state('')
   let next = $state('')
@@ -78,9 +132,9 @@
       invError = String(err)
     }
   }
-  async function copy() {
+  async function copy(text = newLink) {
     try {
-      await navigator.clipboard.writeText(newLink)
+      await navigator.clipboard.writeText(text)
     } catch {
       /* clipboard may be unavailable; the link is on screen to copy by hand */
     }
@@ -102,6 +156,7 @@
   <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Account" tabindex="-1">
     <h2>Account · {me.email}</h2>
 
+    {#if passwords}
     <form onsubmit={submitPassword}>
       <h3>{resetting ? 'Reset another account' : 'Change your password'}</h3>
       {#if me.is_admin}
@@ -117,6 +172,52 @@
       <div class="row end"><button class="primary" type="submit" disabled={busy}>{resetting ? 'Reset password' : 'Change password'}</button></div>
       <p class="muted">Every other session of that account is signed out, so any other device has to sign in again.</p>
     </form>
+    {:else if config?.oidc}
+      <p class="muted">You sign in through {config.oidc}; your password lives there.</p>
+    {/if}
+
+    <form onsubmit={mintToken}>
+      <h3>Access tokens</h3>
+      <p class="muted">
+        For <code>lemmate login --token</code>, scripts, MCP and the desktop app. A token can be limited to some vaults and to
+        reading; it never has admin rights and cannot make more tokens. Changing your password leaves tokens alone — revoke them here.
+      </p>
+      <div class="row">
+        <input bind:value={tokName} placeholder="name, e.g. laptop CLI" required maxlength="100" />
+        <input class="days" bind:value={tokDays} type="number" min="1" placeholder="days" title="Expires after this many days (optional)" />
+      </div>
+      {#if vaults.length > 1}
+        <div class="vaults">
+          <span class="muted">Vaults:</span>
+          {#each vaults as v (v.id)}
+            <label class="check"><input type="checkbox" value={v.id} bind:group={tokVaults} /> {v.label}</label>
+          {/each}
+          <span class="muted">{tokVaults.length ? '' : '(none ticked = all)'}</span>
+        </div>
+      {/if}
+      <div class="row">
+        <label class="check"><input type="checkbox" bind:checked={tokReadOnly} /> Read only</label>
+        <span class="grow"></span>
+        <button type="submit">Create token</button>
+      </div>
+      {#if tokError}<p class="error">{tokError}</p>{/if}
+      {#if tokNew}
+        <div class="row"><input readonly value={tokNew} class="mono" /><button type="button" onclick={() => copy(tokNew)}>Copy</button></div>
+        <p class="muted">Shown only now. Treat it like a password.</p>
+      {/if}
+      <ul>
+        {#each tokens as t (t.id)}
+          <li>
+            <span>{t.name}</span>
+            <span class="muted">
+              {t.vaults ? t.vaults.map(vaultLabel).join(', ') : 'all vaults'}{t.read_only ? ' · read only' : ''}
+              · {t.last_used_ms ? `used ${when(t.last_used_ms)}` : 'never used'}{#if t.expires_ms} · {t.expires_ms < Date.now() ? 'expired' : `expires ${when(t.expires_ms)}`}{/if}
+            </span>
+            <button type="button" onclick={() => revokeToken(t.id)}>Revoke</button>
+          </li>
+        {/each}
+      </ul>
+    </form>
 
     {#if me.is_admin}
       <form onsubmit={(e) => { e.preventDefault(); mint() }}>
@@ -127,7 +228,7 @@
         </div>
         {#if invError}<p class="error">{invError}</p>{/if}
         {#if newLink}
-          <div class="row"><input readonly value={newLink} /><button type="button" onclick={copy}>Copy</button></div>
+          <div class="row"><input readonly value={newLink} /><button type="button" onclick={() => copy()}>Copy</button></div>
           <p class="muted">Send this however you like. It creates exactly one account and then stops working — and it is shown only now.</p>
         {/if}
         <ul>
@@ -156,6 +257,12 @@
   form { display: flex; flex-direction: column; gap: 0.4rem; border-top: 1px solid var(--border); padding-top: 0.7rem; }
   label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; color: var(--muted); }
   .row { display: flex; gap: 0.4rem; align-items: center; }
+  .grow { flex: 1; }
+  label.check { flex-direction: row; align-items: center; gap: 0.35rem; }
+  label.check input { flex: none; }
+  input.days { flex: none; width: 5.5rem; }
+  .vaults { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; align-items: center; }
+  code { font-family: ui-monospace, monospace; font-size: 0.85em; }
   .row.end { justify-content: flex-end; }
   input { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: inherit; flex: 1; }
   button { font: inherit; font-size: 0.9rem; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer; }

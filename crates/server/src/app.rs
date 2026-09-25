@@ -43,6 +43,10 @@ pub struct ServerOptions {
     /// matter, which can run Lua filters and pull files into the output — on this host, at the
     /// say-so of anyone who can edit a note. Off, renders answer 501 as if quarto were missing.
     pub quarto_enabled: bool,
+    /// Email + password sign-in (SPEC §11.1). Off, accounts come only from `oidc`.
+    pub password_login: bool,
+    /// An OpenID Connect provider to sign in with.
+    pub oidc: Option<crate::oidc::OidcConfig>,
 }
 
 impl Default for ServerOptions {
@@ -56,6 +60,8 @@ impl Default for ServerOptions {
             pandoc: None,
             quarto: None,
             quarto_enabled: true,
+            password_login: true,
+            oidc: None,
         }
     }
 }
@@ -132,6 +138,8 @@ pub struct AppState {
     rooms: Mutex<HashMap<String, Arc<Room>>>,
     bus: broadcast::Sender<Outbound>,
     next_conn: AtomicU64,
+    /// The OIDC client, when `options.oidc` is set.
+    pub oidc: Option<crate::oidc::Oidc>,
 }
 
 struct Room {
@@ -183,6 +191,7 @@ struct Outbound {
 pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
     let (bus, _) = broadcast::channel(1024);
     let attachments = AttachmentStore::new(&options.attachments_dir);
+    let oidc = options.oidc.clone().map(crate::oidc::Oidc::new);
     Arc::new(AppState {
         store: Mutex::new(store),
         options,
@@ -193,6 +202,7 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         rooms: Mutex::new(HashMap::new()),
         bus,
         next_conn: AtomicU64::new(1),
+        oidc,
     })
 }
 
@@ -200,6 +210,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let web_dir = state.options.web_dir.clone();
     let router = Router::new()
         .merge(auth::router())
+        .merge(crate::oidc::router())
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/api/v1/vaults", get(list_vaults))
@@ -1008,9 +1019,13 @@ async fn list_vaults(
     let store = state.store.lock().await;
     let rows: Vec<(VaultId, u32)> = match state.options.auth {
         AuthMode::Disabled => store.vaults().map_err(internal)?,
-        AuthMode::Enabled { .. } => {
-            store.vaults_of(&user.id).map_err(internal)?.into_iter().map(|(v, _, n)| (v, n)).collect()
-        }
+        AuthMode::Enabled { .. } => store
+            .vaults_of(&user.id)
+            .map_err(internal)?
+            .into_iter()
+            .filter(|(v, _, _)| user.reaches(*v))
+            .map(|(v, _, n)| (v, n))
+            .collect(),
     };
     Ok(Json(rows.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect()))
 }
@@ -1490,7 +1505,9 @@ async fn search(
         AuthMode::Disabled => store.search(&p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
         AuthMode::Enabled { .. } => {
             let mut all = Vec::new();
-            for (v, _, _) in store.vaults_of(&user.id).map_err(internal)? {
+            for (v, _, _) in
+                store.vaults_of(&user.id).map_err(internal)?.into_iter().filter(|(v, _, _)| user.reaches(*v))
+            {
                 all.extend(
                     store.search_in_vault(v, &p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
                 );

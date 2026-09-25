@@ -3,6 +3,12 @@
 //! Sessions are opaque random tokens; the store keeps only their BLAKE3 hash. Browsers get the
 //! token in an HttpOnly cookie (so the WebSocket upgrade carries it for free); native clients
 //! and the CLI send `Authorization: Bearer <token>`.
+//!
+//! A personal access token (`lmt_…`) is sent the same way and may be narrowed to some vaults
+//! and to reading: [`AuthUser::scope`]. Every role decision goes through [`role_or_claim`] and
+//! [`note_role`], which apply it, so a scoped token cannot see past it by any route. A token
+//! never carries its user's admin rights, and cannot mint, list or revoke tokens — otherwise a
+//! narrow token would be one request away from a wide one.
 
 use std::sync::Arc;
 
@@ -13,7 +19,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get};
 use lemmate_core::attachments::hash_bytes;
-use lemmate_core::store::{InviteRow, Role, UserRow, now_ms};
+use lemmate_core::store::{AccessTokenRow, InviteRow, Role, UserRow, now_ms};
 use lemmate_core::{NoteId, Store, VaultId};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +27,8 @@ use crate::app::AppState;
 
 pub const COOKIE: &str = "lemmate_session";
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Personal access tokens start with this, so one pasted into a config file is recognisable.
+pub const TOKEN_PREFIX: &str = "lmt_";
 
 #[derive(Debug, Clone)]
 pub enum AuthMode {
@@ -43,6 +51,23 @@ pub struct AuthUser {
     pub email: String,
     pub display_name: String,
     pub is_admin: bool,
+    /// Set when the request came with a personal access token rather than a session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<TokenScope>,
+}
+
+/// What a personal access token may reach.
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenScope {
+    pub name: String,
+    /// `None`: every vault the user can reach.
+    #[serde(serialize_with = "vault_ids")]
+    pub vaults: Option<Vec<VaultId>>,
+    pub read_only: bool,
+}
+
+fn vault_ids<S: serde::Serializer>(v: &Option<Vec<VaultId>>, s: S) -> Result<S::Ok, S::Error> {
+    v.as_ref().map(|vs| vs.iter().map(ToString::to_string).collect::<Vec<_>>()).serialize(s)
 }
 
 impl AuthUser {
@@ -52,10 +77,30 @@ impl AuthUser {
             email: "local@localhost".into(),
             display_name: "local".into(),
             is_admin: true,
+            token: None,
         }
     }
     fn from_row(u: UserRow) -> Self {
-        Self { id: u.id, email: u.email, display_name: u.display_name, is_admin: u.is_admin }
+        Self { id: u.id, email: u.email, display_name: u.display_name, is_admin: u.is_admin, token: None }
+    }
+    fn from_token(u: UserRow, t: AccessTokenRow) -> Self {
+        Self {
+            id: u.id,
+            email: u.email,
+            display_name: u.display_name,
+            is_admin: false,
+            token: Some(TokenScope { name: t.name, vaults: t.vaults, read_only: t.read_only }),
+        }
+    }
+
+    /// Whether this request may touch `vault` at all (before any role is looked at).
+    pub fn reaches(&self, vault: VaultId) -> bool {
+        self.token.as_ref().and_then(|t| t.vaults.as_ref()).is_none_or(|vs| vs.contains(&vault))
+    }
+
+    /// A role as this request may use it: a read-only token is a viewer whatever its user is.
+    fn cap(&self, role: Role) -> Role {
+        if self.token.as_ref().is_some_and(|t| t.read_only) { role.min(Role::Viewer) } else { role }
     }
 }
 
@@ -100,8 +145,13 @@ pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AuthU
         AuthMode::Disabled => Some(AuthUser::local()),
         AuthMode::Enabled { .. } => {
             let token = token_from_headers(headers)?;
-            let store = state.store.lock().await;
-            store.session_user(&token_hash(&token)).ok().flatten().map(AuthUser::from_row)
+            let hash = token_hash(&token);
+            let mut store = state.store.lock().await;
+            if token.starts_with(TOKEN_PREFIX) {
+                let (user, row) = store.access_token_user(&hash).ok().flatten()?;
+                return Some(AuthUser::from_token(user, row));
+            }
+            store.session_user(&hash).ok().flatten().map(AuthUser::from_row)
         }
     }
 }
@@ -119,11 +169,16 @@ pub async fn role_or_claim(state: &AppState, user: &AuthUser, vault: VaultId, cl
     if matches!(state.options.auth, AuthMode::Disabled) {
         return Some(Role::Owner);
     }
+    if !user.reaches(vault) {
+        return None;
+    }
     let mut store = state.store.lock().await;
     if let Ok(Some(r)) = store.membership(vault, &user.id) {
-        return Some(r);
+        return Some(user.cap(r));
     }
-    if claim && store.member_count(vault).ok()? == 0 {
+    // A read-only token creates nothing, and that includes a vault.
+    let may_claim = claim && !user.token.as_ref().is_some_and(|t| t.read_only);
+    if may_claim && store.member_count(vault).ok()? == 0 {
         store.set_membership(vault, &user.id, Role::Owner).ok()?;
         return Some(Role::Owner);
     }
@@ -136,13 +191,18 @@ pub async fn note_role(state: &AppState, user: &AuthUser, vault: VaultId, note: 
     if matches!(state.options.auth, AuthMode::Disabled) {
         return Some(Role::Owner);
     }
+    // A token scoped to other vaults does not reach a note shared from this one either.
+    if !user.reaches(vault) {
+        return None;
+    }
     let store = state.store.lock().await;
     let vault_role = store.membership(vault, &user.id).ok().flatten();
     let share_role = store.note_share_role(note, &user.id).ok().flatten();
-    match (vault_role, share_role) {
+    let role = match (vault_role, share_role) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
-    }
+    };
+    role.map(|r| user.cap(r))
 }
 
 /// 404 for non-members (no existence leak), 403 for an insufficient role.
@@ -167,6 +227,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/v1/auth/login", axum::routing::post(login))
         .route("/api/v1/auth/logout", axum::routing::post(logout))
         .route("/api/v1/auth/me", get(me))
+        .route("/api/v1/auth/config", get(auth_config))
+        .route("/api/v1/tokens", get(list_tokens).post(create_token))
+        .route("/api/v1/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/api/v1/vaults/{vault}/members", get(list_members).put(put_member))
         .route("/api/v1/vaults/{vault}/members/{user}", axum::routing::delete(delete_member))
         .route(
@@ -345,6 +408,7 @@ async fn shared_with_me(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
         rows.into_iter()
+            .filter(|(n, _)| user.reaches(n.vault_id))
             .map(|(n, r)| SharedNoteOut {
                 id: n.id.to_string(),
                 vault_id: n.vault_id.to_string(),
@@ -413,13 +477,18 @@ pub struct SessionOut {
     pub user: AuthUser,
 }
 
-fn session_response(state: &AppState, token: String, user: AuthUser) -> Response {
+/// The `Set-Cookie` value that hands a browser its session.
+pub fn session_cookie(state: &AppState, token: &str) -> String {
     let secure = matches!(state.options.auth, AuthMode::Enabled { secure_cookies: true, .. });
-    let cookie = format!(
+    format!(
         "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
         SESSION_TTL_MS / 1000,
         if secure { "; Secure" } else { "" }
-    );
+    )
+}
+
+fn session_response(state: &AppState, token: String, user: AuthUser) -> Response {
+    let cookie = session_cookie(state, &token);
     let mut resp = Json(SessionOut { token, user }).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
@@ -427,7 +496,7 @@ fn session_response(state: &AppState, token: String, user: AuthUser) -> Response
     resp
 }
 
-async fn issue_session(
+pub async fn issue_session(
     store: &mut Store,
     user: &UserRow,
     device: Option<&str>,
@@ -447,6 +516,11 @@ async fn register(
     let AuthMode::Enabled { allow_registration, .. } = state.options.auth else {
         return Err(StatusCode::NOT_FOUND);
     };
+    // With password login off, accounts come from the identity provider (`oidc`), invites
+    // included; a password account could never sign in.
+    if !state.options.password_login {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let email = c.email.trim().to_lowercase();
     if !email.contains('@') || c.password.len() < 8 {
         return Err(StatusCode::BAD_REQUEST);
@@ -501,6 +575,9 @@ async fn login(
     if matches!(state.options.auth, AuthMode::Disabled) {
         return Err(StatusCode::NOT_FOUND);
     }
+    if !state.options.password_login {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let mut store = state.store.lock().await;
     let user = store.user_by_email(c.email.trim()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let ok = user
@@ -529,6 +606,155 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
 
 async fn me(user: AuthUser) -> Json<AuthUser> {
     Json(user)
+}
+
+#[derive(Serialize)]
+pub struct AuthConfig {
+    /// False on a server that runs without accounts (`--no-auth`).
+    pub accounts: bool,
+    pub password_login: bool,
+    /// Whether an uninvited visitor may create an account right now: open registration, or a
+    /// server with no accounts yet (the first becomes the admin).
+    pub registration: bool,
+    /// The identity provider's label for the sign-in button, when OIDC is set up.
+    pub oidc: Option<String>,
+}
+
+/// What the sign-in page should offer (public).
+async fn auth_config(State(state): State<Arc<AppState>>) -> Result<Json<AuthConfig>, StatusCode> {
+    let AuthMode::Enabled { allow_registration, .. } = state.options.auth else {
+        return Ok(Json(AuthConfig {
+            accounts: false,
+            password_login: false,
+            registration: false,
+            oidc: None,
+        }));
+    };
+    let empty = state.store.lock().await.user_count().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? == 0;
+    Ok(Json(AuthConfig {
+        accounts: true,
+        password_login: state.options.password_login,
+        registration: allow_registration || empty,
+        oidc: state.oidc.as_ref().map(|o| o.display_name().to_owned()),
+    }))
+}
+
+// ---- Personal access tokens -------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct TokenIn {
+    pub name: String,
+    /// Vault ids the token may reach; omitted or null = every vault you can.
+    #[serde(default)]
+    pub vaults: Option<Vec<String>>,
+    #[serde(default)]
+    pub read_only: bool,
+    /// Lifetime in days; omitted = no expiry.
+    #[serde(default)]
+    pub expires_days: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct TokenOut {
+    /// The BLAKE3 hash of the token: safe to list and to revoke by.
+    pub id: String,
+    pub name: String,
+    pub vaults: Option<Vec<String>>,
+    pub read_only: bool,
+    pub created_ms: i64,
+    pub expires_ms: Option<i64>,
+    pub last_used_ms: Option<i64>,
+    /// The token itself. Returned once, when it is minted, and never again.
+    pub token: Option<String>,
+}
+
+fn token_out(t: AccessTokenRow, token: Option<String>) -> TokenOut {
+    TokenOut {
+        id: t.token_hash,
+        name: t.name,
+        vaults: t.vaults.map(|vs| vs.iter().map(ToString::to_string).collect()),
+        read_only: t.read_only,
+        created_ms: t.created_ms,
+        expires_ms: t.expires_ms,
+        last_used_ms: t.last_used_ms,
+        token,
+    }
+}
+
+/// Token management needs a real session: see the module comment.
+fn session_only(state: &AppState, user: &AuthUser) -> Result<(), StatusCode> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if user.token.is_some() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+async fn list_tokens(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<TokenOut>>, StatusCode> {
+    session_only(&state, &user)?;
+    let rows =
+        state.store.lock().await.access_tokens_of(&user.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(rows.into_iter().map(|t| token_out(t, None)).collect()))
+}
+
+/// Mint a personal access token (SPEC §11.1). Scoping it to vaults you are not a member of
+/// would only make a token that can do nothing, so that is refused as the typo it probably is.
+async fn create_token(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<TokenIn>,
+) -> Result<Json<TokenOut>, StatusCode> {
+    session_only(&state, &user)?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let vaults = match &body.vaults {
+        None => None,
+        Some(ids) => {
+            let parsed = ids
+                .iter()
+                .map(|v| v.parse::<VaultId>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            if parsed.is_empty() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Some(parsed)
+        }
+    };
+    let token = format!("{TOKEN_PREFIX}{}", new_token());
+    let expires = body.expires_days.map(|d| now_ms() + i64::from(d) * 24 * 3600 * 1000);
+    let mut store = state.store.lock().await;
+    for v in vaults.iter().flatten() {
+        if store.membership(*v, &user.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+    let row = store
+        .create_access_token(&token_hash(&token), &user.id, name, vaults.as_deref(), body.read_only, expires)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(token_out(row, Some(token))))
+}
+
+async fn revoke_token(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    session_only(&state, &user)?;
+    let gone = state
+        .store
+        .lock()
+        .await
+        .delete_access_token(&user.id, &id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if gone { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
 }
 
 #[derive(Deserialize)]
@@ -563,6 +789,10 @@ async fn change_password(
 ) -> Result<Json<PasswordChanged>, StatusCode> {
     if matches!(state.options.auth, AuthMode::Disabled) {
         return Err(StatusCode::NOT_FOUND);
+    }
+    // A token is for data, not for taking over the account it belongs to.
+    if !state.options.password_login || user.token.is_some() {
+        return Err(StatusCode::FORBIDDEN);
     }
     if body.new_password.len() < 8 {
         return Err(StatusCode::BAD_REQUEST);

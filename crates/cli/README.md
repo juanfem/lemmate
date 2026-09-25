@@ -29,7 +29,7 @@ They all take the same connection options:
 | Option | Environment | Meaning |
 |---|---|---|
 | `--server URL` | `LEMMATE_SERVER` | Server base URL, e.g. `https://notes.example.org`. Required. |
-| `--token TOKEN` | `LEMMATE_TOKEN` | Access token. Defaults to the one `lemmate login` saved for this server (`credentials.toml` in the per-user configuration directory: `~/.config/lemmate` on Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on Windows; `LEMMATE_CONFIG_DIR` overrides it). |
+| `--token TOKEN` | `LEMMATE_TOKEN` | Access token — a session, or a personal access token (`lmt_…`) made in the web client. Defaults to the one `lemmate login` saved for this server: in the system keychain where there is one, else `credentials.toml` in the per-user configuration directory (`~/.config/lemmate` on Linux, `~/Library/Application Support/lemmate` on macOS, `%APPDATA%\lemmate` on Windows; `LEMMATE_CONFIG_DIR` overrides it; `LEMMATE_KEYCHAIN=0` keeps tokens in the file). |
 | `--ca-cert FILE` | `LEMMATE_CA_CERT` | PEM of a private CA to trust for `https://`. |
 | `--vault ULID` | `LEMMATE_VAULT` | Which vault to work in. Optional when the account has exactly one. |
 
@@ -56,6 +56,9 @@ content and applies the difference as CRDT edits, so they merge with whoever els
 
 ```sh
 lemmate login --server https://notes.example.org --email you@example.org
+# or, on a server that signs in through an identity provider (or for a script or MCP, with a
+# token limited to one vault and to reading):
+lemmate login --server https://notes.example.org --token lmt_…
 export LEMMATE_SERVER=https://notes.example.org
 lemmate vaults
 lemmate new Meetings/standup < draft.md

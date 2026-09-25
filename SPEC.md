@@ -573,8 +573,14 @@ Editing features:
 
 - Email + password (argon2id) and/or OIDC (any provider; Authelia/Keycloak/Google tested).
   Server config can disable password login or registration.
-- Sessions are opaque tokens; native clients store them in the OS keychain.
-- Personal access tokens for the CLI, API, and MCP, scoped to vaults.
+- Sessions are opaque tokens; native clients store them in the OS keychain (falling back to a
+  0600 file where there is none).
+- Personal access tokens for the CLI, API, and MCP, scoped to vaults and optionally read-only.
+  A token never carries admin rights and cannot manage tokens or the password.
+- OIDC: authorization code + PKCE; the ID token comes from the token endpoint over TLS and its
+  claims (issuer, audience, expiry, nonce) are checked. An identity is tied to an account by its
+  issuer-qualified `sub`; on first sign-in, a *verified* email matching an account ties to it,
+  and otherwise the registration doors below decide (an invite link carries through the flow).
 - **Registration has four doors** and no others: the user table is empty (that account becomes
   the admin), `--allow-registration` is on, an admin makes the request, or the request carries a
   valid invite.

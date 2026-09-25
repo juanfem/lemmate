@@ -1,14 +1,30 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { api, ApiError } from '../lib/api.ts'
+  import { api, ApiError, type AuthConfig } from '../lib/api.ts'
 
   let { onDone, invite = null }: { onDone: () => void; invite?: string | null } = $props()
+  // What the server offers: passwords, an identity provider, or both. Until it answers, assume
+  // passwords, which is what every server without OIDC does.
+  let config = $state<AuthConfig | null>(null)
+  $effect(() => {
+    api.authConfig().then((c) => (config = c), () => {})
+  })
+  let passwords = $derived(config?.password_login ?? true)
+  let oidcHref = $derived(`/api/v1/auth/oidc/start${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`)
+  // A sign-in through the identity provider that failed comes back as `?signin_error=…`: show
+  // it once, and take it out of the address bar so a reload does not show it again.
+  const signinError = new URLSearchParams(location.search).get('signin_error')
+  if (signinError) {
+    const url = new URL(location.href)
+    url.searchParams.delete('signin_error')
+    history.replaceState(history.state, '', url)
+  }
   // Arriving on an invite link means the point is to create an account, so start there.
   let mode: 'login' | 'register' = $state(untrack(() => (invite ? 'register' : 'login')))
   let email = $state('')
   let password = $state('')
   let name = $state('')
-  let error = $state('')
+  let error = $state(untrack(() => signinError ?? ''))
   let busy = $state(false)
 
   async function submit(e: Event) {
@@ -40,6 +56,16 @@
 <main class="login">
   <form onsubmit={submit}>
     <h1>Lemmate</h1>
+    {#if config?.oidc}
+      <a class="primary sso" href={oidcHref}>{invite ? 'Accept the invite with' : 'Sign in with'} {config.oidc}</a>
+      {#if !passwords}
+        <p class="muted">{invite ? 'The invite creates your account the first time you sign in; it works once.' : 'This server signs in through your identity provider.'}</p>
+        {#if error}<p class="error">{error}</p>{/if}
+      {:else}
+        <p class="or">or with a password</p>
+      {/if}
+    {/if}
+    {#if passwords}
     <p class="muted">
       {#if mode === 'login'}Sign in to your server.
       {:else if invite}You were invited. Pick an email and a password; the link works once.
@@ -55,6 +81,7 @@
     <button type="button" class="link" onclick={() => (mode = mode === 'login' ? 'register' : 'login')}>
       {mode === 'login' ? 'Need an account?' : 'Have an account? Sign in'}
     </button>
+    {/if}
   </form>
 </main>
 
@@ -66,6 +93,8 @@
   input { font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: inherit; }
   .primary { font: inherit; background: var(--accent); color: white; border: 0; border-radius: 6px; padding: 0.55rem 1rem; cursor: pointer; }
   .primary:disabled { opacity: 0.6; }
+  a.sso { text-align: center; text-decoration: none; }
+  .or { margin: 0; text-align: center; font-size: 0.8rem; color: var(--muted); }
   .link { font: inherit; font-size: 0.85rem; background: none; border: 0; color: var(--accent); cursor: pointer; }
   .muted { color: var(--muted); margin: 0; font-size: 0.9rem; }
   .error { color: #dc2626; margin: 0; font-size: 0.85rem; }

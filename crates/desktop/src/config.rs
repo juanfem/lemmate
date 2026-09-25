@@ -367,6 +367,7 @@ mod tests {
             password: None,
             register: false,
             invite: None,
+            token: None,
         };
         Config::write_setup(&p, &req).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
