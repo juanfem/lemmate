@@ -90,7 +90,8 @@ phone layout, the CLI, export and rendering, and migrating from Obsidian.
 roles, sharing and presence. **M3** (power features) has landed pandoc export, Quarto rendering,
 REST and relay writes, the MCP server and remote CLI, the all-vaults workspace, Obsidian import
 from the UI, transclusion, a file manager for non-note files, and the installable offline web
-client with a phone layout. Still owed: an on-screen keyboard toolbar for phones.
+client with a phone layout and a toolbar above its keyboard, and a floating format bar and
+right-click menu in the editor.
 
 There is no native mobile app, by decision: a Tauri mobile shell existed and was removed in
 favour of the installed web client, which already does everything it was for (SPEC §14).

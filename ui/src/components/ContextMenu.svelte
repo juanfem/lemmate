@@ -9,6 +9,8 @@
     separator?: boolean
     /** One of a set to pick from, and whether it is the picked one: drawn with a tick. */
     checked?: boolean
+    /** Its keyboard shortcut, drawn faint at the right: the menu is also where keys are learnt. */
+    hint?: string
   }
 
   export interface MenuState {
@@ -93,7 +95,7 @@
         onclick={() => choose(item)}
         onmouseenter={() => (focused = i)}
       >
-        {#if item.checked !== undefined}<span class="tick" aria-hidden="true">{item.checked ? '✓' : ''}</span>{/if}{item.label}
+        {#if item.checked !== undefined}<span class="tick" aria-hidden="true">{item.checked ? '✓' : ''}</span>{/if}{item.label}{#if item.hint}<span class="hint">{item.hint}</span>{/if}
       </button>
     {/if}
   {/each}
@@ -134,6 +136,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .hint {
+    float: right;
+    margin-left: 1.5rem;
+    color: var(--muted);
+    font-size: 0.78rem;
   }
   .tick {
     display: inline-block;

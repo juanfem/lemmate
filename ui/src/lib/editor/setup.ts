@@ -18,6 +18,8 @@ import { livePreview, refreshPreview, type EmbeddedNote, type LivePreviewOptions
 import { embeddedSection, type EmbedTarget } from './transclude.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
+import { insertLink, run, toggleMark } from './format.ts'
+import { selectionBar } from './selectionBar.ts'
 
 const highlight = HighlightStyle.define([
   { tag: t.heading, fontWeight: '600' },
@@ -454,11 +456,18 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
+      selectionBar(),
       // Before `indentWithTab`, which only knows about indent units: in a list, Tab means
       // "nest this under the item above", and the two are different columns. It declines
       // anywhere its rules do not apply, and the generic indent then runs as before.
       keymap.of([
         { key: 'Tab', run: listIndent(1), shift: listIndent(-1) },
+        // Ahead of the default keymap, whose Mod-I selects the parent syntax node. Mod-K and
+        // Mod-E are the shell's (palette, view mode), so link and strikethrough take Shift.
+        { key: 'Mod-b', run: run(toggleMark('**')) },
+        { key: 'Mod-i', run: run(toggleMark('*')) },
+        { key: 'Mod-Shift-x', run: run(toggleMark('~~')) },
+        { key: 'Mod-Shift-k', run: run(insertLink) },
         ...closeBracketsKeymap,
         ...defaultKeymap,
         ...searchKeymap,

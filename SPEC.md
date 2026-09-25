@@ -1,8 +1,8 @@
 # Lemmate — Specification
 
 Status: draft v0.5 (2026-09-03) — M0–M2 implemented, accounts through single-use invites and
-password changes (§11.1); M3 partly (export, REST/relay writes, MCP, remote CLI, the installable
-offline web client of §6.4, transclusion, Quarto render), with the keyboard toolbar outstanding; the native
+password changes (§11.1); M3 (export, REST/relay writes, MCP, remote CLI, the installable
+offline web client of §6.4 and its keyboard toolbar, transclusion, Quarto render); the native
 mobile shell was dropped (§14); see README status
 Decisions marked **[decided]** are settled; **[recommended]** are proposals awaiting confirmation; **[open]** need an answer.
 
@@ -484,6 +484,13 @@ Editing features:
 - Find/replace in note; multi-cursor. (Vim keymap: not planned for M1 **[decided]**.)
 - Spellcheck via the platform webview.
 - Collaboration: remote cursors and selections with name labels; presence list per note.
+- Formatting for readers who do not write markdown: a floating bar over a non-empty selection
+  (bold, italic, strikethrough, code, link, note link — each a toggle), the same commands on
+  Mod-B / Mod-I / Mod-Shift-X / Mod-Shift-K (Mod-K and Mod-E belong to the shell), and a
+  right-click menu in the note with those plus checklist item and *insert image or file*.
+  Every one adds or removes marker characters and nothing else (§1.3). The bar waits for the
+  mouse to be released, and is absent on a coarse pointer, where the platform's selection menu
+  is. Shift+right-click reaches the browser's menu, which carries the spelling suggestions.
 - On a phone: toolbar row above the on-screen keyboard for markup, indent, checkbox, link, image.
 
 ---

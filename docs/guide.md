@@ -311,8 +311,19 @@ Callout `collapse="true"` is not implemented.
   item's children come along, and an ordered item is renumbered for the level it lands on.
   Markdown nests by column, so this is not the same as adding spaces: `Tab` puts the marker
   exactly where the item above holds its content. Anywhere else it is the usual indent.
-- **On a phone**, where the keyboard has no `Tab`, the same two commands are the ⇤/⇥ buttons in
-  the bar above the note.
+- **Formatting without the markdown.** Select some text and a small bar appears over it:
+  **bold**, *italic*, ~~strikethrough~~, `code`, a link, and a `[[link]]` to a note. Each
+  button toggles, so pressing it again takes the markers off. The same commands have keys —
+  `Ctrl+B`, `Ctrl+I`, `Ctrl+Shift+X`, `Ctrl+Shift+K` for a link — and all they ever do is add
+  or remove the marker characters in the text.
+- **Right-click in a note** for the same commands, plus *Checklist item* (a box on the line, or
+  ticks one already there) and *Insert image or file…*, which uploads from your computer and
+  puts the embed where you clicked. `Shift`+right-click gets you the browser's own menu, which
+  is where its spelling suggestions are.
+- **On a phone** the bar above the note holds the buttons the keyboard lacks: ⇤/⇥ for the two
+  `Tab` commands, a checklist box, bold, italic, a note link, a link, and an upload (which can
+  also take a photo). It scrolls sideways if the screen is narrow. There is no floating bar on
+  a touch screen: the phone's own selection menu is already there.
 - Standard CodeMirror editing: undo/redo, find (`Ctrl+F`), bracket matching.
 - `.qmd` files are first-class notes with the same editor, links and search.
 
@@ -683,6 +694,9 @@ your account.
 | `Ctrl+Shift+T` | Reopen closed tab |
 | `Ctrl+\` | Split right |
 | `Ctrl+Alt+→` / `Ctrl+Alt+←` | Focus next / previous pane |
+| `Ctrl+B` / `Ctrl+I` | Bold / italic, in a note — toggles |
+| `Ctrl+Shift+X` | Strikethrough, in a note — toggles |
+| `Ctrl+Shift+K` | Link: the selection becomes its text (or its target, if it is a URL) |
 
 Inside the palette: `↑`/`↓` to move, `Enter` to choose, `Ctrl+Enter` to open in a split,
 `Shift+Enter` to create a note from what you typed, `Escape` to close.
@@ -696,7 +710,8 @@ Commands without a shortcut, reachable from the palette: show Files / Tags / Sta
 Rename / move note, Move note to trash, Pin / unpin tab, Close pane, Switch vault, Sign out.
 
 Inside the editor, CodeMirror's own bindings apply — `Ctrl+F` find, `Ctrl+Z` / `Ctrl+Y` undo
-and redo, `Tab` indent, `Ctrl+Space` autocomplete. There is no vim keymap (SPEC §17).
+and redo, `Tab` indent, `Ctrl+Space` autocomplete — except `Ctrl+I`, which is italic here
+rather than CodeMirror's "select the enclosing syntax". There is no vim keymap (SPEC §17).
 
 ---
 

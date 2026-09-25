@@ -3,6 +3,9 @@
   import { EditorView } from '@codemirror/view'
   import { createEditor, setViewMode, type NoteSource, type ViewMode } from '../lib/editor/setup.ts'
   import { listIndent } from '../lib/editor/lists.ts'
+  import { insertLink, run, toggleMark, toggleTask, toggleWikilink, type Plan } from '../lib/editor/format.ts'
+  import { MOD } from '../lib/editor/selectionBar.ts'
+  import { startCompletion } from '@codemirror/autocomplete'
   import Icon from './Icon.svelte'
   import type { VaultSession } from '../lib/vault.svelte.ts'
   import { api } from '../lib/api.ts'
@@ -13,7 +16,7 @@
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
   import { embedUrlFor } from '../lib/attachments.ts'
   import { addTagToFrontMatter, cleanTag } from '../lib/tagedit.ts'
-  import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
+  import ContextMenu, { menuAt, type MenuItem, type MenuState } from './ContextMenu.svelte'
   import { baseName, extension, fileKind, folderOf } from '../lib/filetree.ts'
   import type { PageFile } from '../lib/editor/page.ts'
 
@@ -190,7 +193,10 @@
         refs.push(`<!-- upload failed for ${file.name}: ${String(e)} -->`)
       }
     }
-    if (refs.length) view.dispatch({ changes: { from: at, insert: refs.join('\n') }, selection: { anchor: at + refs.join('\n').length } })
+    if (!refs.length) return
+    // Not glued to the word before it, which would read as part of that word.
+    const insert = (/\S/u.test(view.state.sliceDoc(at - 1, at)) ? ' ' : '') + refs.join('\n')
+    view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length } })
   }
 
   /**
@@ -261,7 +267,88 @@
     if (u.docChanged || u.geometryChanged) reportHere()
   })
 
+  /** Run a formatting command from a button or the menu, and hand the focus back to the text. */
+  function format(plan: Plan) {
+    const v = view
+    if (!v) return
+    run(plan)(v)
+    // An empty `[[]]` is only useful with the note names offered inside it.
+    if (plan === toggleWikilink && v.state.selection.main.empty) startCompletion(v)
+    v.focus()
+  }
+
+  let picker: HTMLInputElement
+  /** Upload from the device, into the note at the cursor — the menu's and the phone bar's way in. */
+  function pickFiles() {
+    picker.value = ''
+    picker.click()
+  }
+  function picked() {
+    if (view && picker.files?.length) void insertFiles(picker.files, view.state.selection.main.head)
+  }
+
+  /** The editor's own right-click menu (below): the format commands and an upload. */
+  let textMenu: MenuState | null = $state(null)
+  function editorMenu(e: MouseEvent, v: EditorView): boolean {
+    // Shift+right-click is the way through to the browser's menu, which is where the
+    // spelling suggestions live. A long press on a touch screen is the platform's text
+    // selection, which a menu of ours would take away.
+    const touch = (e as PointerEvent).pointerType === 'touch' || ((e as PointerEvent).pointerType === undefined && matchMedia('(pointer: coarse)').matches)
+    if (e.shiftKey || touch) return false
+    // A click outside the selection moves the cursor there first, as the native menu does, so
+    // "Insert image" lands where the click was.
+    const at = v.posAtCoords({ x: e.clientX, y: e.clientY })
+    const sel = v.state.selection.main
+    if (at !== null && (at < sel.from || at > sel.to)) v.dispatch({ selection: { anchor: at } })
+    const selected = !v.state.selection.main.empty
+    const text = () => v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to)
+    const editable = !v.state.readOnly && v.state.facet(EditorView.editable)
+    const clip = typeof navigator.clipboard?.writeText === 'function'
+    const items: MenuItem[] = []
+    if (clip) {
+      if (editable) {
+        items.push({
+          label: 'Cut',
+          hint: `${MOD}X`,
+          disabled: !selected,
+          run: () => void navigator.clipboard.writeText(text()).then(() => (v.dispatch(v.state.replaceSelection('')), v.focus())),
+        })
+      }
+      items.push({ label: 'Copy', hint: `${MOD}C`, disabled: !selected, run: () => void navigator.clipboard.writeText(text()).then(() => v.focus()) })
+      if (editable && typeof navigator.clipboard.readText === 'function') {
+        items.push({
+          label: 'Paste',
+          hint: `${MOD}V`,
+          run: () =>
+            void navigator.clipboard.readText().then(
+              (t) => (v.dispatch(v.state.replaceSelection(t)), v.focus()),
+              () => v.focus(),
+            ),
+        })
+      }
+    }
+    if (editable) {
+      if (items.length) items.push({ label: '', separator: true })
+      items.push(
+        { label: 'Bold', hint: `${MOD}B`, run: () => format(toggleMark('**')) },
+        { label: 'Italic', hint: `${MOD}I`, run: () => format(toggleMark('*')) },
+        { label: 'Strikethrough', hint: `${MOD}Shift+X`, run: () => format(toggleMark('~~')) },
+        { label: 'Code', run: () => format(toggleMark('`')) },
+        { label: '', separator: true },
+        { label: 'Link', hint: `${MOD}Shift+K`, run: () => format(insertLink) },
+        { label: 'Link to a note', run: () => format(toggleWikilink) },
+        { label: 'Checklist item', run: () => format(toggleTask) },
+        { label: '', separator: true },
+        { label: 'Insert image or file…', run: pickFiles },
+      )
+    }
+    if (!items.length) return false
+    textMenu = menuAt(e, items)
+    return true
+  }
+
   const fileHandlers = EditorView.domEventHandlers({
+    contextmenu: editorMenu,
     paste(event, v) {
       const files = event.clipboardData?.files
       if (!files || files.length === 0) return false
@@ -363,17 +450,30 @@
 {#if uploadMenu}
   <ContextMenu menu={uploadMenu} onClose={() => (uploadMenu = null)} />
 {/if}
+{#if textMenu}
+  <ContextMenu menu={textMenu} onClose={() => (textMenu = null)} />
+{/if}
+<input class="picker" type="file" multiple bind:this={picker} onchange={picked} tabindex="-1" aria-hidden="true" />
 
 <div class="frame">
-  <!-- A phone keyboard has no Tab, and nesting a list item is the one edit that needs one. The
-       bar sits above the editor rather than over the keyboard, so it stays reachable while
-       typing. The press is cancelled on `pointerdown` so the editor keeps the focus and the
-       selection the command is about to act on, while the click still arrives — which is also
-       what makes the buttons work from the keyboard. -->
-  <div class="touchbar">
-    <button onpointerdown={keepFocus} onclick={() => indent(-1)} title="Outdent (Shift+Tab)" aria-label="Outdent"><Icon name="outdent" size={16} /></button>
-    <button onpointerdown={keepFocus} onclick={() => indent(1)} title="Indent (Tab)" aria-label="Indent"><Icon name="indent" size={16} /></button>
-  </div>
+  <!-- A phone keyboard has no Tab, no Ctrl for bold, and buries `[` and `*` a layer or two
+       down, so the edits that need them get buttons (SPEC §8). The bar sits above the editor
+       rather than over the keyboard, so it stays reachable while typing, and scrolls sideways
+       when the screen is narrower than it. The press is cancelled on `pointerdown` so the
+       editor keeps the focus and the selection the command is about to act on, while the click
+       still arrives — which is also what makes the buttons work from the keyboard. -->
+  {#if mode !== 'reading'}
+    <div class="touchbar" role="toolbar" aria-label="Format">
+      <button onpointerdown={keepFocus} onclick={() => indent(-1)} title="Outdent (Shift+Tab)" aria-label="Outdent"><Icon name="outdent" size={16} /></button>
+      <button onpointerdown={keepFocus} onclick={() => indent(1)} title="Indent (Tab)" aria-label="Indent"><Icon name="indent" size={16} /></button>
+      <button onpointerdown={keepFocus} onclick={() => format(toggleTask)} title="Checklist item" aria-label="Checklist item"><Icon name="task" size={16} /></button>
+      <button class="b" onpointerdown={keepFocus} onclick={() => format(toggleMark('**'))} title="Bold" aria-label="Bold">B</button>
+      <button class="i" onpointerdown={keepFocus} onclick={() => format(toggleMark('*'))} title="Italic" aria-label="Italic">I</button>
+      <button onpointerdown={keepFocus} onclick={() => format(toggleWikilink)} title="Link to a note" aria-label="Link to a note">[[ ]]</button>
+      <button onpointerdown={keepFocus} onclick={() => format(insertLink)} title="Link" aria-label="Link">Link</button>
+      <button onpointerdown={keepFocus} onclick={pickFiles} title="Insert image or file" aria-label="Insert image or file"><Icon name="attach" size={16} /></button>
+    </div>
+  {/if}
   <div class="editor" bind:this={host}></div>
 </div>
 
@@ -394,22 +494,37 @@
   .touchbar {
     display: none;
   }
+  .picker {
+    display: none;
+  }
   @media (pointer: coarse) {
     .touchbar {
       display: flex;
       gap: 0.3rem;
+      overflow-x: auto;
+      scrollbar-width: none;
       padding: 0.3rem 0.5rem;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
     }
     .touchbar button {
       display: flex;
+      flex: none;
       align-items: center;
-      padding: 0.45rem 0.9rem;
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 0.45rem 0.8rem;
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--bg);
       color: inherit;
+    }
+    .touchbar .b {
+      font-weight: 700;
+    }
+    .touchbar .i {
+      font-style: italic;
+      font-family: Georgia, serif;
     }
   }
 </style>
