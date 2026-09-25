@@ -174,6 +174,7 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
                         .context("re-reading the new configuration")?;
                     let mut relay = start_relay_for(&cfg, web_dir).await?;
                     watch_for_connect(handle.clone(), &mut relay, cfg.config_path.clone());
+                    watch_for_sign_out(handle.clone(), &mut relay, &cfg);
                     let url: tauri::Url = window_url(&relay).parse()?;
                     if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
                         w.navigate(url).context("navigating to the relay")?;
@@ -214,6 +215,7 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
     // serveable by the time the webview asks for it.
     let mut handle = tauri::async_runtime::block_on(start_relay_for(cfg, web_dir))?;
     watch_for_connect(app.handle().clone(), &mut handle, cfg.config_path.clone());
+    watch_for_sign_out(app.handle().clone(), &mut handle, cfg);
 
     let url = window_url(&handle);
     tracing::info!(%url, "opening main window");
@@ -567,6 +569,43 @@ fn watch_for_connect(app: tauri::AppHandle, relay: &mut LocalHandle, config_path
                 // Give the answer time off the wire before the process goes away, so the page
                 // that asked sees "connected" rather than a dropped connection. On the blocking
                 // pool, since this crate does not depend on tokio directly.
+                let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(RESTART_GRACE)).await;
+                app.restart();
+            }
+        }
+    });
+}
+
+/// Answer the UI's "sign out" for as long as this relay runs: revoke the token on the server,
+/// forget it here — keychain, credentials file, and a `token` written into `desktop.toml` — and
+/// restart. The app comes back signed out: the relay answers `/api/v1/auth/me` with 401 and the
+/// UI offers to sign in again. The notes stay where they are; they are the user's files.
+///
+/// A token given by `--token` or `LEMMATE_TOKEN` is not the shell's to forget, and comes back
+/// with the next start.
+fn watch_for_sign_out(app: tauri::AppHandle, relay: &mut LocalHandle, cfg: &config::Config) {
+    let (Some(mut rx), Some(server)) = (relay.sign_out.take(), cfg.server_url.clone()) else { return };
+    let (ca, config_path) = (cfg.ca_cert.clone(), cfg.config_path.clone());
+    tauri::async_runtime::spawn(async move {
+        while let Some(ask) = rx.recv().await {
+            let (server, ca, path) = (server.clone(), ca.clone(), config_path.clone());
+            let result = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<bool> {
+                let revoked = lemmate_core::credentials::sign_out(&server, ca.as_deref())?;
+                if let Some(p) = &path {
+                    config::Config::clear_token(p)?;
+                }
+                Ok(revoked)
+            })
+            .await
+            .map_err(|e| format!("signing out did not finish: {e}"))
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            match &result {
+                Ok(revoked) => tracing::info!(revoked, "signed out; restarting"),
+                Err(e) => tracing::warn!(error = %e, "could not sign out"),
+            }
+            let restart = result.is_ok();
+            let _ = ask.reply.send(result.map(|_| ()));
+            if restart {
                 let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(RESTART_GRACE)).await;
                 app.restart();
             }

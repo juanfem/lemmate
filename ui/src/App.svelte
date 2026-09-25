@@ -8,6 +8,7 @@
   import Setup from './components/Setup.svelte'
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
+  import SignedOut from './components/SignedOut.svelte'
   import DailyDialog from './components/DailyDialog.svelte'
   import { compare as compareDays, dayOf, formatDate, iso, pathFor, templateOf, today, type Day } from './lib/daily.ts'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
@@ -55,6 +56,12 @@
    *  desktop app, but not `lemmate serve`, which is configured by flags. */
   let canConnect = $state(false)
   let configPath = $state('')
+  /** The server a relay syncs with, and the CA it trusts for it: what signing back in needs. */
+  let relayServer = $state('')
+  let relayCa = $state('')
+  /** Whether the relay probe has answered (either way): until then a 401 cannot be told apart
+   *  between "sign in to this server" and "this desktop app is signed out". */
+  let probed = $state(false)
   let connectOpen = $state(false)
   let mergeOpen = $state(false)
   if (!readPublicToken())
@@ -66,6 +73,7 @@
             configured?: boolean
             mode?: string
             server?: string | null
+            ca_cert?: string | null
             can_connect?: boolean
             config_path?: string
             suggested_root_dir?: string
@@ -77,9 +85,12 @@
           localOnly = j?.mode === 'local'
           canConnect = j?.can_connect === true
           configPath = j?.config_path ?? ''
+          relayServer = j?.server ?? ''
+          relayCa = j?.ca_cert ?? ''
         },
       )
       .catch(() => {})
+      .finally(() => (probed = true))
 
   /** A native app asking to be signed in: this page is only the approval, never the workspace. */
   const appAuth = appAuthorize(location.search)
@@ -115,7 +126,14 @@
   /** Signed out here, so the sign-in page must not bounce straight back through the provider. */
   let signedOut = $state(false)
   async function signOut() {
-    await api.logout().catch(() => {})
+    if (onRelay) {
+      // The desktop app: the shell revokes the token, forgets it and restarts signed out.
+      const r = await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => null)
+      if (!r?.ok) {
+        await ask({ kind: 'confirm', title: 'Could not sign out', body: (await r?.text().catch(() => '')) || 'The app did not answer.', confirmLabel: 'OK' })
+        return
+      }
+    } else await api.logout().catch(() => {})
     signedOut = true
     me = null
     location.hash = ''
@@ -892,8 +910,8 @@
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
-    ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) }] : []),
-    ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
+    ...(me && me.id !== 'local' && !onRelay ? [{ id: 'account', label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) }] : []),
+    ...(me && me.id !== 'local' && (!onRelay || canConnect) ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
   /**
    * Templates (SPEC §9): a note — `Templates/Note.md`, the vault's daily template — with
@@ -1297,6 +1315,10 @@
   <Setup status={setup} onDone={() => (setupStarting = true)} />
 {:else if setupStarting}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Starting your vault…</p></main>
+{:else if authRequired && !probed}
+  <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
+{:else if authRequired && onRelay}
+  <SignedOut server={relayServer} caCert={relayCa} {configPath} {canConnect} />
 {:else if authRequired || (invite && !me)}
   <Login {invite} stay={signedOut} onDone={signedIn} />
 {:else if appAuth}
@@ -1367,8 +1389,8 @@
             <span class="dot" class:offline={status !== 'online'} role="status" title={statusLine} aria-label={statusLine}></span>
             <!-- Who you are, and the way back out. Both were commands and nothing else, and a
                  session you can only end by knowing what to type is a session you cannot end.
-                 Absent with the relay and with `--no-auth`, where `me` is the local user and
-                 there is nothing to leave. -->
+                 Absent standalone and with `--no-auth`, where there is no account to leave; on
+                 the desktop the relay asks the server who its token belongs to. -->
             {#if me && me.id !== 'local'}
               <button
                 class="avatar"
@@ -1383,11 +1405,19 @@
                   menu = {
                     x: r.right + 4,
                     y: r.bottom,
-                    items: [
-                      { label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
-                      { separator: true, label: '' },
-                      { label: 'Sign out', run: signOut, danger: true },
-                    ],
+                    // Account settings are the server's pages; the desktop's relay does not carry
+                    // them, so there the menu is who you are and the way out.
+                    items: onRelay
+                      ? [
+                          { label: `${me?.email ?? ""} on ${relayServer.replace(/^https?:\/\//u, '')}`, run: () => {}, disabled: true },
+                          // Only the desktop shell can sign out; `lemmate serve` is signed in by its flags.
+                          ...(canConnect ? [{ separator: true, label: '' }, { label: 'Sign out', run: signOut, danger: true }] : []),
+                        ]
+                      : [
+                          { label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
+                          { separator: true, label: '' },
+                          { label: 'Sign out', run: signOut, danger: true },
+                        ],
                   }
                 }}
               >

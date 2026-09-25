@@ -316,6 +316,27 @@ pub fn invite_token(invite: &str) -> String {
     s.rsplit_once("/#/invite/").map_or(s, |(_, t)| t).trim().to_owned()
 }
 
+/// Sign out of `server`: tell it to end the saved session or revoke the saved access token, then
+/// forget it here. Returns whether the server confirmed; unreachable or not, the local copy goes
+/// — a sign-out that kept the token because the network was down would not be one.
+pub fn sign_out(server: &str, ca_cert: Option<&std::path::Path>) -> Result<bool> {
+    let confirmed = match load(server) {
+        Some(token) => crate::tls::http_agent(ca_cert)
+            .ok()
+            .and_then(|agent| {
+                agent
+                    .post(format!("{}/api/v1/auth/logout", key(server)))
+                    .header("authorization", &format!("Bearer {token}"))
+                    .send_empty()
+                    .ok()
+            })
+            .is_some(),
+        None => false,
+    };
+    forget(server)?;
+    Ok(confirmed)
+}
+
 pub fn forget(server: &str) -> Result<()> {
     forget_with(system_secrets(), server)
 }

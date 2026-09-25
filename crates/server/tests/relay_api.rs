@@ -243,3 +243,141 @@ async fn relay_writes_land_on_disk_and_on_the_server() {
     }
     handle.abort();
 }
+
+/// The desktop's account menu (`local::auth_me`, `local::sign_out`): the relay says who its token
+/// belongs to by asking the server, calls a refused or missing token *signed out*, and hands a
+/// sign-out to the shell.
+#[tokio::test]
+async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
+    let options = ServerOptions {
+        auth: lemmate_server::AuthMode::Enabled { allow_registration: false, secure_cookies: false },
+        ..ServerOptions::default()
+    };
+    let state = build_state(Store::open_in_memory().unwrap(), options);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let srv = listener.local_addr().unwrap();
+    let app = router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+    let send = move |method: &'static str, url: String, bearer: Option<String>, body: Option<Value>| {
+        let agent = agent.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut r = match method {
+                "GET" => {
+                    let mut req = agent.get(&url);
+                    if let Some(t) = &bearer {
+                        req = req.header("authorization", &format!("Bearer {t}"));
+                    }
+                    req.call().unwrap()
+                }
+                _ => {
+                    let mut req = agent.post(&url).header("content-type", "application/json");
+                    if let Some(t) = &bearer {
+                        req = req.header("authorization", &format!("Bearer {t}"));
+                    }
+                    req.send(body.unwrap_or(Value::Null).to_string().as_bytes()).unwrap()
+                }
+            };
+            let text = r.body_mut().read_to_string().unwrap_or_default();
+            (r.status().as_u16(), serde_json::from_str::<Value>(&text).unwrap_or(Value::Null))
+        })
+    };
+    let base = format!("http://{srv}");
+    let (_, reg) = send(
+        "POST",
+        format!("{base}/api/v1/auth/register"),
+        None,
+        Some(serde_json::json!({"email": "ann@example.org", "password": "long enough"})),
+    )
+    .await
+    .unwrap();
+    let session = reg["token"].as_str().unwrap().to_owned();
+    let (_, tok) = send(
+        "POST",
+        format!("{base}/api/v1/tokens"),
+        Some(session),
+        Some(serde_json::json!({"name": "desktop"})),
+    )
+    .await
+    .unwrap();
+    let token = tok["token"].as_str().unwrap().to_owned();
+
+    let relay_with = |token: Option<String>, dir: std::path::PathBuf, config: Option<std::path::PathBuf>| {
+        let base = base.clone();
+        async move {
+            start(
+                SyncOptions {
+                    vault_dir: dir,
+                    server_url: Some(base),
+                    vault_id: None,
+                    once: false,
+                    ca_cert: None,
+                    token,
+                },
+                LocalOptions {
+                    bind: "127.0.0.1:0".parse().unwrap(),
+                    web_dir: None,
+                    vault_root: None,
+                    config_path: config,
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let (d1, d2, d3) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    // Signed in: the server's answer, as the server gives it.
+    let mut signed_in =
+        relay_with(Some(token.clone()), d1.path().into(), Some(d1.path().join("desktop.toml"))).await;
+    let (s, me) = send("GET", format!("http://{}/api/v1/auth/me", signed_in.addr), None, None).await.unwrap();
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["email"], "ann@example.org");
+    assert_eq!(me["token"]["name"], "desktop");
+
+    // No token for a server that wants one: signed out, and of which server.
+    let none = relay_with(None, d2.path().into(), None).await;
+    let (s, body) = send("GET", format!("http://{}/api/v1/auth/me", none.addr), None, None).await.unwrap();
+    assert_eq!(s, 401);
+    assert_eq!(body["signed_out"], base);
+    // A relay nothing can reconfigure (`lemmate serve`) cannot sign out; the CLI does that.
+    let (s, _) = send("POST", format!("http://{}/api/v1/auth/logout", none.addr), None, None).await.unwrap();
+    assert_eq!(s, 501);
+
+    // Standalone: no account at all.
+    let alone = start(
+        SyncOptions {
+            vault_dir: d3.path().into(),
+            server_url: None,
+            vault_id: None,
+            once: false,
+            ca_cert: None,
+            token: None,
+        },
+        LocalOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            web_dir: None,
+            vault_root: None,
+            config_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (s, _) = send("GET", format!("http://{}/api/v1/auth/me", alone.addr), None, None).await.unwrap();
+    assert_eq!(s, 404);
+
+    // A sign-out reaches the shell, and the page hears the shell's answer.
+    let mut asks = signed_in.sign_out.take().unwrap();
+    let shell = tokio::spawn(async move {
+        let ask = asks.recv().await.unwrap();
+        ask.reply.send(Ok(())).unwrap();
+    });
+    let (s, _) =
+        send("POST", format!("http://{}/api/v1/auth/logout", signed_in.addr), None, None).await.unwrap();
+    assert_eq!(s, 204);
+    shell.await.unwrap();
+    for h in [signed_in, none, alone] {
+        h.abort();
+    }
+}

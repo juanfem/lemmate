@@ -687,6 +687,14 @@ password.
 in. The row is not drawn on a standalone vault or a server started with `--no-auth`, where
 there is no account to leave.
 
+In the **desktop app** the menu names the account and the server, and **Sign out** revokes the
+app's access token on the server, forgets it on this computer (keychain, credentials file, and a
+`token` written into `desktop.toml`) and restarts the app signed out. Your notes stay in their
+folders. The app then shows *Signed out of <server>* with **Sign in with your browser** — as the
+same account or another; another account's vaults sync into folders of their own, and the first
+account's folders are left as they are. The same screen appears if the server stops accepting the
+token, for instance after you revoke it in the web client.
+
 **Changing a password.** Yours needs the current one; an admin can reset anyone's without it,
 which is the only recovery path — a self-hosted server has no mail and there is no reset-by-email
 link. Either way every *other* session of that account is signed out, so other devices have to
@@ -783,7 +791,7 @@ notes <command>
 | `lemmate login --server URL --email E [--register] [--invite LINK] [--ca-cert F]` | Sign in (or create the account) and save the token — in the system keychain, or `credentials.toml` in your configuration directory where there is none. Password prompted if not given. `--invite` takes the link or the bare token and implies `--register`. |
 | `lemmate login --server URL --browser` | Sign in through the server's page in your browser (`$BROWSER` if set) — its identity provider, if it has one — and save the access token it hands this machine. |
 | `lemmate login --server URL --token lmt_…` | Save an access token made in the web client instead (checked against the server first): the way in when the server signs in only through an identity provider. |
-| `lemmate logout --server URL` | Forget the saved token for that server. |
+| `lemmate logout --server URL` | Sign out: revoke the saved session or access token on the server, and forget it here (it is forgotten even when the server cannot be reached). |
 | `lemmate passwd --server URL [--email E]` | Change your password (prompts for the current one), or reset another account's as an admin. Signs every other session of that account out. |
 | `lemmate invite --server URL [--expires-days N] [--list] [--revoke ID] [--json]` | Mint, list, or revoke single-use registration links. Admin only. |
 | `lemmate sync --vault DIR --server URL [--vault-id ULID] [--once] [--serve ADDR --web-dir DIR] [--ca-cert F] [--token T]` | Keep a folder in sync; optionally run the local relay and serve the web client. |

@@ -97,6 +97,8 @@ pub struct LocalHandle {
     /// configuration file to write; `None` for one that cannot be reconfigured from the page.
     /// Taken by the shell, which owns both halves of that job — signing in, and the file.
     pub connect: Option<mpsc::UnboundedReceiver<crate::local::ConnectAsk>>,
+    /// Requests from the UI to sign out of the server, for the same shell as `connect`.
+    pub sign_out: Option<mpsc::UnboundedReceiver<crate::local::SignOutAsk>>,
     /// Behind a lock because the set grows: opening a vault a UI created adds an engine.
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<Result<SyncReport>>>>>,
     supervisor: Option<tokio::task::JoinHandle<()>>,
@@ -157,7 +159,10 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
     }
     let vaults: Vec<VaultId> = engines.iter().map(|e| e.vault_id).collect();
     let template = opts[0].clone();
-    let upstream = opts.iter().find_map(|o| o.server_url.clone());
+    let upstream = opts.iter().find_map(|o| {
+        let url = o.server_url.clone()?;
+        Some(crate::local::Upstream { url, token: o.token.clone(), ca_cert: o.ca_cert.clone() })
+    });
     let served = crate::local::serve(&local, &vaults, upstream).await?;
     info!(addr = %served.addr, vaults = vaults.len(), "local relay listening");
     let tasks: Vec<_> = engines
@@ -198,6 +203,7 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
         vault_id: vaults[0],
         vaults,
         connect: served.connect,
+        sign_out: served.sign_out,
         tasks,
         supervisor,
         server: served.task,

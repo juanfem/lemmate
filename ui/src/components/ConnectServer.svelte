@@ -6,9 +6,15 @@
   // Every vault on this machine keeps its own identity: a vault nobody owns is claimed by the
   // account that syncs it. Folding one into a vault the server already has is a different
   // thing, and is not built.
-  let { configPath, onClose }: { configPath: string; onClose: () => void } = $props()
+  import { untrack } from 'svelte'
+  let {
+    configPath,
+    onClose,
+    initialServer = '',
+    initialCa = '',
+  }: { configPath: string; onClose: () => void; initialServer?: string; initialCa?: string } = $props()
 
-  let serverUrl = $state('')
+  let serverUrl = $state(untrack(() => initialServer))
   let email = $state('')
   let password = $state('')
   let register = $state(false)
@@ -41,7 +47,7 @@
     window.addEventListener('lemmate-sign-in', onResult)
     shell?.signIn?.(server, caCert.trim())
   }
-  let caCert = $state('')
+  let caCert = $state(untrack(() => initialCa))
   let error = $state('')
   let busy = $state(false)
   let done = $state(false)

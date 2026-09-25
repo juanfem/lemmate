@@ -592,9 +592,20 @@ async fn login(
     Ok(session_response(&state, token, AuthUser::from_row(user)))
 }
 
+/// End the session the request came with — or, for a personal access token, revoke the token
+/// itself: that is how an app signing out (`lemmate logout`, the desktop app) makes sure the copy
+/// it held is useless, even if a backup of its keychain or config survives.
 async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(t) = token_from_headers(&headers) {
-        let _ = state.store.lock().await.delete_session(&token_hash(&t));
+        let hash = token_hash(&t);
+        let mut store = state.store.lock().await;
+        if t.starts_with(TOKEN_PREFIX) {
+            if let Ok(Some((user, _))) = store.access_token_user(&hash) {
+                let _ = store.delete_access_token(&user.id, &hash);
+            }
+        } else {
+            let _ = store.delete_session(&hash);
+        }
     }
     let mut resp = StatusCode::NO_CONTENT.into_response();
     resp.headers_mut().insert(

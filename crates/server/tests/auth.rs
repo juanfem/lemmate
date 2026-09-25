@@ -914,4 +914,18 @@ async fn an_app_signs_in_through_the_browser() {
     assert_eq!(me["token"]["name"], "Lemmate desktop on test");
     // …and that token cannot approve another app in turn.
     assert_eq!(approve(&q["redirect_uri"], &token).await.0, 403);
+
+    // Signing the app out (`lemmate logout`, the desktop's Sign out) revokes its token on the
+    // server and forgets it here — and touches nothing else.
+    let revoked = tokio::task::spawn_blocking({
+        let server = server.clone();
+        move || lemmate_core::credentials::sign_out(&server, None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(revoked);
+    assert_eq!(lemmate_core::credentials::load(&server), None);
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&token)).await.0, 401);
+    assert_eq!(get(addr, "/api/v1/auth/me", Some(&ann)).await.0, 200, "the browser session is untouched");
 }

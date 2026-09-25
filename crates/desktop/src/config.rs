@@ -210,6 +210,18 @@ impl Config {
         Ok(())
     }
 
+    /// Drop a `token` written into the file by hand, so a sign-out is not undone by the next
+    /// start reading it back. Everything else stays; a file with no token is left untouched.
+    pub fn clear_token(path: &Path) -> anyhow::Result<()> {
+        let Ok(text) = std::fs::read_to_string(path) else { return Ok(()) };
+        let mut table = text.parse::<toml::Table>().with_context(|| format!("parsing {}", path.display()))?;
+        if table.remove("token").is_some() {
+            std::fs::write(path, toml::to_string(&table)?)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Merge the file (if any) with the flags and validate. Flags win over the file.
     pub fn resolve(cli: Cli) -> anyhow::Result<Self> {
         let path = cli.config.clone().or_else(default_config_path);
@@ -352,6 +364,20 @@ mod tests {
         let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap(), "--root-dir", "/n/all"])).unwrap();
         assert_eq!(cfg.server_url.as_deref(), Some("https://notes.example.org"));
         assert_eq!(cfg.layout, Layout::Root("/n/all".into()), "the flag still supplies the folder");
+    }
+
+    #[test]
+    fn clearing_the_token_keeps_the_rest_of_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("desktop.toml");
+        std::fs::write(&p, "root_dir = \"/n\"\nserver_url = \"https://s\"\ntoken = \"lmt_x\"\n").unwrap();
+        Config::clear_token(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !text.contains("token") && text.contains("server_url") && text.contains("root_dir"),
+            "{text}"
+        );
+        Config::clear_token(&tmp.path().join("missing.toml")).unwrap();
     }
 
     /// What the standalone setup screen writes, read back as a standalone configuration.

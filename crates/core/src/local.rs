@@ -240,14 +240,15 @@ pub(crate) struct LocalState {
     /// Where a request to open an unknown vault goes; `None` on a relay with a fixed set.
     wanted: Option<mpsc::UnboundedSender<VaultId>>,
     /// The server the engines behind this relay sync with, or `None` when they are standalone
-    /// (SPEC §3.2). What the UI does with it is cosmetic — a standalone app has no "offline" to
-    /// report and no account to name — but it is the only way for a page served on loopback to
-    /// tell the two apart.
-    upstream: Option<String>,
+    /// (SPEC §3.2). The UI learns from it whether there is an "offline" to report, and the relay
+    /// uses its token to say who is signed in (`auth_me`).
+    upstream: Option<Upstream>,
     /// Set when the shell can rewrite its configuration; see [`LocalOptions::config_path`].
     config_path: Option<PathBuf>,
     /// Where a request to connect a server goes, and `None` when nothing is listening.
     connect: Option<mpsc::UnboundedSender<ConnectAsk>>,
+    /// Where a request to sign out of the server goes; the same shell listens as for `connect`.
+    sign_out: Option<mpsc::UnboundedSender<SignOutAsk>>,
     next_peer: AtomicU64,
     /// Renders made for viewing, to be opened again without rendering again.
     renders: crate::quarto::RenderCache,
@@ -455,17 +456,27 @@ pub(crate) struct Served {
     /// Requests from the UI to give this standalone app a server; `None` when the shell named
     /// no configuration file to write.
     pub connect: Option<mpsc::UnboundedReceiver<ConnectAsk>>,
+    /// Requests from the UI to sign out of the server; the same shell listens.
+    pub sign_out: Option<mpsc::UnboundedReceiver<SignOutAsk>>,
     pub registrar: Registrar,
+}
+
+/// The server a relay's engines sync with, and how they sign in to it.
+#[derive(Debug, Clone)]
+pub(crate) struct Upstream {
+    pub url: String,
+    pub token: Option<String>,
+    pub ca_cert: Option<PathBuf>,
 }
 
 /// Bind the relay and start serving one engine per vault; each engine must drain its receiver.
 ///
-/// `upstream` is the server those engines sync with, if any; it is reported to the UI on
-/// `GET /api/v1/local/setup` and used for nothing else here.
+/// `upstream` is the server those engines sync with, if any: reported to the UI on
+/// `GET /api/v1/local/setup`, and asked on the UI's behalf who its token belongs to.
 pub(crate) async fn serve(
     opts: &LocalOptions,
     vault_ids: &[VaultId],
-    upstream: Option<String>,
+    upstream: Option<Upstream>,
 ) -> Result<Served> {
     let mut engines = Vec::with_capacity(vault_ids.len());
     let mut events = Vec::with_capacity(vault_ids.len());
@@ -477,6 +488,7 @@ pub(crate) async fn serve(
     let routes = Arc::new(Routes::default());
     let (wanted_tx, wanted_rx) = mpsc::unbounded_channel();
     let (connect_tx, connect_rx) = mpsc::unbounded_channel();
+    let (sign_out_tx, sign_out_rx) = mpsc::unbounded_channel();
     let reconfigurable = opts.config_path.is_some();
     let state = Arc::new(LocalState {
         engines: RwLock::new(engines),
@@ -486,6 +498,7 @@ pub(crate) async fn serve(
         upstream,
         config_path: opts.config_path.clone(),
         connect: reconfigurable.then_some(connect_tx),
+        sign_out: reconfigurable.then_some(sign_out_tx),
         next_peer: AtomicU64::new(1),
         renders: crate::quarto::RenderCache::new(),
     });
@@ -498,6 +511,8 @@ pub(crate) async fn serve(
         .route("/api/v1/local/setup", get(configured))
         .route("/api/v1/local/connect", axum::routing::post(connect_server))
         .route("/api/v1/local/merge", axum::routing::post(merge_vaults))
+        .route("/api/v1/auth/me", get(auth_me))
+        .route("/api/v1/auth/logout", axum::routing::post(sign_out))
         .route("/api/v1/vaults", get(vaults))
         .route("/api/v1/search", get(search_all))
         .route("/api/v1/vaults/{vault}/notes", get(notes).post(create_note))
@@ -539,6 +554,7 @@ pub(crate) async fn serve(
         routes,
         wanted: opts.vault_root.is_some().then_some(wanted_rx),
         connect: reconfigurable.then_some(connect_rx),
+        sign_out: reconfigurable.then_some(sign_out_rx),
         registrar,
     })
 }
@@ -1344,7 +1360,8 @@ pub(crate) async fn configured(State(s): State<Arc<LocalState>>) -> axum::Json<s
     axum::Json(serde_json::json!({
         "configured": true,
         "mode": if s.upstream.is_some() { "synced" } else { "local" },
-        "server": s.upstream,
+        "server": s.upstream.as_ref().map(|u| u.url.clone()),
+        "ca_cert": s.upstream.as_ref().and_then(|u| u.ca_cert.as_ref()).map(|p| p.display().to_string()),
         "can_connect": s.connect.is_some(),
         "config_path": s.config_path.as_ref().map(|p| p.display().to_string()),
     }))
@@ -1526,6 +1543,79 @@ async fn connect_server(
     }
     match answer.await {
         Ok(Ok(())) => Ok(StatusCode::ACCEPTED),
+        Ok(Err(msg)) => Err((StatusCode::BAD_GATEWAY, msg)),
+        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "the app stopped before answering".into())),
+    }
+}
+
+// ---- The account behind the relay ---------------------------------------------------------------
+
+/// Who this relay's engines sync as, asked of the server with their token, so the UI can name
+/// the account and offer to sign out of it. A standalone relay has no account (404). A server
+/// that refuses the token — or wants one and there is none — is **signed out**: 401 with
+/// `{"signed_out": <server>}`,
+/// which the UI shows as such rather than as a password form. A server that cannot be reached
+/// is neither — 503, and the UI simply names nobody.
+async fn auth_me(State(s): State<Arc<LocalState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(up) = s.upstream.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let signed_out = || {
+        (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "signed_out": up.url }))).into_response()
+    };
+    // Asked even without a token: a server started with `--no-auth` needs none, and answers.
+    let (url, ca, token) = (
+        format!("{}/api/v1/auth/me", crate::credentials::key(&up.url)),
+        up.ca_cert.clone(),
+        up.token.clone(),
+    );
+    let answer = tokio::task::spawn_blocking(move || -> std::result::Result<(u16, String), String> {
+        let agent = crate::tls::http_agent(ca.as_deref()).map_err(|e| e.to_string())?;
+        let mut req = agent.get(&url);
+        if let Some(t) = &token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        match req.call() {
+            Ok(mut r) => Ok((r.status().as_u16(), r.body_mut().read_to_string().map_err(|e| e.to_string())?)),
+            Err(ureq::Error::StatusCode(code)) => Ok((code, String::new())),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await;
+    match answer {
+        Ok(Ok((200, body))) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => axum::Json(v).into_response(),
+            Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+        },
+        Ok(Ok((401, _))) => signed_out(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// A request from the UI to sign out of the server, for the shell to carry out — revoke the
+/// token upstream, forget it here, and restart signed out — with the channel it answers on.
+#[derive(Debug)]
+pub struct SignOutAsk {
+    pub reply: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+async fn sign_out(State(s): State<Arc<LocalState>>) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if s.upstream.is_none() {
+        return Err((StatusCode::NOT_FOUND, "this app has no server to sign out of".into()));
+    }
+    let Some(tx) = &s.sign_out else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "signing out is for the desktop app; here, `lemmate logout --server …`".into(),
+        ));
+    };
+    let (reply, answer) = oneshot::channel();
+    if tx.send(SignOutAsk { reply }).is_err() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "the app is no longer listening".into()));
+    }
+    match answer.await {
+        Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
         Ok(Err(msg)) => Err((StatusCode::BAD_GATEWAY, msg)),
         Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "the app stopped before answering".into())),
     }

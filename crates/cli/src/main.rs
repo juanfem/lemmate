@@ -154,10 +154,12 @@ enum Cmd {
         #[arg(long, env = "LEMMATE_CA_CERT")]
         ca_cert: Option<PathBuf>,
     },
-    /// Forget the saved token for a server.
+    /// Sign out of a server: revoke the saved session or access token there, and forget it here.
     Logout {
         #[arg(long, env = "LEMMATE_SERVER")]
         server: String,
+        #[arg(long, env = "LEMMATE_CA_CERT")]
+        ca_cert: Option<PathBuf>,
     },
     /// List the vaults this account can see.
     Vaults {
@@ -506,9 +508,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Logout { server } => {
-            credentials::forget(&server)?;
-            println!("forgot token for {}", credentials::key(&server));
+        Cmd::Logout { server, ca_cert } => {
+            let revoked = credentials::sign_out(&server, ca_cert.as_deref())?;
+            println!(
+                "signed out of {}{}",
+                credentials::key(&server),
+                if revoked { "" } else { " (the server could not be told; the token is forgotten here)" }
+            );
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir, token } => {
