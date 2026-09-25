@@ -527,7 +527,8 @@ Editing features:
   outgoing links pane.
 - **Tags** — tag pane with counts, hierarchical; click = search.
 - **Bookmarks** — notes, folders, headings, saved searches; ordered, in the vault doc.
-- **Daily notes** — `Daily/YYYY-MM-DD.md` (path and format configurable per vault),
+- **Daily notes** — `Daily/YYYY-MM-DD.md` (folder, Moment.js format and template configurable
+  per vault, in the vault doc's `meta` map, so every replica files a day the same way),
   template applied on creation, previous/next-day navigation, "today" shortcut, calendar
   popover.
 - **Templates** — a `Templates/` folder; variables `{{date}}`, `{{date:FORMAT}}`, `{{time}}`,
@@ -611,8 +612,9 @@ desktop clients — a multipart body whose parts are the picked files, each name
 vault-relative path, uploaded in batches so that a large vault is not one enormous request.
 Importing into a vault nobody owns claims it, as a first sync does; a path the vault already
 holds is skipped, so a repeated batch cannot duplicate notes. On a server the imported notes are
-created through the room docs; on the local relay they are written into the vault folder, which
-is also the only side with a sidecar to keep daily-note settings in.
+created through the room docs; on the local relay they are written into the vault folder. Either
+way bookmarks and daily-note settings go into the vault doc; the offline CLI import leaves them
+in the sidecar (`*.import.json`) for the engine to adopt on its next start.
 
 Either way the conversion is the same code:
 - Preserves folder structure and filenames; assigns ULIDs.

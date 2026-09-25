@@ -797,7 +797,7 @@ async fn daily(
     State(s): State<Arc<LocalState>>,
     Path((vault, date)): Path<(String, String)>,
 ) -> Resp<NoteBody> {
-    if date.len() != 10 || !date.chars().all(|c| c.is_ascii_digit() || c == '-') {
+    if crate::daily::Date::parse(&date).is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
     match ask(&s, &vault, LocalQuery::Daily(date)).await? {

@@ -8,6 +8,8 @@
   import Setup from './components/Setup.svelte'
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
+  import DailyDialog from './components/DailyDialog.svelte'
+  import { compare as compareDays, dayOf, formatDate, iso, pathFor, templateOf, today, type Day } from './lib/daily.ts'
   import { VaultSession, displayName } from './lib/vault.svelte.ts'
   import { notePath, unnamedNote } from './lib/notename.ts'
   import { Workspace } from './lib/workspace.svelte.ts'
@@ -176,6 +178,8 @@
   /** Whichever right-click / drop-down menu is open: the account's, or a tag chip's. */
   let menu = $state<MenuState | null>(null)
   let importInto = $state<string | null | undefined>(undefined)
+  /** The daily-note calendar, open on this month; null when closed. */
+  let calendarAt = $state<Day | null>(null)
   /** Files picked for the upload dialog, and where they were asked to go (SPEC §9). */
   let uploading = $state<{ vault: string; folder: string | null; files: File[] } | null>(null)
 
@@ -838,7 +842,10 @@
   let canDetach = $derived(!solo && !narrow.current)
   let commands: Command[] = $derived([
     { id: 'open', label: 'Open or create note…', shortcut: 'Ctrl+O', run: () => (palette = '') },
-    { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: daily },
+    { id: 'daily', label: "Open today's daily note", shortcut: 'Ctrl+Shift+D', run: () => daily() },
+    { id: 'daily-prev', label: 'Previous daily note', shortcut: 'Alt+[', run: () => stepDaily(-1) },
+    { id: 'daily-next', label: 'Next daily note', shortcut: 'Alt+]', run: () => stepDaily(1) },
+    { id: 'calendar', label: 'Daily notes calendar and settings…', run: openCalendar },
     { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (palette = '') },
     { id: 'files', label: 'Show files', run: () => show('files') },
     { id: 'tags', label: 'Show tags', run: () => show('tags') },
@@ -881,9 +888,13 @@
     ...(me && me.id !== 'local' ? [{ id: 'account', label: 'Account, password and invites…', run: () => (accountOpen = true) }] : []),
     ...(me && me.id !== 'local' ? [{ id: 'signout', label: `Sign out (${me.email})`, run: signOut }] : []),
   ])
-  /** Templates (SPEC §9): `Templates/<name>.md` with {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. */
-  async function template(vault: VaultSession, name: string, title: string, fallback: string): Promise<string> {
-    const id = vault.idOf(`Templates/${name}.md`)
+  /**
+   * Templates (SPEC §9): a note — `Templates/Note.md`, the vault's daily template — with
+   * {{date}}, {{date:FORMAT}}, {{time}}, {{title}}. `day` is the date {{date}} means: a daily
+   * note's own day, else today.
+   */
+  async function template(vault: VaultSession, path: string, title: string, fallback: string, day?: Day): Promise<string> {
+    const id = vault.idOf(path)
     if (!id) return fallback
     const { doc, release } = vault.acquire(id)
     try {
@@ -894,19 +905,17 @@
       })
       const raw = doc.getText('content').toString()
       const body = raw.startsWith('---\n') ? raw.slice(raw.indexOf('\n---', 4) + 4).replace(/^\n/u, '') : raw
-      return fillTemplate(body, title)
+      return fillTemplate(body, title, day)
     } finally {
       release()
     }
   }
-  function fillTemplate(body: string, title: string): string {
+  function fillTemplate(body: string, title: string, day?: Day): string {
     const d = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
+    // The date tokens are Moment's (lib/daily.ts), which leaves `HH` and `mm` alone for these.
     const fmt = (f: string) =>
-      f
-        .replace(/YYYY/gu, String(d.getFullYear()))
-        .replace(/MM/gu, pad(d.getMonth() + 1))
-        .replace(/DD/gu, pad(d.getDate()))
+      formatDate(f, day ?? today(d))
         .replace(/HH/gu, pad(d.getHours()))
         .replace(/mm/gu, pad(d.getMinutes()))
     return body
@@ -921,16 +930,36 @@
     if (!s) return
     const path = notePath(typed)
     const title = displayName(path)
-    open(s.createNote(path, await template(s, 'Note', title, `# ${title}\n\n`)))
+    open(s.createNote(path, await template(s, 'Templates/Note.md', title, `# ${title}\n\n`)))
   }
-  async function daily() {
+  /** The daily note for a day (today by default), created from the vault's template if missing. */
+  async function daily(day: Day = today()) {
     const s = session
     if (!s) return
-    const d = new Date()
-    const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    const path = `Daily/${name}.md`
+    const path = pathFor(s.daily, day)
     const existing = s.idOf(path)
-    open(existing ?? s.createNote(path, await template(s, 'Daily', name, `# ${name}\n\n`)))
+    const name = iso(day)
+    open(existing ?? s.createNote(path, await template(s, templateOf(s.daily), name, `# ${name}\n\n`, day)))
+  }
+  /**
+   * Step to the previous or next daily note that exists, counting from the one open (or from
+   * today when the open note is not a daily note). Nothing is created: this is for reading back.
+   */
+  function stepDaily(dir: -1 | 1) {
+    const s = session
+    if (!s) return
+    const from = (active && dayOf(s.daily, s.pathOf(active) ?? '')) || today()
+    let best: { day: Day; id: string } | null = null
+    for (const n of s.notes) {
+      const d = dayOf(s.daily, n.path)
+      if (!d || compareDays(d, from) * dir <= 0) continue
+      if (!best || compareDays(d, best.day) * dir < 0) best = { day: d, id: n.id }
+    }
+    if (best) open(best.id)
+  }
+  function openCalendar() {
+    const s = session
+    calendarAt = (s && active && dayOf(s.daily, s.pathOf(active) ?? '')) || today()
   }
   function renameActive() {
     if (active) void renameNote(sessionOf(active)?.id ?? '', active)
@@ -1158,6 +1187,11 @@
     // Not preventDefault'd: Escape still reaches whatever else is listening for it.
     if (e.key === 'Escape' && drawer) drawer = false
     const mod = e.ctrlKey || e.metaKey
+    if (e.altKey && !mod && !e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+      stepDaily(e.code === 'BracketLeft' ? -1 : 1)
+      e.preventDefault()
+      return
+    }
     if (!mod) return
     if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
       focusPane(e.key === 'ArrowRight' ? 1 : -1)
@@ -1184,7 +1218,7 @@
       newTab()
       e.preventDefault()
     } else if (e.key === 'd' && e.shiftKey) {
-      daily()
+      void daily()
       e.preventDefault()
     } else if ((e.key === 'f' || e.key === 'F') && e.shiftKey) {
       palette = ''
@@ -1283,7 +1317,7 @@
         {/if}
         <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
         {#if !solo}
-          <button class="icon" onclick={daily} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
+          <button class="icon" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
         {/if}
         <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands"><Icon name="search" size={17} /></button>
         <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
@@ -1314,7 +1348,7 @@
             </div>
             <hr />
             <!-- A phone has the daily note in its top bar, a tap away without the drawer. -->
-            <button class="daily" onclick={daily} title="Today's daily note — opened, or created from Templates/Daily.md (Ctrl+Shift+D)" aria-label="Today's daily note">
+            <button class="daily" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} title="Today's daily note — opened, or created from the daily template (Ctrl+Shift+D). Right-click for the calendar and settings." aria-label="Today's daily note">
               <Icon name="calendar" size={18} />
             </button>
             <button onclick={() => session && createInVault(session.id)} disabled={!session} title="New note" aria-label="New note">
@@ -1575,6 +1609,17 @@
         uploading = null
         if (paths.length === 1) openFile(vault, paths[0]!)
       }}
+    />
+  {/if}
+  {#if calendarAt && session}
+    {@const s = session}
+    <DailyDialog
+      settings={s.daily}
+      exists={(path) => !!s.idOf(path)}
+      initial={calendarAt}
+      onOpen={(day) => { calendarAt = null; void daily(day) }}
+      onSave={(next) => s.setDaily(next)}
+      onClose={() => (calendarAt = null)}
     />
   {/if}
   {#if importInto !== undefined && workspace}

@@ -13,6 +13,7 @@
 pub mod attachments;
 pub mod client;
 pub mod credentials;
+pub mod daily;
 pub mod diff;
 pub mod doc;
 pub mod error;

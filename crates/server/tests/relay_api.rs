@@ -127,7 +127,7 @@ async fn obsidian_import_writes_the_vault_folder_and_reaches_the_server() {
                 ".obsidian/bookmarks.json",
                 br#"{"items":[{"type":"file","path":"Projects/plan.md","title":"Plan"}]}"#,
             ),
-            (".obsidian/daily-notes.json", br#"{"folder":"Daily","format":"YYYY-MM-DD"}"#),
+            (".obsidian/daily-notes.json", br#"{"folder":"Journal","format":"DD.MM.YYYY"}"#),
         ],
     )
     .await;
@@ -137,16 +137,18 @@ async fn obsidian_import_writes_the_vault_folder_and_reaches_the_server() {
     assert_eq!(report["callouts"], 1);
     assert_eq!(report["embeds"], 1);
     assert_eq!(report["bookmarks"], 1);
-    // Unlike the server, the relay has a sidecar to keep daily-note settings in.
     assert_eq!(report["daily_notes"], true);
 
-    // Converted markdown, the attachment beside it, and the settings in the sidecar.
+    // Converted markdown and the attachment beside it; the settings are in the vault doc, so the
+    // relay files a day by them.
     let note = std::fs::read_to_string(dir.path().join("Projects/plan.md")).unwrap();
     assert!(note.contains("::: {.callout-warning title=\"Careful\"}"), "{note}");
     assert!(note.contains("![](logo.png)"), "{note}");
     assert!(dir.path().join("logo.png").is_file());
-    let daily = std::fs::read_to_string(dir.path().join(".lemmate/daily.import.json")).unwrap();
-    assert!(daily.contains("\"folder\": \"Daily\""), "{daily}");
+    let (s, daily) = call("GET", format!("{base}/daily/2026-09-25"), None).await;
+    assert_eq!(s, 200);
+    assert_eq!(daily["path"], "Journal/25.09.2026.md");
+    assert!(dir.path().join("Journal/25.09.2026.md").is_file());
 
     // Re-uploading the same batch is a no-op, not a second copy.
     let (s, again) =
@@ -155,16 +157,19 @@ async fn obsidian_import_writes_the_vault_folder_and_reaches_the_server() {
     assert_eq!(again["notes"], 0);
     assert_eq!(again["skipped"], 1);
 
-    // The note reaches the server like any other local edit.
+    // The note reaches the server like any other local edit, and the settings with the vault doc.
+    let day = lemmate_core::daily::Date::parse("2026-09-25").unwrap();
     for i in 0..100 {
-        if state.store.lock().await.list_notes(vault).unwrap().len() == 1 {
+        let store = state.store.lock().await;
+        if store.list_notes(vault).unwrap().iter().any(|n| n.path == "Projects/plan.md")
+            && store.load_vault_doc(vault).unwrap().daily().path_for(day) == "Journal/25.09.2026.md"
+        {
             break;
         }
-        assert!(i < 99, "timed out waiting for the imported note to sync");
+        drop(store);
+        assert!(i < 99, "timed out waiting for the import to sync");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let rows = state.store.lock().await.list_notes(vault).unwrap();
-    assert_eq!(rows[0].path, "Projects/plan.md");
     handle.abort();
 }
 

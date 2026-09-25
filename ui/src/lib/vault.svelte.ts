@@ -23,6 +23,7 @@ import { rewriteWikilinks } from './links.ts'
 export { rewriteWikilinks }
 import { ulid } from './ulid.ts'
 import { restampId } from './moves.ts'
+import type { DailySettings } from './daily.ts'
 
 export interface NoteEntry {
   id: string
@@ -76,6 +77,8 @@ export class VaultSession {
   bookmarks: Bookmark[] = $state([])
   /** Optional display name, shared by every replica; falls back to a short id in the UI. */
   name = $state('')
+  /** Where daily notes go (lib/daily.ts), shared by every replica; empty fields are defaults. */
+  daily: DailySettings = $state({ folder: '', format: '', template: '' })
   status: SyncStatus = $state('connecting')
   vaultSynced = $state(false)
   /**
@@ -113,6 +116,11 @@ export class VaultSession {
       this.attachments = Object.fromEntries(this.attachmentsMap.entries())
       this.bookmarks = this.bookmarksArr.toArray()
       this.name = this.metaMap.get('name') ?? ''
+      this.daily = {
+        folder: this.metaMap.get('daily_folder') ?? '',
+        format: this.metaMap.get('daily_format') ?? '',
+        template: this.metaMap.get('daily_template') ?? '',
+      }
     }
     this.notesMap.observe(refresh)
     this.attachmentsMap.observe(refresh)
@@ -289,6 +297,16 @@ export class VaultSession {
     const trimmed = name.trim()
     if (trimmed) this.metaMap.set('name', trimmed)
     else this.metaMap.delete('name')
+  }
+
+  /** Store the daily-note settings for everyone; an empty field goes back to the default. */
+  setDaily(s: DailySettings) {
+    this.vaultDoc.transact(() => {
+      for (const [key, value] of [['daily_folder', s.folder], ['daily_format', s.format], ['daily_template', s.template]] as const) {
+        if (value.trim()) this.metaMap.set(key, value.trim())
+        else this.metaMap.delete(key)
+      }
+    })
   }
 
   /** What to call this vault in the UI when it has no name of its own. */

@@ -491,19 +491,31 @@ lives there and underneath it rather than in a column of its own:
 - **History** is not here at all: it opens in a pane of its own (below).
 
 **Daily notes.** `Ctrl+Shift+D`, or the calendar on the sidebar's rail (in the top bar on
-a phone), opens `Daily/YYYY-MM-DD.md` for today — creating it from `Templates/Daily.md` if it
-does not exist yet. It goes in the vault of the note you are on. The path
-and format are fixed at present — the per-vault configuration, prev/next-day navigation and
-calendar popover in SPEC §9 are not built.
+a phone), opens today's note — `Daily/YYYY-MM-DD.md` unless the vault says otherwise — creating
+it from the daily template if it does not exist yet. It goes in the vault of the note you are
+on. `Alt+[` and `Alt+]` step to the previous and next daily note that exists.
 
-**Templates.** Put `Templates/Note.md` and `Templates/Daily.md` in the vault; they are applied
-when a note or a daily note is created (the template's own front matter is stripped first).
-Variables:
+**Right-click** the calendar button (or run *Daily notes calendar and settings…*) for a month
+view: days that have a note carry a dot, and clicking a day opens its note, creating it if need
+be. **Settings** there are per vault and shared by everyone in it:
+
+| Setting | Default | |
+|---|---|---|
+| Folder | `Daily` | `/` puts daily notes at the vault root |
+| File name format | `YYYY-MM-DD` | Moment.js tokens, as in Obsidian — `DD.MM.YYYY`, `YYYY/MM/YYYY-MM-DD dddd`, `gggg-[W]ww`; a `/` makes folders |
+| Template | `Templates/Daily.md` | any note in the vault |
+
+Changing them affects new daily notes only; existing ones stay where they are. `lemmate daily`
+and the `/daily/{date}` API file days by the same settings.
+
+**Templates.** Put `Templates/Note.md` and a daily template (`Templates/Daily.md` unless the
+vault's daily settings name another) in the vault; they are applied when a note or a daily note
+is created (the template's own front matter is stripped first). Variables:
 
 | Variable | Expands to |
 |---|---|
-| `{{date}}` | `YYYY-MM-DD` today |
-| `{{date:FORMAT}}` | today with `YYYY`, `MM`, `DD`, `HH`, `mm` substituted |
+| `{{date}}` | `YYYY-MM-DD` today — or, in a daily note, that note's day |
+| `{{date:FORMAT}}` | the same date in a Moment.js format (`dddd D MMMM`), plus `HH` and `mm` for the time |
 | `{{time}}` | `HH:mm` now |
 | `{{title}}` | the new note's display name (the date, for a daily note) |
 | `{{cursor}}` | removed — the cursor is not repositioned yet |
@@ -686,7 +698,8 @@ your account.
 | `Ctrl+Shift+P` | The palette, narrowed to commands |
 | `Ctrl+Shift+F` | The palette (it covers full text) |
 | `Ctrl+Shift+R` | Show version history in a pane |
-| `Ctrl+Shift+D` | Today's daily note |
+| `Ctrl+Shift+D` | Today's daily note (right-click its button for the calendar) |
+| `Alt+[` / `Alt+]` | Previous / next daily note |
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
 | `Ctrl+E` | Cycle this pane's view: live → source → reading |
 | `Ctrl+T` | New (empty) tab |
@@ -887,8 +900,8 @@ The importer preserves folders and filenames and reports what it did. What chang
 | `[[wikilinks]]`, `[[a\|b]]`, `#tags`, maths, front matter | Left exactly as they are |
 | Self-hosted LiveSync | The built-in sync — one WebSocket, CRDT merge, no conflict files |
 | File Tree Alternative | The built-in tree, with per-folder note counts |
-| `.obsidian/bookmarks.json` | Bookmarks are kept: importing through the app puts them straight into the vault's bookmark list; the CLI writes `.lemmate/bookmarks.import.json` |
-| `.obsidian/daily-notes.json` | Translated into `.lemmate/daily.import.json` wherever there is a vault folder (the CLI, and an import into the desktop relay); nothing consumes it yet, so check the daily-note path by hand |
+| `.obsidian/bookmarks.json` | Bookmarks are kept: importing through the app puts them straight into the vault's bookmark list; the CLI writes `.lemmate/bookmarks.import.json`, which the next `lemmate sync` or desktop launch moves into the list |
+| `.obsidian/daily-notes.json` | Becomes the vault's daily-note settings — folder, date format and template, so days keep the names Obsidian gave them (a vault with no folder set keeps them at the root). Through the app they apply at once; the CLI writes `.lemmate/daily.import.json`, adopted on the next sync like the bookmarks |
 | `.obsidian/`, `.trash/` | Skipped |
 
 Note ids are not written during import — the sync engine assigns them on first sync.

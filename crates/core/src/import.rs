@@ -7,7 +7,8 @@
 //! sync engine assigns note ids on first sync, so nothing is written into front matter here.
 //!
 //! Vault-level Obsidian settings that have a home in this app are translated into the sidecar
-//! as `*.import.json` files for the vault doc to pick up later: bookmarks and daily notes.
+//! as `*.import.json` files — bookmarks and daily notes — which the sync engine moves into the
+//! vault doc the next time it opens the folder, and then deletes.
 
 use std::fmt;
 use std::fs;
@@ -70,13 +71,16 @@ impl fmt::Display for ImportReport {
         if self.bookmarks > 0 {
             write!(
                 f,
-                "; {} bookmark{} written to {SIDECAR_DIR}/{BOOKMARKS_FILE}",
+                "; {} bookmark{} written to {SIDECAR_DIR}/{BOOKMARKS_FILE} (adopted on the next sync)",
                 self.bookmarks,
                 plural(self.bookmarks)
             )?;
         }
         if self.daily_notes {
-            write!(f, "; daily-notes settings written to {SIDECAR_DIR}/{DAILY_FILE}")?;
+            write!(
+                f,
+                "; daily-notes settings written to {SIDECAR_DIR}/{DAILY_FILE} (adopted on the next sync)"
+            )?;
         }
         Ok(())
     }
@@ -96,14 +100,8 @@ pub const DAILY_FILE: &str = "daily.import.json";
 /// everything the importer produces has `kind: "note"`.
 pub use crate::vault_doc::Bookmark;
 
-/// Imported daily-note settings (`.obsidian/daily-notes.json`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DailySettings {
-    /// Folder new daily notes go into ("" = vault root).
-    pub folder: String,
-    /// Moment.js-style date format Obsidian used for the filename.
-    pub format: String,
-}
+/// Imported daily-note settings (`.obsidian/daily-notes.json`), in the vault doc's own terms.
+pub use crate::daily::DailySettings;
 
 /// Import the Obsidian vault at `src` into the notes vault at `dest`.
 pub fn import_obsidian(src: &Path, dest: &Path, opts: &ImportOptions) -> Result<ImportReport> {
@@ -500,8 +498,7 @@ pub struct UploadReport {
     /// Files left alone: a path the vault already had, or an attachment over the size limit.
     pub skipped: usize,
     pub bookmarks: usize,
-    /// Whether daily-note settings were stored. Only a vault folder has somewhere to put them
-    /// (the sidecar), so this is false for an import into a server.
+    /// Whether daily-note settings were stored (in the vault doc, for every replica).
     pub daily_notes: bool,
 }
 
@@ -556,13 +553,9 @@ pub fn import_upload(rel: &str, bytes: Vec<u8>) -> Option<Upload> {
     Some(Upload::Attachment { path, bytes })
 }
 
-/// Obsidian's `daily-notes.json`, with its defaults filled in.
+/// Obsidian's `daily-notes.json`.
 pub fn parse_daily_notes(raw: &str) -> Option<DailySettings> {
-    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    Some(DailySettings {
-        folder: value.get("folder").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-        format: value.get("format").and_then(|v| v.as_str()).unwrap_or("YYYY-MM-DD").to_owned(),
-    })
+    DailySettings::from_obsidian(raw)
 }
 
 #[cfg(test)]
@@ -614,10 +607,7 @@ mod tests {
         let daily = import_upload(".obsidian/daily-notes.json", br#"{"folder":"Daily"}"#.to_vec());
         assert_eq!(
             daily,
-            Some(Upload::Daily(DailySettings {
-                folder: "Daily".to_owned(),
-                format: "YYYY-MM-DD".to_owned()
-            }))
+            Some(Upload::Daily(DailySettings { folder: "Daily".to_owned(), ..Default::default() }))
         );
     }
 
@@ -805,7 +795,10 @@ mod tests {
         let daily: DailySettings =
             serde_json::from_str(&fs::read_to_string(dest.join(SIDECAR_DIR).join(DAILY_FILE)).unwrap())
                 .unwrap();
-        assert_eq!(daily, DailySettings { folder: "Journal".into(), format: "YYYY-MM-DD".into() });
+        assert_eq!(
+            daily,
+            DailySettings { folder: "Journal".into(), format: "YYYY-MM-DD".into(), template: String::new() }
+        );
         assert!(report.to_string().contains("bookmark"));
     }
 }

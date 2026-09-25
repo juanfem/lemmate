@@ -763,8 +763,14 @@ async fn import_vault(
                 commit_change(&state, &vroom, update).await?;
                 out.bookmarks += added;
             }
-            // Nothing here has a sidecar to keep these in; the relay stores them (§9).
-            Upload::Daily(_) => {}
+            Upload::Daily(settings) => {
+                let update = match &*vroom.doc.lock().await {
+                    RoomDoc::Vault(v) => v.set_daily(&settings),
+                    RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+                };
+                commit_change(&state, &vroom, update).await?;
+                out.daily_notes = true;
+            }
         }
     }
     Ok(Json(out))
@@ -861,7 +867,8 @@ async fn delete_note(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `Daily/YYYY-MM-DD.md`, created with a heading when missing (SPEC §9, §13.1).
+/// The note for a day — `Daily/YYYY-MM-DD.md` unless the vault says otherwise — created with a
+/// heading when missing (SPEC §9, §13.1).
 async fn daily_note(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -869,10 +876,12 @@ async fn daily_note(
 ) -> Result<Json<NoteBody>, StatusCode> {
     let vault_id: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     auth::require(&state, &user, vault_id, Role::Editor).await?;
-    if !date.chars().all(|c| c.is_ascii_digit() || c == '-') || date.len() != 10 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let path = format!("Daily/{date}.md");
+    let day = lemmate_core::daily::Date::parse(&date).ok_or(StatusCode::BAD_REQUEST)?;
+    let vroom = vault_room(&state, vault_id).await?;
+    let path = match &*vroom.doc.lock().await {
+        RoomDoc::Vault(v) => v.daily().path_for(day),
+        RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let existing = state.store.lock().await.note_by_path(vault_id, &path).map_err(internal)?;
     if let Some(row) = existing {
         let room = note_room(&state, row.id).await?;

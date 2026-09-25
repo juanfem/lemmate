@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use yrs::updates::decoder::Decode;
 use yrs::{Any, Array, ArrayRef, Doc, Map, MapRef, Out, ReadTxn, StateVector, Transact, Update};
 
+use crate::daily::DailySettings;
 use crate::error::{Error, Result};
 use crate::ids::NoteId;
 
@@ -17,8 +18,8 @@ pub const ATTACHMENTS_FIELD: &str = "attachments";
 /// Ordered bookmark list, shared by every replica (SPEC §4.3, §9). The web client owns this
 /// list; Rust only ever appends to it, on import.
 pub const BOOKMARKS_FIELD: &str = "bookmarks";
-/// Vault-level settings shared by every replica. The web client owns this map; Rust only reads
-/// `name` from it, to label the vault's folder on a native client.
+/// Vault-level settings shared by every replica: `name`, which labels the vault's folder on a
+/// native client, and the daily-note settings ([`VaultDoc::daily`]).
 pub const META_FIELD: &str = "meta";
 /// Attachment paths kept whether or not a note uses them: files put in the vault through the
 /// file manager rather than pasted into a note (path → `true`). Everything else in
@@ -135,6 +136,43 @@ impl VaultDoc {
         {
             let mut txn = self.doc.transact_mut();
             self.meta.insert(&mut txn, "name", Any::from(name));
+        }
+        self.diff_since(&before)
+    }
+
+    /// Where this vault keeps its daily notes (`meta.daily_folder`, `meta.daily_format`,
+    /// `meta.daily_template`); unset keys are the defaults.
+    pub fn daily(&self) -> DailySettings {
+        let txn = self.doc.transact();
+        let get = |k: &str| match self.meta.get(&txn, k) {
+            Some(Out::Any(Any::String(s))) => s.to_string(),
+            _ => String::new(),
+        };
+        DailySettings {
+            folder: get("daily_folder"),
+            format: get("daily_format"),
+            template: get("daily_template"),
+        }
+    }
+
+    /// Store daily-note settings for every replica; returns the update (empty if unchanged).
+    /// Written by the settings dialog in the web client and by an Obsidian import.
+    pub fn set_daily(&self, s: &DailySettings) -> Vec<u8> {
+        if self.daily() == *s {
+            return Vec::new();
+        }
+        let before = self.state_vector();
+        {
+            let mut txn = self.doc.transact_mut();
+            for (k, v) in
+                [("daily_folder", &s.folder), ("daily_format", &s.format), ("daily_template", &s.template)]
+            {
+                if v.is_empty() {
+                    self.meta.remove(&mut txn, k);
+                } else {
+                    self.meta.insert(&mut txn, k, Any::from(v.as_str()));
+                }
+            }
         }
         self.diff_since(&before)
     }
@@ -361,6 +399,20 @@ mod tests {
 
         let b = VaultDoc::from_updates([a.encode_full().as_slice()]).unwrap();
         assert_eq!(b.bookmarks(), vec![one, two]);
+    }
+
+    #[test]
+    fn daily_settings_replicate_and_clear_back_to_defaults() {
+        let a = VaultDoc::new();
+        assert_eq!(a.daily(), DailySettings::default());
+        let s =
+            DailySettings { folder: "Journal".into(), format: "DD.MM.YYYY".into(), template: String::new() };
+        assert!(!a.set_daily(&s).is_empty());
+        assert!(a.set_daily(&s).is_empty());
+        let b = VaultDoc::from_updates([a.encode_full().as_slice()]).unwrap();
+        assert_eq!(b.daily(), s);
+        b.set_daily(&DailySettings::default());
+        assert_eq!(b.daily(), DailySettings::default());
     }
 
     #[test]

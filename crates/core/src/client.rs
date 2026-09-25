@@ -260,6 +260,7 @@ async fn run_inner(
 ) -> Result<SyncReport> {
     engine.reindex_if_stale()?;
     engine.reconcile_disk()?;
+    engine.adopt_imports()?;
     engine.maintain_all()?;
 
     let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<FsEvent>();
@@ -812,6 +813,40 @@ impl Engine {
         Ok(())
     }
 
+    /// Move what an offline `lemmate import obsidian` left in the sidecar — bookmarks and
+    /// daily-note settings (`import::BOOKMARKS_FILE`, `import::DAILY_FILE`) — into the vault doc,
+    /// where every replica sees them, and delete the files. A file that does not parse is left
+    /// where it is, so nothing the user imported disappears unexplained.
+    pub fn adopt_imports(&mut self) -> Result<()> {
+        let dir = self.proj.sidecar_dir();
+        let vault = DocId::Vault(self.vault_id);
+        let marks = dir.join(crate::import::BOOKMARKS_FILE);
+        if let Ok(raw) = std::fs::read_to_string(&marks) {
+            match serde_json::from_str::<Vec<crate::vault_doc::Bookmark>>(&raw) {
+                Ok(list) => {
+                    let update = self.vault.add_bookmarks(&list);
+                    self.persist_and_send(vault, update)?;
+                    std::fs::remove_file(&marks)?;
+                    info!(vault = %self.vault_id, bookmarks = list.len(), "adopted imported bookmarks");
+                }
+                Err(e) => warn!(%e, path = %marks.display(), "imported bookmarks do not parse"),
+            }
+        }
+        let daily = dir.join(crate::import::DAILY_FILE);
+        if let Ok(raw) = std::fs::read_to_string(&daily) {
+            match serde_json::from_str::<crate::daily::DailySettings>(&raw) {
+                Ok(settings) => {
+                    let update = self.vault.set_daily(&settings);
+                    self.persist_and_send(vault, update)?;
+                    std::fs::remove_file(&daily)?;
+                    info!(vault = %self.vault_id, "adopted imported daily-note settings");
+                }
+                Err(e) => warn!(%e, path = %daily.display(), "imported daily-note settings do not parse"),
+            }
+        }
+        Ok(())
+    }
+
     /// Bring the store in line with the directory: files changed/added/removed while we were
     /// not running are handled exactly like live watcher events.
     pub fn reconcile_disk(&mut self) -> Result<()> {
@@ -1148,14 +1183,9 @@ impl Engine {
                     report.bookmarks += self.vault.bookmarks().len() - before;
                     self.persist_and_send(DocId::Vault(self.vault_id), update)?;
                 }
-                // Only a vault folder has somewhere to keep these, so this is the one side that
-                // stores them: `lemmate import obsidian` writes the same sidecar file.
                 Upload::Daily(settings) => {
-                    let dir = self.proj.sidecar_dir();
-                    std::fs::create_dir_all(&dir)?;
-                    let json =
-                        serde_json::to_string_pretty(&settings).map_err(|e| Error::Import(e.to_string()))?;
-                    std::fs::write(dir.join(crate::import::DAILY_FILE), format!("{json}\n"))?;
+                    let update = self.vault.set_daily(&settings);
+                    self.persist_and_send(DocId::Vault(self.vault_id), update)?;
                     report.daily_notes = true;
                 }
             }
@@ -2081,7 +2111,10 @@ impl Engine {
                     None => LocalReply::Written(None),
                 },
                 LocalQuery::Daily(date) => {
-                    let path = format!("Daily/{date}.md");
+                    let Some(day) = crate::daily::Date::parse(&date) else {
+                        return Ok(LocalReply::Written(None)); // `local::daily` validated it already
+                    };
+                    let path = self.vault.daily().path_for(day);
                     match self.by_path.get(&path).copied() {
                         Some(id) => self.api_note(id)?,
                         None => self.api_create(&path, &format!("# {date}\n\n"))?,
@@ -2386,6 +2419,47 @@ mod tests {
         drop(again);
         let other = SyncOptions { vault_id: Some(VaultId::new()), ..base.clone() };
         assert!(Engine::open(&other).is_err());
+    }
+
+    /// What an offline `lemmate import obsidian` leaves in the sidecar ends up in the vault doc —
+    /// persisted, so it survives a restart and reaches the server — and the files go.
+    #[test]
+    fn imported_settings_are_adopted_into_the_vault_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join(".obsidian")).unwrap();
+        std::fs::write(src.path().join("N.md"), "n\n").unwrap();
+        std::fs::write(
+            src.path().join(".obsidian/bookmarks.json"),
+            r#"{"items":[{"type":"file","path":"N.md"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join(".obsidian/daily-notes.json"),
+            r#"{"folder":"Journal","format":"DD.MM.YYYY"}"#,
+        )
+        .unwrap();
+        crate::import::import_obsidian(src.path(), dir.path(), &Default::default()).unwrap();
+        let sidecar = dir.path().join(crate::SIDECAR_DIR);
+        assert!(sidecar.join(crate::import::DAILY_FILE).is_file());
+
+        let opts = SyncOptions {
+            vault_dir: dir.path().into(),
+            server_url: None,
+            vault_id: None,
+            once: true,
+            ca_cert: None,
+            token: None,
+        };
+        let mut e = Engine::open(&opts).unwrap();
+        e.adopt_imports().unwrap();
+        assert!(!sidecar.join(crate::import::DAILY_FILE).exists());
+        assert!(!sidecar.join(crate::import::BOOKMARKS_FILE).exists());
+        drop(e);
+        let e = Engine::open(&opts).unwrap();
+        assert_eq!(e.vault.bookmarks().len(), 1);
+        let day = crate::daily::Date::parse("2026-09-25").unwrap();
+        assert_eq!(e.vault.daily().path_for(day), "Journal/25.09.2026.md");
     }
 
     /// A sidecar indexed by an older indexer is re-derived on start, once.

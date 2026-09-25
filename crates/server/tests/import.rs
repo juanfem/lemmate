@@ -117,7 +117,7 @@ async fn uploaded_vault_becomes_notes_attachments_and_bookmarks() {
                 ".obsidian/bookmarks.json",
                 br#"{"items":[{"type":"file","path":"Projects/plan.md","title":"Plan"}]}"#,
             ),
-            (".obsidian/daily-notes.json", br#"{"folder":"Daily","format":"YYYY-MM-DD"}"#),
+            (".obsidian/daily-notes.json", br#"{"folder":"Journal","format":"DD.MM.YYYY"}"#),
         ],
         None,
     )
@@ -129,12 +129,16 @@ async fn uploaded_vault_becomes_notes_attachments_and_bookmarks() {
     assert_eq!(report["embeds"], 1);
     assert_eq!(report["bookmarks"], 1);
     assert_eq!(report["skipped"], 0);
-    // Settings with nowhere to live on the server are reported as not stored, never as imported.
-    assert_eq!(report["daily_notes"], false);
+    // Daily-note settings go into the vault doc, where every replica files days by them.
+    assert_eq!(report["daily_notes"], true);
+    let (status, daily) = get(addr, &format!("/api/v1/vaults/{vault}/daily/2026-09-25"), None).await;
+    assert_eq!(status, 200, "{daily}");
+    assert_eq!(daily["path"], "Journal/25.09.2026.md");
 
     // The note is a real note: derived metadata, and Obsidian syntax converted.
     let (_, notes) = get(addr, &format!("/api/v1/vaults/{vault}/notes"), None).await;
-    let list = notes.as_array().unwrap();
+    let list: Vec<_> =
+        notes.as_array().unwrap().iter().filter(|n| n["path"] != "Journal/25.09.2026.md").collect();
     assert_eq!(list.len(), 1, "{notes}");
     assert_eq!(list[0]["path"], "Projects/plan.md");
     let id = list[0]["id"].as_str().unwrap();
@@ -173,7 +177,7 @@ async fn uploaded_vault_becomes_notes_attachments_and_bookmarks() {
     assert_eq!(again["skipped"], 1);
     assert_eq!(again["bookmarks"], 0);
     let (_, notes) = get(addr, &format!("/api/v1/vaults/{vault}/notes"), None).await;
-    assert_eq!(notes.as_array().unwrap().len(), 1);
+    assert_eq!(notes.as_array().unwrap().len(), 2, "the plan and the daily note: {notes}");
 }
 
 #[tokio::test]
