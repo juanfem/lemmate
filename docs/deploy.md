@@ -49,7 +49,7 @@ The image's default command is:
 lemmate-server --bind 0.0.0.0:8080 --data-dir /data --web-dir /app/web
 ```
 
-Anything you append to `docker run … notes <args>` replaces that whole list, so repeat the
+Anything you append to `docker run … lemmate <args>` replaces that whole list, so repeat the
 three flags if you add a fourth. Adding an environment variable does not have this problem.
 
 Liveness endpoint: `GET /healthz` → `ok`, unauthenticated.
@@ -61,15 +61,16 @@ Liveness endpoint: `GET /healthz` → `ok`, unauthenticated.
 ### Run the container
 
 ```sh
+docker build -t lemmate .          # from the repository root
 docker volume create lemmate_data
 
-docker run -d --name notes \
+docker run -d --name lemmate \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -v lemmate_data:/data \
   -e LEMMATE_SECURE_COOKIES=true \
   -e RUST_LOG=info \
-  ghcr.io/you/notes:latest      # or a locally built `notes` tag
+  lemmate
 ```
 
 `-p 127.0.0.1:8080:8080` publishes only on loopback: the proxy reaches it, the LAN does not.
@@ -93,8 +94,8 @@ Quarto's PDF does not.
 directory keeps its own ownership and the server cannot create `lemmate.db`:
 
 ```sh
-mkdir -p /srv/notes/data && chown -R 10001:10001 /srv/notes/data
-docker run … -v /srv/notes/data:/data …
+mkdir -p /srv/lemmate/data && chown -R 10001:10001 /srv/lemmate/data
+docker run … -v /srv/lemmate/data:/data …
 ```
 
 ### Caddyfile
@@ -151,8 +152,8 @@ Build the image on your own machine rather than on the server: compiling the Rus
 wants several GB of RAM, which a small VM does not have. Then copy it across:
 
 ```sh
-docker build -t notes .
-docker save notes | gzip | ssh you@server 'gunzip | docker load'
+docker build -t lemmate .
+docker save lemmate | gzip | ssh you@server 'gunzip | docker load'
 ```
 
 Register the first account as soon as the server answers — (e) explains why — and set up
@@ -169,10 +170,10 @@ SQLite's own online backup, which is safe against a live writer:
 ```sh
 # Inside the container (sqlite3 is not in the runtime image — install it, or run from the host
 # against the volume's path).
-sqlite3 /data/lemmate.db ".backup '/data/backup/notes-$(date +%F).db'"
+sqlite3 /data/lemmate.db ".backup '/data/backup/lemmate-$(date +%F).db'"
 
 # Attachments are immutable content-addressed blobs, so a plain incremental copy is fine.
-rsync -a /data/attachments/ /backup/notes/attachments/
+rsync -a /data/attachments/ /backup/lemmate/attachments/
 ```
 
 From the host, with the container running and the data in a named volume:
@@ -183,7 +184,7 @@ mkdir -p backup
 # lemmate.db, via SQLite's online backup (alpine's sqlite package, no third-party image).
 docker run --rm -v lemmate_data:/data -v "$PWD/backup:/backup" alpine:3 \
   sh -c "apk add --no-cache sqlite >/dev/null && \
-         sqlite3 /data/lemmate.db \".backup '/backup/notes-\$(date +%F).db'\""
+         sqlite3 /data/lemmate.db \".backup '/backup/lemmate-\$(date +%F).db'\""
 
 # attachments/ — immutable content-addressed blobs, so a plain copy is enough.
 docker run --rm -v lemmate_data:/data -v "$PWD/backup:/backup" alpine:3 \

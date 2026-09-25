@@ -72,9 +72,9 @@ lemmate-server --data-dir ./data --web-dir ui/dist
 
 The first account to register becomes the admin; after that, accounts come from admins or
 single-use invites (`lemmate invite`). Put it behind a TLS reverse proxy —
-[docs/deploy.md](docs/deploy.md) covers Docker with Caddy (at home or on a rented server), backups, and every flag.
-Then open the server in a browser, point the desktop app at it, or keep a plain folder in sync
-from the command line:
+[docs/deploy.md](docs/deploy.md) covers Docker with Caddy (at home or on a rented server),
+backups, and every flag. Then open the server in a browser, point the desktop app at it, or
+keep a plain folder in sync from the command line:
 
 ```sh
 lemmate login --server https://notes.example.org --email you@example.org
