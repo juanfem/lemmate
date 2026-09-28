@@ -533,10 +533,16 @@ Editing features:
   popover.
 - **Templates** — a `Templates/` folder; variables `{{date}}`, `{{date:FORMAT}}`, `{{time}}`,
   `{{title}}`, `{{cursor}}`. No scripting.
-- **Version history** — a `Version` row is created every 15 minutes of activity per note
-  and on explicit "save version"; history pane shows versions with author, diff view,
-  restore (restore = new edit, history preserved). Raw update log retained 90 days
-  (configurable) **[decided]**, versions retained forever.
+- **Version history** — the addressable points are the store's snapshots (§6.1) plus explicit
+  "save version"; the history pane lists them folded into editing sessions (snapshots less
+  than 30 minutes apart, `history::SESSION_GAP`), a named version always standing alone and
+  ending its session. Each entry says what changed since the one before — lines added and
+  removed, and the headings they fall under — and any version can be named, renamed or
+  unnamed (`PATCH …/versions/:seq`). Saving with nothing changed since a named version is a
+  409, never a rename. A version opens on a unified diff against the previous entry or the
+  note as it is now (unchanged runs folded, change-to-change navigation), or rendered as it
+  read; restore = new edit, history preserved. Raw update log retained 90 days (configurable)
+  **[decided]**, named versions retained forever, unnamed snapshots pruned with the log.
 - **Trash** — deleted notes are hidden, restorable for 30 days, then purged along with
   orphaned attachments.
 - **Files that are not notes** — the tree shows notes only; a third view of the Files tab
@@ -674,7 +680,9 @@ PUT    /vaults/:v/notes/:id    {content}        replace content (applied as a di
 PATCH  /vaults/:v/notes/:id    {path}           rename/move
 DELETE /vaults/:v/notes/:id                    trash
 GET    /vaults/:v/notes/:id/backlinks
-GET    /vaults/:v/notes/:id/versions[/:seq]
+GET    /vaults/:v/notes/:id/versions[/:seq]         history entries / content at a version
+POST   /vaults/:v/notes/:id/versions  {label}      save version (409: nothing new since a named one)
+PATCH  /vaults/:v/notes/:id/versions/:seq {label}  name, rename, or (null) unname
 POST   /vaults/:v/notes/:id/export {format}
 GET    /vaults/:v/daily/:date                  get-or-create daily note
 GET    /vaults/:v/tags

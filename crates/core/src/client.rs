@@ -2021,7 +2021,19 @@ impl Engine {
                     let path = self.store_attachment(&name, &bytes)?;
                     LocalReply::Stored { path, hash: hash_bytes(&bytes) }
                 }
-                LocalQuery::Versions(id) => LocalReply::Versions(self.store.versions(DocId::Note(id))?),
+                LocalQuery::Versions(id) => LocalReply::Versions(
+                    self.notes
+                        .contains_key(&id)
+                        .then(|| crate::history::entries(&self.store.journal(DocId::Note(id))?))
+                        .transpose()?,
+                ),
+                LocalQuery::LabelVersion(id, seq, label) => LocalReply::Labelled(
+                    self.notes
+                        .contains_key(&id)
+                        .then(|| self.store.set_version_label(DocId::Note(id), seq, label.as_deref()))
+                        .transpose()?
+                        .flatten(),
+                ),
                 LocalQuery::VersionAt(id, seq) => LocalReply::VersionAt(
                     self.notes
                         .contains_key(&id)
@@ -2033,20 +2045,13 @@ impl Engine {
                     let Some(doc) = self.doc_for(id) else {
                         return Ok(LocalReply::Error("unknown note".into()));
                     };
-                    let now = now_ms();
-                    let seq = self.store.snapshot_labeled_at(
+                    LocalReply::SavedVersion(self.store.save_version(
                         DocId::Note(id),
                         &doc.encode_full(),
-                        now,
-                        Some(&label),
+                        now_ms(),
+                        &label,
                         None,
-                    )?;
-                    LocalReply::SavedVersion(crate::store::VersionRow {
-                        seq,
-                        created_ms: now,
-                        label: Some(label),
-                        author: None,
-                    })
+                    )?)
                 }
                 LocalQuery::CreateNote { path, content } => self.api_create(&path, &content)?,
                 LocalQuery::Import { files } => LocalReply::Imported(self.api_import(files)?),

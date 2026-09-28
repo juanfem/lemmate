@@ -53,6 +53,8 @@ pub enum LocalQuery {
     Versions(NoteId),
     VersionAt(NoteId, i64),
     SaveVersion(NoteId, String),
+    /// Name a snapshot, rename it, or (`None`) take its name away.
+    LabelVersion(NoteId, i64, Option<String>),
     Attachment(String),
     // Writes (SPEC §13.1), performed on the projected files so the usual machinery applies.
     CreateNote {
@@ -128,9 +130,12 @@ pub enum LocalReply {
     Backlinks(Vec<NoteRow>),
     Tags(Vec<(String, u32)>),
     Tagged(Vec<NoteRow>),
-    Versions(Vec<crate::store::VersionRow>),
+    /// `None` → no such note in this vault.
+    Versions(Option<Vec<crate::history::Entry>>),
     VersionAt(Option<String>),
-    SavedVersion(crate::store::VersionRow),
+    SavedVersion(crate::store::Saved),
+    /// `None` → no such note, or no snapshot at that seq.
+    Labelled(Option<crate::store::VersionRow>),
     Attachment(Option<(Vec<u8>, String)>),
     /// A note after a write: row + content. `None` → not found.
     Written(Option<(NoteRow, String)>),
@@ -539,7 +544,7 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/notes/{id}/restore", axum::routing::post(restore))
         .route("/api/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(versions).post(save_version))
-        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(version_at).patch(label_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
         .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search))
@@ -1103,6 +1108,11 @@ struct SaveVersion {
     #[serde(default)]
     label: Option<String>,
 }
+#[derive(Deserialize)]
+struct LabelVersion {
+    #[serde(default)]
+    label: Option<String>,
+}
 fn version_out(v: crate::store::VersionRow) -> VersionOut {
     VersionOut { seq: v.seq, created_ms: v.created_ms, label: v.label, author: v.author }
 }
@@ -1110,10 +1120,11 @@ fn version_out(v: crate::store::VersionRow) -> VersionOut {
 async fn versions(
     State(s): State<Arc<LocalState>>,
     Path((vault, id)): Path<(String, String)>,
-) -> Resp<Vec<VersionOut>> {
+) -> Resp<Vec<crate::history::Entry>> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     match ask(&s, &vault, LocalQuery::Versions(id)).await? {
-        LocalReply::Versions(v) => Ok(axum::Json(v.into_iter().map(version_out).collect())),
+        LocalReply::Versions(Some(v)) => Ok(axum::Json(v)),
+        LocalReply::Versions(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -1124,10 +1135,25 @@ async fn save_version(
     axum::Json(body): axum::Json<SaveVersion>,
 ) -> Resp<VersionOut> {
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    match ask(&s, &vault, LocalQuery::SaveVersion(id, body.label.unwrap_or_else(|| "saved version".into())))
-        .await?
-    {
-        LocalReply::SavedVersion(v) => Ok(axum::Json(version_out(v))),
+    let label = crate::history::clean_label(body.label.as_deref()).unwrap_or_else(|| "saved version".into());
+    match ask(&s, &vault, LocalQuery::SaveVersion(id, label)).await? {
+        LocalReply::SavedVersion(crate::store::Saved::New(v)) => Ok(axum::Json(version_out(v))),
+        // Nothing changed since the last named version, which a save must not rename.
+        LocalReply::SavedVersion(crate::store::Saved::Unchanged(_)) => Err(StatusCode::CONFLICT),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn label_version(
+    State(s): State<Arc<LocalState>>,
+    Path((vault, id, seq)): Path<(String, String, i64)>,
+    axum::Json(body): axum::Json<LabelVersion>,
+) -> Resp<VersionOut> {
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let label = crate::history::clean_label(body.label.as_deref());
+    match ask(&s, &vault, LocalQuery::LabelVersion(id, seq, label)).await? {
+        LocalReply::Labelled(Some(v)) => Ok(axum::Json(version_out(v))),
+        LocalReply::Labelled(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

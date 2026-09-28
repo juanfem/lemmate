@@ -16,9 +16,9 @@ use lemmate_core::attachments::{
     AttachmentStore, MAX_ATTACHMENT_BYTES, hash_bytes, is_valid_hash, mime_for_path,
 };
 use lemmate_core::import::{self, Upload, UploadReport};
-use lemmate_core::store::{AttachmentRow, Role, now_ms};
+use lemmate_core::store::{AttachmentRow, Role, Saved, now_ms};
 use lemmate_core::sync::{Frame, Message, SyncMessage};
-use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, markdown};
+use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, history, markdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower_http::trace::TraceLayer;
@@ -233,7 +233,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render/{render}", get(kept_render))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
-        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version))
+        .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version).patch(label_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
         .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search_vault))
@@ -1325,26 +1325,55 @@ struct VersionOut {
     author: Option<String>,
 }
 
+impl From<lemmate_core::store::VersionRow> for VersionOut {
+    fn from(v: lemmate_core::store::VersionRow) -> Self {
+        VersionOut { seq: v.seq, created_ms: v.created_ms, label: v.label, author: v.author }
+    }
+}
+
 #[derive(Deserialize)]
 struct SaveVersion {
     #[serde(default)]
     label: Option<String>,
 }
 
+/// History is the note's: the caller needs a role on the note itself, and the note has to be in
+/// the vault the path names — a role on one vault does not reach another's notes by id.
+async fn version_access(
+    state: &AppState,
+    user: &AuthUser,
+    vault: &str,
+    id: &str,
+    min: Role,
+) -> Result<NoteId, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let role = auth::note_role(state, user, vault, id).await.ok_or(StatusCode::NOT_FOUND)?;
+    let row = state.store.lock().await.note_by_id(id).map_err(internal)?;
+    if row.is_none_or(|n| n.vault_id != vault) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if role < min {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(id)
+}
+
+/// The note's history as people read it: snapshots folded into editing sessions, each with what
+/// changed since the one before (`lemmate_core::history`).
 async fn list_versions(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((vault, id)): Path<(String, String)>,
-) -> Result<Json<Vec<VersionOut>>, StatusCode> {
-    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    auth::require(&state, &user, vault, Role::Viewer).await?;
-    let rows = state.store.lock().await.versions(DocId::Note(id)).map_err(internal)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|v| VersionOut { seq: v.seq, created_ms: v.created_ms, label: v.label, author: v.author })
-            .collect(),
-    ))
+) -> Result<Json<Vec<history::Entry>>, StatusCode> {
+    let id = version_access(&state, &user, &vault, &id, Role::Viewer).await?;
+    // Only the read holds the store; decoding and diffing every session does not.
+    let journal = state.store.lock().await.journal(DocId::Note(id)).map_err(internal)?;
+    let entries = tokio::task::spawn_blocking(move || history::entries(&journal))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(internal)?;
+    Ok(Json(entries))
 }
 
 /// Snapshot the note now with a label (SPEC §9 "save version"); kept forever.
@@ -1354,20 +1383,41 @@ async fn save_version(
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<SaveVersion>,
 ) -> Result<Json<VersionOut>, StatusCode> {
-    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    auth::require(&state, &user, vault, Role::Editor).await?;
+    let id = version_access(&state, &user, &vault, &id, Role::Editor).await?;
     let room = get_room(&state, DocId::Note(id)).await.map_err(internal)?;
     let doc = room.doc.lock().await;
-    let label = body.label.unwrap_or_else(|| "saved version".to_owned());
-    let now = now_ms();
-    let seq = state
+    let label = history::clean_label(body.label.as_deref()).unwrap_or_else(|| "saved version".to_owned());
+    let saved = state
         .store
         .lock()
         .await
-        .snapshot_labeled_at(DocId::Note(id), &doc.encode_full(), now, Some(&label), Some(&user.display_name))
+        .save_version(DocId::Note(id), &doc.encode_full(), now_ms(), &label, Some(&user.display_name))
         .map_err(internal)?;
-    Ok(Json(VersionOut { seq, created_ms: now, label: Some(label), author: Some(user.display_name) }))
+    match saved {
+        Saved::New(v) => Ok(Json(v.into())),
+        // Nothing changed since the last named version, which a save must not rename.
+        Saved::Unchanged(_) => Err(StatusCode::CONFLICT),
+    }
+}
+
+/// Name a version, rename it, or (`"label": null`, or blank) take its name away, after which it
+/// is an ordinary snapshot again and pruned like one.
+async fn label_version(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, id, seq)): Path<(String, String, i64)>,
+    Json(body): Json<SaveVersion>,
+) -> Result<Json<VersionOut>, StatusCode> {
+    let id = version_access(&state, &user, &vault, &id, Role::Editor).await?;
+    let label = history::clean_label(body.label.as_deref());
+    let row = state
+        .store
+        .lock()
+        .await
+        .set_version_label(DocId::Note(id), seq, label.as_deref())
+        .map_err(internal)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(row.into()))
 }
 
 #[derive(Serialize)]
@@ -1381,9 +1431,7 @@ async fn get_version(
     user: AuthUser,
     Path((vault, id, seq)): Path<(String, String, i64)>,
 ) -> Result<Json<VersionBody>, StatusCode> {
-    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    auth::require(&state, &user, vault, Role::Viewer).await?;
+    let id = version_access(&state, &user, &vault, &id, Role::Viewer).await?;
     let doc = state.store.lock().await.load_doc_at(DocId::Note(id), seq).map_err(internal)?;
     Ok(Json(VersionBody { seq, content: doc.text() }))
 }

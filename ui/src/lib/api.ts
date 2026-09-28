@@ -32,6 +32,22 @@ export interface Version {
   label: string | null
   author: string | null
 }
+/** What changed since the history entry before, in lines, and under which headings. */
+export interface Changes {
+  added: number
+  removed: number
+  sections: string[]
+}
+/**
+ * One row of a note's history: an editing session (the store's snapshots less than half an
+ * hour apart, folded), or a version someone named. `changes` is null for the oldest entry left
+ * after older history was pruned — there is nothing before it to compare with.
+ */
+export interface HistoryEntry extends Version {
+  started_ms: number
+  snapshots: number
+  changes: Changes | null
+}
 export interface SearchHit {
   note_id: string
   title: string | null
@@ -114,6 +130,13 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for ${path}`)
   const text = await r.text()
   return (text ? JSON.parse(text) : null) as T
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(`/api/v1${path}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  if (r.status === 401) authState.onUnauthorized()
+  if (!r.ok) throw new ApiError(r.status, `${r.status} ${r.statusText} for ${path}`)
+  return (await r.json()) as T
 }
 
 async function del(path: string): Promise<void> {
@@ -231,9 +254,12 @@ export const api = {
   publicNote: (token: string) => get<{ id: string; path: string; title: string | null; content: string }>(`/shared/${token}`),
   trash: (vault: string) => get<{ id: string; path: string; title: string | null; deleted_at: string }[]>(`/vaults/${vault}/trash`),
   restore: (vault: string, id: string) => post<NoteSummary>(`/vaults/${vault}/notes/${id}/restore`, {}),
-  versions: (vault: string, id: string) => get<Version[]>(`/vaults/${vault}/notes/${id}/versions`),
+  versions: (vault: string, id: string) => get<HistoryEntry[]>(`/vaults/${vault}/notes/${id}/versions`),
   versionAt: (vault: string, id: string, seq: number) => get<{ seq: number; content: string }>(`/vaults/${vault}/notes/${id}/versions/${seq}`),
   saveVersion: (vault: string, id: string, label: string) => post<Version>(`/vaults/${vault}/notes/${id}/versions`, { label }),
+  /** Name a version, rename it, or (`null`) take its name away. */
+  labelVersion: (vault: string, id: string, seq: number, label: string | null) =>
+    patch<Version>(`/vaults/${vault}/notes/${id}/versions/${seq}`, { label }),
   vaults: () => get<VaultInfo[]>('/vaults'),
   notes: (vault: string) => get<NoteSummary[]>(`/vaults/${vault}/notes`),
   search: (vault: string, q: string, limit = 20) =>

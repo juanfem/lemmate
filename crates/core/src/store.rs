@@ -190,6 +190,36 @@ pub struct VersionRow {
     pub author: Option<String>,
 }
 
+/// What [`Store::save_version`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Saved {
+    New(VersionRow),
+    /// Nothing has changed since this named version, which is left as it was.
+    Unchanged(VersionRow),
+}
+
+/// One snapshot as [`Store::journal`] reads it: its row, and the doc's full state at it.
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    pub version: VersionRow,
+    pub bytes: Vec<u8>,
+}
+
+/// A doc's journal, oldest first: snapshots, and `(seq, created_ms)` of each update kept.
+#[derive(Debug, Clone, Default)]
+pub struct Journal {
+    pub snapshots: Vec<SnapshotRow>,
+    pub updates: Vec<(i64, i64)>,
+}
+
+impl Journal {
+    /// Nothing has been pruned: the update that started the doc (seq 1) is still here, so the
+    /// oldest snapshot can be compared with the empty note it grew from.
+    pub fn complete(&self) -> bool {
+        self.updates.first().is_some_and(|&(seq, _)| seq == 1)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRow {
     pub hash: String,
@@ -466,6 +496,116 @@ impl Store {
             Ok(VersionRow { seq: r.get(0)?, created_ms: r.get(1)?, label: r.get(2)?, author: r.get(3)? })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// "Save version" (SPEC §9): keep the doc as it is now under `label`. Nothing new can be
+    /// saved over a version already named at the head — that would quietly rename it — so that
+    /// comes back as [`Saved::Unchanged`]. An automatic snapshot there is named in place and
+    /// keeps its time, which is when the text it holds was last edited.
+    pub fn save_version(
+        &mut self,
+        doc_id: DocId,
+        full_state: &[u8],
+        now_ms: i64,
+        label: &str,
+        author: Option<&str>,
+    ) -> Result<Saved> {
+        let id = doc_id.to_string();
+        let head: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM (SELECT seq FROM doc_updates WHERE doc_id = ?1 UNION ALL SELECT seq FROM doc_snapshots WHERE doc_id = ?1)",
+            params![id],
+            |r| r.get(0),
+        )?;
+        let at_head: Option<VersionRow> = self
+            .conn
+            .query_row(
+                "SELECT seq, created_ms, label, author_id FROM doc_snapshots WHERE doc_id = ?1 AND seq = ?2",
+                params![id, head],
+                |r| {
+                    Ok(VersionRow {
+                        seq: r.get(0)?,
+                        created_ms: r.get(1)?,
+                        label: r.get(2)?,
+                        author: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        match at_head {
+            Some(v) if v.label.is_some() => Ok(Saved::Unchanged(v)),
+            Some(v) => {
+                self.conn.execute(
+                    "UPDATE doc_snapshots SET label = ?3, author_id = ?4 WHERE doc_id = ?1 AND seq = ?2",
+                    params![id, head, label, author],
+                )?;
+                Ok(Saved::New(VersionRow {
+                    label: Some(label.to_owned()),
+                    author: author.map(Into::into),
+                    ..v
+                }))
+            }
+            None => {
+                let seq = self.snapshot_labeled_at(doc_id, full_state, now_ms, Some(label), author)?;
+                Ok(Saved::New(VersionRow {
+                    seq,
+                    created_ms: now_ms,
+                    label: Some(label.to_owned()),
+                    author: author.map(Into::into),
+                }))
+            }
+        }
+    }
+
+    /// Name a snapshot, rename it, or (`None`) take its name away — which also makes it an
+    /// ordinary snapshot again, pruned like any other once it leaves the retention window.
+    /// `None` back when the doc has no snapshot at `seq`.
+    pub fn set_version_label(
+        &mut self,
+        doc_id: DocId,
+        seq: i64,
+        label: Option<&str>,
+    ) -> Result<Option<VersionRow>> {
+        let id = doc_id.to_string();
+        let n = self.conn.execute(
+            "UPDATE doc_snapshots SET label = ?3 WHERE doc_id = ?1 AND seq = ?2",
+            params![id, seq, label],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.conn.query_row(
+            "SELECT seq, created_ms, label, author_id FROM doc_snapshots WHERE doc_id = ?1 AND seq = ?2",
+            params![id, seq],
+            |r| Ok(VersionRow { seq: r.get(0)?, created_ms: r.get(1)?, label: r.get(2)?, author: r.get(3)? }),
+        )?))
+    }
+
+    /// Everything [`crate::history::entries`] reads, in one go: every snapshot with its bytes,
+    /// and when each update still in the journal arrived, both oldest first. Reading it is all
+    /// that needs the store; the decoding and diffing that follow do not.
+    pub fn journal(&self, doc_id: DocId) -> Result<Journal> {
+        let id = doc_id.to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, created_ms, label, author_id, bytes FROM doc_snapshots WHERE doc_id = ?1 ORDER BY seq",
+        )?;
+        let snapshots = stmt
+            .query_map(params![id], |r| {
+                Ok(SnapshotRow {
+                    version: VersionRow {
+                        seq: r.get(0)?,
+                        created_ms: r.get(1)?,
+                        label: r.get(2)?,
+                        author: r.get(3)?,
+                    },
+                    bytes: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt =
+            self.conn.prepare("SELECT seq, created_ms FROM doc_updates WHERE doc_id = ?1 ORDER BY seq")?;
+        let updates =
+            stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(Journal { snapshots, updates })
     }
 
     /// The doc as it was at sequence `seq`: newest snapshot at or before it, plus the updates
@@ -1812,6 +1952,36 @@ mod tests {
         assert!(m.snapshotted && m.pruned_updates == 4 && m.pruned_snapshots == 0, "{m:?}");
         assert_eq!(store.versions(id).unwrap().len(), 2);
         assert_eq!(store.load_doc_at(id, 4).unwrap().text(), "one two three four");
+    }
+
+    #[test]
+    fn saving_a_version_never_renames_one() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = DocId::Note(NoteId::new());
+        let doc = NoteDoc::new();
+        store.append_update_at(id, &doc.set_text("one"), None, 1000).unwrap();
+        store.snapshot_at(id, &doc.encode_full(), 2000).unwrap();
+        // An automatic snapshot at the head is named in place, and keeps its time.
+        let Saved::New(v) = store.save_version(id, &doc.encode_full(), 9000, "first", Some("ann")).unwrap()
+        else {
+            panic!("expected a new version")
+        };
+        assert_eq!(
+            (v.seq, v.created_ms, v.label.as_deref(), v.author.as_deref()),
+            (1, 2000, Some("first"), Some("ann"))
+        );
+        // With nothing changed since, a second save leaves the first alone.
+        let again = store.save_version(id, &doc.encode_full(), 9500, "second", None).unwrap();
+        assert!(matches!(&again, Saved::Unchanged(v) if v.label.as_deref() == Some("first")), "{again:?}");
+        // After an edit it is a version of its own.
+        store.append_update_at(id, &doc.set_text("one two"), None, 10_000).unwrap();
+        let Saved::New(v) = store.save_version(id, &doc.encode_full(), 11_000, "second", None).unwrap()
+        else {
+            panic!("expected a new version")
+        };
+        assert_eq!((v.seq, v.created_ms), (2, 11_000));
+        let labels: Vec<_> = store.versions(id).unwrap().into_iter().filter_map(|v| v.label).collect();
+        assert_eq!(labels, ["second", "first"]);
     }
 
     #[test]

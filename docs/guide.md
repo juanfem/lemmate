@@ -600,12 +600,25 @@ on a phone, where there is no second window to put it in.
 **Version history** opens in a pane of its own — the clock on the tab strip, `Ctrl+Shift+R`, or
 *Show version history* in the palette. It splits right where there is room and reuses the last
 pane where there is not, and asking again goes back to the pane already showing it. Its page is
-the log: snapshots for the note — automatic ones (taken every 500 updates or 10 minutes) plus
-any you name with *Save version…*. Click one and the page becomes that version, rendered the
-way the note is, with the lines it no longer shares with the note marked down its left edge.
-*Restore* is applied as one more edit, so nothing in the history is lost.
-Snapshots are kept forever; the raw update log behind them is pruned after `--retain-days`
-(90 by default).
+the log, grouped by day. The note is snapshotted as you write (every 500 updates or 10 minutes);
+snapshots less than half an hour apart are one sitting and are listed as one entry, with the
+time it ran, how many lines it added and removed, and the headings it touched
+(`Methods · Results  +12 −3  14:02–15:40`). *Save version…* keeps the note as it is now under a
+name, and the ✎ on any row names that entry, renames it, or — left empty — takes the name away.
+A named version is listed on its own and kept forever; unnamed ones follow the update log below.
+With nothing changed since the last named version there is nothing new to save, and the page
+says so rather than renaming it.
+
+Click an entry and the page becomes that version, with three ways to look at it: *What changed*
+(this entry against the one before it), *Compared with now* (this entry against the note as it
+stands), and *Read* (the version rendered the way the note is, with the lines it no longer
+shares with the note marked down its left edge). The first two are a diff — removed lines struck
+through, added ones in green, the changed words within a line highlighted — that folds away
+unchanged stretches (click a fold to open it) and steps from change to change with ↑ and ↓.
+*Restore* is applied as one more edit, so nothing in the history is lost. Named versions are
+kept forever; the raw update log, and the unnamed snapshots it made redundant, are pruned after
+`--retain-days` (90 by default) — the oldest entry left then has nothing before it to compare
+with, and says so.
 
 **Trash.** *Move to trash* removes the note from the vault doc; the file disappears from every
 synced replica and the tab closes everywhere. The note's update log and versions stay in the

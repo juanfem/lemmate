@@ -20,6 +20,7 @@ pub mod error;
 pub mod export;
 pub mod files;
 pub mod frontmatter;
+pub mod history;
 pub mod ids;
 pub mod import;
 pub mod local;

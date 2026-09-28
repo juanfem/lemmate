@@ -61,6 +61,9 @@ async fn call(method: &'static str, url: String, body: Option<Value>) -> (u16, V
             ("POST", Some(b)) => {
                 ureq::post(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
             }
+            ("PATCH", Some(b)) => {
+                ureq::patch(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
+            }
             _ => unreachable!(),
         };
         match result {
@@ -132,6 +135,48 @@ async fn a_vault_with_no_server_works_end_to_end() {
     assert_eq!(tags[0]["tag"], "soon", "{tags}");
     let (_, vaults) = get(format!("{base}/api/v1/vaults")).await;
     assert_eq!(vaults.as_array().unwrap().len(), 1);
+
+    handle.abort();
+}
+
+/// History from the vault's own sidecar: a saved version, what changed, and naming one.
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_are_listed_and_named_locally() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id.to_string();
+    let (code, note) = call(
+        "POST",
+        format!("{base}/api/v1/vaults/{vault}/notes"),
+        Some(serde_json::json!({ "path": "log.md", "content": "# Log\n\n## Monday\n\nrain\n" })),
+    )
+    .await;
+    assert_eq!(code, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    let versions = format!("{base}/api/v1/vaults/{vault}/notes/{id}/versions");
+
+    let (code, saved) = call("POST", versions.clone(), Some(serde_json::json!({ "label": " first " }))).await;
+    assert_eq!(code, 200, "{saved}");
+    assert_eq!(saved["label"], "first");
+    assert_eq!(
+        call("POST", versions.clone(), Some(serde_json::json!({}))).await.0,
+        409,
+        "nothing new to save"
+    );
+    let (code, list) = get(versions.clone()).await;
+    assert_eq!(code, 200);
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list[0]["changes"]["sections"], serde_json::json!(["Log", "Monday"]), "{list}");
+
+    let one = format!("{versions}/{}", saved["seq"]);
+    let (code, v) = call("PATCH", one.clone(), Some(serde_json::json!({ "label": "renamed" }))).await;
+    assert_eq!((code, v["label"].as_str()), (200, Some("renamed")));
+    let (code, v) = call("PATCH", one.clone(), Some(serde_json::json!({ "label": "   " }))).await;
+    assert_eq!((code, v["label"].clone()), (200, Value::Null), "a blank name is no name");
+    assert_eq!(call("PATCH", format!("{versions}/9999"), Some(serde_json::json!({}))).await.0, 404);
+    let stranger = format!("{base}/api/v1/vaults/{vault}/notes/{}/versions", lemmate_core::NoteId::new());
+    assert_eq!(get(stranger).await.0, 404);
 
     handle.abort();
 }

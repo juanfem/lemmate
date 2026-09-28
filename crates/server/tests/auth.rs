@@ -929,3 +929,96 @@ async fn an_app_signs_in_through_the_browser() {
     assert_eq!(get(addr, "/api/v1/auth/me", Some(&token)).await.0, 401);
     assert_eq!(get(addr, "/api/v1/auth/me", Some(&ann)).await.0, 200, "the browser session is untouched");
 }
+
+async fn patch(addr: SocketAddr, path: &str, body: Value, token: &str) -> (u16, Value) {
+    let req = ureq::patch(format!("http://{addr}{path}"))
+        .header("content-type", "application/json")
+        .header("authorization", &format!("Bearer {token}"));
+    let body = body.to_string();
+    tokio::task::spawn_blocking(move || match req.send(body.as_bytes()) {
+        Ok(mut r) => {
+            let status = r.status().as_u16();
+            let text = r.body_mut().read_to_string().unwrap_or_default();
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        }
+        Err(ureq::Error::StatusCode(c)) => (c, Value::Null),
+        Err(e) => panic!("{e}"),
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn versions_are_named_renamed_and_kept_to_their_note() {
+    let (addr, _) = start().await;
+    let ann = admin(addr).await;
+    let (a, b) = (VaultId::new(), VaultId::new());
+    let mut ws = connect(addr, &ann).await;
+    for v in [a, b] {
+        send(
+            &mut ws,
+            &format!("vault:{v}"),
+            Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector())),
+        )
+        .await;
+        assert!(matches!(recv(&mut ws).await, Some((_, Message::Sync(SyncMessage::SyncStep2(_))))));
+        assert!(matches!(recv(&mut ws).await, Some((_, Message::Sync(SyncMessage::SyncStep1(_))))));
+    }
+    let (s, note) = post(
+        addr,
+        &format!("/api/v1/vaults/{a}/notes"),
+        json!({"path": "a.md", "content": "# A\n\none\n\n## Methods\n\nfirst try\n"}),
+        Some(&ann),
+    )
+    .await;
+    assert_eq!(s, 201);
+    let id = note["id"].as_str().unwrap().to_owned();
+    let versions = format!("/api/v1/vaults/{a}/notes/{id}/versions");
+
+    let (s, saved) = post(addr, &versions, json!({"label": "  before methods  "}), Some(&ann)).await;
+    assert_eq!(s, 200, "{saved}");
+    assert_eq!(saved["label"], "before methods", "labels are trimmed");
+    let first = saved["seq"].as_i64().unwrap();
+    // Saving again with nothing changed would rename it; it is refused instead.
+    assert_eq!(post(addr, &versions, json!({"label": "again"}), Some(&ann)).await.0, 409);
+    let edited = "# A\n\none\n\n## Methods\n\nsecond try\nwith more\n";
+    assert_eq!(
+        put(addr, &format!("/api/v1/vaults/{a}/notes/{id}"), json!({"content": edited}), &ann).await,
+        200
+    );
+    let (s, _) = post(addr, &versions, json!({}), Some(&ann)).await;
+    assert_eq!(s, 200);
+
+    // Newest first, each with what changed since the one before; the first grew from nothing.
+    let (s, list) = get(addr, &versions, Some(&ann)).await;
+    assert_eq!(s, 200, "{list}");
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[0]["label"], "saved version");
+    assert_eq!(list[0]["changes"], json!({"added": 2, "removed": 1, "sections": ["Methods"]}));
+    // (Seven lines of it are ours; the server may have given the note front matter as well.)
+    assert!(list[1]["changes"]["added"].as_u64().unwrap() >= 7, "{:?}", list[1]);
+    assert_eq!(list[1]["author"], "ann");
+
+    // Renaming, and taking the name away.
+    let one = format!("{versions}/{first}");
+    let (s, v) = patch(addr, &one, json!({"label": "draft 1"}), &ann).await;
+    assert_eq!((s, v["label"].as_str()), (200, Some("draft 1")));
+    let (s, v) = patch(addr, &one, json!({"label": null}), &ann).await;
+    assert_eq!((s, v["label"].clone()), (200, Value::Null));
+    assert_eq!(patch(addr, &format!("{versions}/9999"), json!({"label": "x"}), &ann).await.0, 404);
+
+    // A role on vault B does not reach a note of vault A by naming it under B.
+    let wrong = format!("/api/v1/vaults/{b}/notes/{id}/versions");
+    assert_eq!(get(addr, &wrong, Some(&ann)).await.0, 404);
+    assert_eq!(get(addr, &format!("{wrong}/{first}"), Some(&ann)).await.0, 404);
+    assert_eq!(patch(addr, &format!("{wrong}/{first}"), json!({"label": "x"}), &ann).await.0, 404);
+    assert_eq!(post(addr, &wrong, json!({}), Some(&ann)).await.0, 404);
+
+    // A read-only token reads history and names nothing.
+    let (_, ro) = post(addr, "/api/v1/tokens", json!({"name": "ro", "read_only": true}), Some(&ann)).await;
+    let ro = ro["token"].as_str().unwrap().to_owned();
+    assert_eq!(get(addr, &versions, Some(&ro)).await.0, 200);
+    assert_eq!(patch(addr, &one, json!({"label": "x"}), &ro).await.0, 403);
+    assert_eq!(post(addr, &versions, json!({}), Some(&ro)).await.0, 403);
+}
