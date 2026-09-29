@@ -1,4 +1,7 @@
 :root {
+  /* The note's measure (`lib/measure.ts`): a centred column, or the whole pane when the reader
+     asks for full-width text. The editor, the history page and the diff view all keep it. */
+  --measure: 46rem;
   --ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --prose: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --mono: ui-monospace, 'JetBrains Mono', 'Fira Code', Menlo, monospace;
@@ -45,6 +48,10 @@
   --syn-property: oklch(0.48 0.07 230);
   --syn-meta: oklch(0.55 0.08 80);
 }
+:root[data-measure='full'] {
+  --measure: none;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     /* The same paper, unlit — warm-neutral rather than the blue-grey a generic dark theme

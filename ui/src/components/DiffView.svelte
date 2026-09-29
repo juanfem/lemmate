@@ -111,7 +111,7 @@
 <style>
   .diff {
     width: 100%;
-    max-width: 46rem;
+    max-width: var(--measure);
     margin: 0 auto;
     padding: 0 clamp(0.9rem, 4vw, 2.5rem) 3rem;
   }

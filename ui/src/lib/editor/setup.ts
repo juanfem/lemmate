@@ -47,13 +47,13 @@ const highlight = HighlightStyle.define([
 const theme = EditorView.theme({
   '&': { height: '100%', fontSize: '16px' },
   '.cm-scroller': { fontFamily: 'var(--prose)', lineHeight: '1.65', padding: '2.75rem 0' },
-  // A measure, not a text field: 736px less the side padding leaves about 650px of text, some
+  // A measure, not a text field (unless the reader asks for full-width text: `--measure`): 736px less the side padding leaves about 650px of text, some
   // 95 characters of this serif at 16px — past the classic 45–75, but notes are lists and
   // short lines as much as prose, and 42.5rem (≈85) read as cramped on a monitor. Centring it
   // makes the pane read as a page rather than as an input that happens to start partway
   // across. The side padding is a comfortable margin on a monitor and half the line length on
   // a phone, so it shrinks with the viewport instead of staying a fixed 2rem.
-  '.cm-content': { maxWidth: '46rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)', '--list-indent': '1.75em' },
+  '.cm-content': { maxWidth: 'var(--measure)', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)', '--list-indent': '1.75em' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '1.5px' },
   // A full-width band is a lot of colour to spend on "the cursor is here". A short fade from
   // the left margin says the same thing and stops competing with the text sitting on it.

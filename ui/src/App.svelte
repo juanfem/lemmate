@@ -40,6 +40,7 @@
   import ImportDialog from './components/ImportDialog.svelte'
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
+  import { measure } from './lib/measure.svelte.ts'
   import Icon, { type IconName } from './components/Icon.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
@@ -907,6 +908,7 @@
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
     { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
+    { id: 'full-width', label: measure.full ? 'View: centred text column' : 'View: full-width text', run: measure.toggle },
     ...(serverFeatures ? [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }] : []),
     ...(localOnly && canConnect ? [{ id: 'connect', label: 'Connect a server…', run: () => (connectOpen = true) }] : []),
     // Only a relay can merge vaults: it is the one thing that holds both engines (SPEC §3.2).

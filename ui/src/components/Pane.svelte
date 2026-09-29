@@ -38,6 +38,7 @@
   import { VIEW_MODES } from '../lib/editor/setup.ts'
   import Icon from './Icon.svelte'
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
+  import { measure } from '../lib/measure.svelte.ts'
   import type { OutlineItem } from '../lib/outline.ts'
   import { unnamedNote } from '../lib/notename.ts'
   import { clampIndex, drawn, endedOutside, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
@@ -204,6 +205,10 @@
     { label: bookmarked ? 'Remove bookmark' : 'Bookmark this note', run: onBookmark },
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),
     { label: 'Rename / move…', run: onRename },
+    { label: '', separator: true },
+    // Not about this note: every note, pane and window follows it. It is here because this is
+    // where you are when a note's column feels narrow.
+    { label: 'Full-width text', checked: measure.full, run: measure.toggle },
     { label: '', separator: true },
     { label: 'Move to trash', danger: true, run: onDelete },
   ])
@@ -763,12 +768,12 @@
   .editor-wrap {
     min-height: 0;
   }
-  /* Half the pane minus half the measure (46rem in `setup.ts`) is exactly the empty column
+  /* Half the pane minus half the measure (`--measure`, 46rem) is exactly the empty column
      the centred text leaves behind, which is where a marginal index belongs. */
   .margin {
     position: absolute;
     inset: 0 auto 0 0;
-    width: calc(50% - 23rem);
+    width: calc(50% - var(--measure) / 2);
     display: flex;
     flex-direction: column;
     align-items: flex-end;
@@ -845,6 +850,10 @@
     .margin {
       display: none;
     }
+  }
+  /* Full-width text leaves no empty column at all. */
+  :global(:root[data-measure='full']) .margin {
+    display: none;
   }
   @container pane (max-width: 560px) {
     .note-foot {
