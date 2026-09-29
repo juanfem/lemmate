@@ -469,8 +469,9 @@
     </div>
   {:else if pane.active && session && !isBlank(pane.active)}
     {#key pane.active}
-      <div class="page">
-        <!-- The outline in the margin the measure already leaves empty. It is an index, not a
+      <div class="page" class:outlined={index.length > 0}>
+        <!-- The outline in the margin the measure already leaves empty — or, with full-width
+             text, in a column of its own the text is moved over for. It is an index, not a
              panel: no header, no chrome, and gone the moment the pane is too narrow to hold a
              margin at all — at which point ⌘K and the headings themselves are how you move. -->
         {#if index.length}
@@ -764,6 +765,8 @@
     position: relative;
     min-height: 0;
     display: grid;
+    /* The outline's column when full-width text leaves it no margin to borrow. */
+    --outline-width: 13rem;
   }
   .editor-wrap {
     min-height: 0;
@@ -851,9 +854,17 @@
       display: none;
     }
   }
-  /* Full-width text leaves no empty column at all. */
-  :global(:root[data-measure='full']) .margin {
-    display: none;
+  /* Full-width text leaves no empty column, so the outline is given one: a fixed strip at the
+     left, and the note's text starts past it. Only where the pane is wide enough to show an
+     outline at all, and only for a note that has one — a note without headings keeps the
+     whole width. The embedded editors of transclusions keep their own (zero) padding. */
+  @container pane (min-width: 940.02px) {
+    :global(:root[data-measure='full']) .margin {
+      width: var(--outline-width);
+    }
+    :global(:root[data-measure='full']) .page.outlined :global(.cm-editor:not(.cm-embedded) > .cm-scroller > .cm-content) {
+      padding-left: var(--outline-width);
+    }
   }
   @container pane (max-width: 560px) {
     .note-foot {
