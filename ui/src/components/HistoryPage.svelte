@@ -286,7 +286,7 @@
   /* The same measure the note keeps, so the log reads as a page of the same book. */
   .page {
     width: 100%;
-    max-width: 42.5rem;
+    max-width: 46rem;
     margin: 0 auto;
     padding: 2.75rem clamp(0.9rem, 4vw, 2.5rem) 0;
     flex: none;

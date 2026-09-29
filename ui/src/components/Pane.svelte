@@ -763,12 +763,12 @@
   .editor-wrap {
     min-height: 0;
   }
-  /* Half the pane minus half the measure (42.5rem in `setup.ts`) is exactly the empty column
+  /* Half the pane minus half the measure (46rem in `setup.ts`) is exactly the empty column
      the centred text leaves behind, which is where a marginal index belongs. */
   .margin {
     position: absolute;
     inset: 0 auto 0 0;
-    width: calc(50% - 21.25rem);
+    width: calc(50% - 23rem);
     display: flex;
     flex-direction: column;
     align-items: flex-end;
