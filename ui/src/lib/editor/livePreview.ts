@@ -2,9 +2,9 @@
 // place, and revealed again on any line the selection touches. Lossless by construction.
 
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
-import { StateEffect, StateField, type EditorState } from '@codemirror/state'
+import { RangeSet, StateEffect, StateField, type EditorState, type Text } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
-import type { SyntaxNode } from '@lezer/common'
+import type { SyntaxNode, Tree } from '@lezer/common'
 import katex from 'katex'
 import { codeLanguageName } from './syntax.ts'
 import { blockMarker, parseEmbed, type EmbedTarget } from './transclude.ts'
@@ -204,13 +204,61 @@ class CheckboxWidget extends WidgetType {
  * The bullet a `-`/`*`/`+` marker renders as, by nesting depth (1 = outermost). Editors give
  * each level its own shape so the structure reads at a glance; the sequence is the CSS one,
  * disc → circle → square, and cycles past three. A task item renders nothing: its checkbox
- * is already the marker, and a bullet beside it is one marker too many. The empty widget still
- * takes the marker's width, so a task lines up with its bullet siblings.
+ * is already the marker, and a bullet beside it is one marker too many. The checkbox takes the
+ * bullet's column instead, so a task's text lines up with its bullet siblings'.
  */
 export function listBullet(depth: number, task: boolean): string {
   if (task) return ''
   const shapes = ['\u2022', '\u25e6', '\u25aa']
   return shapes[(Math.max(1, depth) - 1) % shapes.length]!
+}
+
+/** One line of a list item, as live preview lays it out. */
+export interface ListLine {
+  /** Start of the line. */
+  from: number
+  /** Nesting depth of the item the line belongs to, counting every list kind (1 = outermost). */
+  depth: number
+  /** End of the line's leading whitespace. It is hidden: the line's padding draws the indent. */
+  indentTo: number
+  /** On an item's first line, its marker and the gap after it — the box the marker sits in. */
+  marker?: { from: number; to: number }
+}
+
+/**
+ * The lines of `item` that live preview indents itself: its first line, and the lines its
+ * paragraphs continue on. Source indentation is a count of spaces in a proportional font —
+ * two of them barely move a nested item — and a wrapped line starts back at the margin, under
+ * the bullet. So the whitespace is hidden and each line is padded by its depth instead, the
+ * first one pulled back by the width of the marker box: a hanging indent. Lines the item holds
+ * in a nested item are that item's; code and tables inside an item keep their own layout, and
+ * so does a list in a quote, whose `>` comes before the indent.
+ */
+export function listLines(doc: Text, tree: Tree, item: SyntaxNode): ListLine[] {
+  for (let a = item.parent; a; a = a.parent) if (a.name === 'Blockquote') return []
+  const mark = item.getChild('ListMark')
+  if (!mark) return []
+  const first = doc.lineAt(item.from)
+  // `- - x`: the inner item shares its line with the outer one, which lays the line out.
+  if (doc.sliceString(first.from, item.from).trim() !== '') return []
+  let depth = 0
+  for (let a: SyntaxNode | null = item; a; a = a.parent) if (a.name === 'ListItem') depth++
+  const gap = /^[ \t]*/u.exec(doc.sliceString(mark.to, first.to))![0].length
+  const out: ListLine[] = [{ from: first.from, depth, indentTo: item.from, marker: { from: mark.from, to: mark.to + gap } }]
+  const last = doc.lineAt(item.to).number
+  for (let ln = first.number + 1; ln <= last; ln++) {
+    const line = doc.line(ln)
+    const at = line.from + /^[ \t]*/u.exec(line.text)![0].length
+    if (at === line.to) continue
+    let paragraph = false
+    for (let a: SyntaxNode | null = tree.resolveInner(at, 1); a; a = a.parent) {
+      if (a.name === 'Paragraph') paragraph = true
+      if (a.name !== 'ListItem') continue
+      if (paragraph && a.from === item.from) out.push({ from: line.from, depth, indentTo: at })
+      break
+    }
+  }
+  return out
 }
 
 const ALPHA = 'abcdefghijklmnopqrstuvwxyz'
@@ -270,7 +318,44 @@ class MarkerWidget extends WidgetType {
   }
 }
 
+/**
+ * A list marker drawn in place of the source one, with the gap after it: the marker box the
+ * source's `- ` sits in while the cursor is on the line. One widget rather than a widget inside
+ * a mark decoration — CodeMirror draws a replacement at a mark's edge outside the mark.
+ */
+class ListMarkerWidget extends WidgetType {
+  readonly text: string
+  readonly cls: string
+  readonly gap: string
+  constructor(text: string, cls: string, gap: string) {
+    super()
+    this.text = text
+    this.cls = cls
+    this.gap = gap
+  }
+  eq(other: ListMarkerWidget) {
+    return other.text === this.text && other.cls === this.cls && other.gap === this.gap
+  }
+  toDOM() {
+    const box = document.createElement('span')
+    // A task's box is empty and takes no room: the checkbox stands in the bullet's column.
+    box.className = this.text === '' ? 'cm-list-mark cm-list-mark-task' : 'cm-list-mark'
+    if (this.text === '') return box
+    const mark = box.appendChild(document.createElement('span'))
+    mark.className = this.cls
+    mark.textContent = this.text
+    box.append(this.gap)
+    return box
+  }
+}
+
+/** The whitespace after a list marker, up to the item's text — part of the marker box. */
+function markerGap(state: EditorState, mark: SyntaxNode): string {
+  return /^[ \t]*/u.exec(state.sliceDoc(mark.to, state.doc.lineAt(mark.to).to))![0]
+}
+
 const hide = Decoration.replace({})
+const listMarkBox = Decoration.mark({ class: 'cm-list-mark' })
 
 /** A cell's content, as the few inline shapes a rendered table draws. */
 export type Inline =
@@ -570,10 +655,17 @@ function revealedBySelection(state: EditorState, from: number, to: number): bool
   return state.selection.ranges.some((r) => r.from <= b && r.to >= a)
 }
 
-function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
+interface Preview {
+  deco: DecorationSet
+  /** The hidden indents of list lines: the cursor steps over each one whole. */
+  indents: RangeSet<Decoration>
+}
+
+function build(state: EditorState, opts: LivePreviewOptions): Preview {
   const revealed = opts.alwaysFolded ? () => false : revealedBySelection
   const items: { from: number; to: number; deco: Decoration }[] = []
   const push = (from: number, to: number, deco: Decoration) => items.push({ from, to, deco })
+  const indents: { from: number; to: number }[] = []
 
   // Pandoc fenced divs / Quarto callouts (SPEC §5.3): `::: {.callout-note title="…"}` … `:::`
   let inCallout = false
@@ -714,6 +806,17 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             push(node.from, node.to, Decoration.replace({ widget: new MathWidget(tex, true), block: true }))
             break
           }
+          case 'ListItem':
+            for (const l of listLines(state.doc, tree, n)) {
+              const cls = l.marker ? 'cm-list-line' : 'cm-list-cont'
+              push(l.from, l.from, Decoration.line({ class: cls, attributes: { style: `--list-depth: ${l.depth}` } }))
+              if (l.indentTo > l.from) {
+                push(l.from, l.indentTo, hide)
+                indents.push({ from: l.from, to: l.indentTo })
+              }
+              if (l.marker) push(l.marker.from, l.marker.to, listMarkBox)
+            }
+            break
           case 'ListMark': {
             // Bullets only; an ordered list is numbered as a whole, under `OrderedList` below.
             const item = n.parent
@@ -723,7 +826,8 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
             for (let p: SyntaxNode | null = list; p; p = p.parent) if (p.name === 'BulletList') depth++
             // A task item wraps its content in `Task`, which is what holds the `[ ]` marker.
             const bullet = listBullet(depth, item.getChild('Task') !== null)
-            push(node.from, node.to, Decoration.replace({ widget: new MarkerWidget(bullet, 'cm-list-bullet') }))
+            const gap = markerGap(state, n)
+            push(node.from, node.to + gap.length, Decoration.replace({ widget: new ListMarkerWidget(bullet, 'cm-list-bullet', gap) }))
             break
           }
           case 'OrderedList': {
@@ -745,7 +849,8 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
               if (label === null || revealed(state, mark.from, mark.to)) continue
               const text = label + m[2]!
               if (text === m[0]) continue // already what the file says: nothing to draw
-              push(mark.from, mark.to, Decoration.replace({ widget: new MarkerWidget(text, 'cm-list-number') }))
+              const gap = markerGap(state, mark)
+              push(mark.from, mark.to + gap.length, Decoration.replace({ widget: new ListMarkerWidget(text, 'cm-list-number', gap) }))
             }
             break
           }
@@ -824,7 +929,7 @@ function build(state: EditorState, opts: LivePreviewOptions): DecorationSet {
     }
     ranges.push(it.deco.range(it.from, it.to))
   }
-  return Decoration.set(ranges, true)
+  return { deco: Decoration.set(ranges, true), indents: Decoration.set(indents.map((r) => hide.range(r.from, r.to))) }
 }
 
 function hideMarks(n: SyntaxNode, push: (f: number, t: number, d: Decoration) => void) {
@@ -836,11 +941,14 @@ function hideMarks(n: SyntaxNode, push: (f: number, t: number, d: Decoration) =>
 export function livePreview(opts: LivePreviewOptions) {
   // A StateField rather than a ViewPlugin: block-level replacements (math blocks, folded
   // front matter) are only allowed from fields. Recomputed on document or selection changes.
-  const field = StateField.define<DecorationSet>({
+  const field = StateField.define<Preview>({
     create: (state) => build(state, opts),
-    update: (deco, tr) =>
-      tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview)) ? build(tr.state, opts) : deco,
-    provide: (f) => EditorView.decorations.from(f),
+    update: (preview, tr) =>
+      tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview)) ? build(tr.state, opts) : preview,
+    provide: (f) => [
+      EditorView.decorations.from(f, (p) => p.deco),
+      EditorView.atomicRanges.of((view) => view.state.field(f).indents),
+    ],
   })
   return [
     field,

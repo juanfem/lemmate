@@ -5,7 +5,8 @@ import assert from 'node:assert/strict'
 import { GFM, parser } from '@lezer/markdown'
 import type { SyntaxNode } from '@lezer/common'
 import { noteSyntax } from '../src/lib/editor/syntax.ts'
-import { listBullet, listNumber } from '../src/lib/editor/livePreview.ts'
+import { Text } from '@codemirror/state'
+import { listBullet, listLines, listNumber } from '../src/lib/editor/livePreview.ts'
 
 const p = parser.configure([GFM, noteSyntax])
 
@@ -105,4 +106,38 @@ test('the two kinds of list count their own nesting', () => {
   assert.deepEqual(markers('1. one\n   - two\n'), [null, '•'])
   assert.deepEqual(markers('- one\n    1. two\n'), ['•', null])
   assert.deepEqual(markers('- one\n    1. two\n        1. three\n'), ['•', null, 'a.'])
+})
+
+/** Every laid-out list line in `src`: its line number, depth, hidden indent and marker box. */
+function layout(src: string): string[] {
+  const doc = Text.of(src.split('\n'))
+  const tree = p.parse(src)
+  const out: string[] = []
+  tree.iterate({
+    enter: (node) => {
+      if (node.name !== 'ListItem') return
+      for (const l of listLines(doc, tree, node.node)) {
+        const box = l.marker ? ` [${src.slice(l.marker.from, l.marker.to)}]` : ''
+        out.push(`${doc.lineAt(l.from).number}: d${l.depth} indent ${l.indentTo - l.from}${box}`)
+      }
+    },
+  })
+  return out.sort((a, b) => parseInt(a) - parseInt(b))
+}
+
+test('list lines hang: depth from every list kind, the source indent hidden, the marker boxed', () => {
+  const src = '- one\n  1. two\n     - [ ] three\n- four\n'
+  assert.deepEqual(layout(src), ['1: d1 indent 0 [- ]', '2: d2 indent 2 [1. ]', '3: d3 indent 5 [- ]', '4: d1 indent 0 [- ]'])
+})
+
+test("an item's paragraph continues at its content column, lazy or indented", () => {
+  assert.deepEqual(layout('- first\n  second\nlazy\n'), ['1: d1 indent 0 [- ]', '2: d1 indent 2', '3: d1 indent 0'])
+})
+
+test("a nested item's lines, code in an item, and lists in quotes are left alone", () => {
+  assert.deepEqual(layout('- a\n  - b\n    more\n'), ['1: d1 indent 0 [- ]', '2: d2 indent 2 [- ]', '3: d2 indent 4'])
+  assert.deepEqual(layout('- a\n\n  ```\n  code\n  ```\n'), ['1: d1 indent 0 [- ]'])
+  assert.deepEqual(layout('> - quoted\n'), [])
+  // The inner item of `- - x` shares the outer one's line.
+  assert.deepEqual(layout('- - x\n'), ['1: d1 indent 0 [- ]'])
 })

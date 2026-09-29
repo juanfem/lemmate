@@ -51,7 +51,7 @@ const theme = EditorView.theme({
   // makes the pane read as a page rather than as an input that happens to start partway
   // across. The side padding is a comfortable margin on a monitor and half the line length on
   // a phone, so it shrinks with the viewport instead of staying a fixed 2rem.
-  '.cm-content': { maxWidth: '42.5rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)' },
+  '.cm-content': { maxWidth: '42.5rem', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)', '--list-indent': '1.75em' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '1.5px' },
   // A full-width band is a lot of colour to spend on "the cursor is here". A short fade from
   // the left margin says the same thing and stops competing with the text sitting on it.
@@ -113,11 +113,22 @@ const theme = EditorView.theme({
   '&.cm-embedded': { height: 'auto', fontSize: 'inherit', background: 'transparent' },
   '&.cm-embedded .cm-scroller': { padding: '0', overflow: 'visible' },
   '&.cm-embedded .cm-content': { maxWidth: 'none', margin: '0', padding: '0' },
-  // A fixed width for every shape, so the text after the marker lines up whatever the level's
-  // bullet is — and so the widget takes the same room the `-` it replaces did.
-  '.cm-list-bullet': { display: 'inline-block', width: '1ch', textAlign: 'center', color: 'var(--muted)' },
-  // The number keeps its natural width — `viii.` is wider than `8.` — and the marker colour
-  // the highlighter gave the digits it replaces.
+  // Lists hang: every line of an item is padded to its content column, and the first one is
+  // pulled back by one step for the marker box, so wrapped lines start under the text rather
+  // than under the bullet. The source indent is hidden; `--list-depth` stands in for it, and
+  // `--list-indent` (on `.cm-content`) is the step.
+  '.cm-line.cm-list-line, .cm-line.cm-list-cont': { paddingLeft: 'calc(var(--list-depth) * var(--list-indent))' },
+  '.cm-line.cm-list-line': { textIndent: 'calc(-1 * var(--list-indent))' },
+  '.cm-callout.cm-list-line, .cm-callout.cm-list-cont': { paddingLeft: 'calc(0.75em + var(--list-depth) * var(--list-indent))' },
+  // Inherited, and an inline-block (the marker box, a checkbox, math) would indent its own text.
+  '.cm-list-line *': { textIndent: '0' },
+  // One step wide whatever it holds — a bullet, `- ` while the cursor is on the line, a number —
+  // so the text starts on the same column either way. `viii.` may push past it; that is all.
+  '.cm-list-mark': { display: 'inline-block', minWidth: 'var(--list-indent)', whiteSpace: 'pre' },
+  '.cm-list-mark-task': { minWidth: '0' },
+  '.cm-list-line .cm-task-checkbox': { boxSizing: 'border-box', marginRight: 'calc(var(--list-indent) - 0.95em)' },
+  '.cm-list-bullet': { display: 'inline-block', width: '1em', textAlign: 'center', color: 'var(--muted)', fontSize: '1.45em', lineHeight: '1', verticalAlign: '-0.08em' },
+  // The number keeps the marker colour the highlighter gave the digits it replaces.
   '.cm-list-number': { color: 'var(--muted)' },
   // Drawn rather than left to the browser: a default control takes its colours from the
   // platform's colour scheme, and an unchecked one is then a dark box on our dark background —
