@@ -17,6 +17,11 @@ export interface LivePreviewOptions {
   /** Resolve an embed target to a URL (attachments) or undefined. */
   embedUrl: (target: string) => string | undefined
   /**
+   * Follow a markdown link or a bare URL: `href` as written, a web address or a path relative to
+   * the note. Left out, such links are only text.
+   */
+  openUrl?: (href: string) => void
+  /**
    * The note an `![[embed]]` names, to draw in place of it (SPEC §5, tier 3). Undefined — or
    * left out, as views with no vault behind them do — keeps the embed a link.
    */
@@ -355,6 +360,22 @@ function markerGap(state: EditorState, mark: SyntaxNode): string {
 }
 
 const hide = Decoration.replace({})
+
+/** Link text, or a bare address, carrying where it goes for the click handler in `livePreview`. */
+function linkMark(href: string, rendered: boolean): Decoration {
+  return Decoration.mark({ class: rendered ? 'cm-link cm-link-rendered' : 'cm-link', attributes: { 'data-href': href } })
+}
+
+/**
+ * Where a bare address goes. GFM takes `www.example.com` and `me@example.com` for links too,
+ * with no scheme written; a browser needs one.
+ */
+export function bareHref(text: string): string {
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(text)) return text
+  if (/^www\./iu.test(text)) return `http://${text}`
+  if (/^[^\s@]+@[^\s@]+$/u.test(text)) return `mailto:${text}`
+  return text
+}
 const listMarkBox = Decoration.mark({ class: 'cm-list-mark' })
 
 /** A cell's content, as the few inline shapes a rendered table draws. */
@@ -465,7 +486,7 @@ export function tableModel(doc: (f: number, t: number) => string, table: SyntaxN
   return { align: model.align, header: fit(model.header), rows: model.rows.map(fit) }
 }
 
-function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string) => void) {
+function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string) => void, openUrl?: (href: string) => void) {
   for (const it of content) {
     switch (it.kind) {
       case 'text':
@@ -475,7 +496,7 @@ function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string)
       case 'strong':
       case 's': {
         const el = document.createElement(it.kind)
-        renderInlines(el, it.children, open)
+        renderInlines(el, it.children, open, openUrl)
         parent.append(el)
         break
       }
@@ -490,7 +511,14 @@ function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string)
         a.href = it.href
         a.target = '_blank'
         a.rel = 'noopener noreferrer'
-        renderInlines(a, it.children, open)
+        if (openUrl) {
+          const href = it.href
+          a.onclick = (e) => {
+            e.preventDefault()
+            openUrl(href)
+          }
+        }
+        renderInlines(a, it.children, open, openUrl)
         parent.append(a)
         break
       }
@@ -515,11 +543,13 @@ class TableWidget extends WidgetType {
   readonly source: string
   readonly model: TableModel
   readonly open: (t: string) => void
-  constructor(source: string, model: TableModel, open: (t: string) => void) {
+  readonly openUrl: ((href: string) => void) | undefined
+  constructor(source: string, model: TableModel, open: (t: string) => void, openUrl?: (href: string) => void) {
     super()
     this.source = source
     this.model = model
     this.open = open
+    this.openUrl = openUrl
   }
   eq(other: TableWidget) {
     return other.source === this.source
@@ -538,7 +568,7 @@ class TableWidget extends WidgetType {
         if (align) el.style.textAlign = align
         const cell = cells[i]
         if (cell) {
-          renderInlines(el, cell.content, this.open)
+          renderInlines(el, cell.content, this.open, this.openUrl)
           el.dataset.at = String(cell.at)
         }
         tr.append(el)
@@ -737,14 +767,28 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
             if (!revealed(state, node.from, node.to)) hideMarks(n, push)
             break
           case 'Link': {
-            if (revealed(state, node.from, node.to)) break
-            // [text](url "title") → keep text, hide the rest
+            // [text](url "title") → keep text, hide the rest. The text follows the link either way.
             const marks = n.getChildren('LinkMark')
             const url = n.getChild('URL')
-            if (marks.length >= 2 && url) {
-              push(marks[0]!.from, marks[0]!.to, hide)
-              push(marks[1]!.from, node.to, hide)
+            if (marks.length < 2 || !url) break
+            const shown = revealed(state, node.from, node.to)
+            if (marks[1]!.from > marks[0]!.to) {
+              push(marks[0]!.to, marks[1]!.from, linkMark(state.sliceDoc(url.from, url.to), !shown))
             }
+            if (shown) break
+            push(marks[0]!.from, marks[0]!.to, hide)
+            push(marks[1]!.from, node.to, hide)
+            break
+          }
+          case 'Autolink':
+            // `<https://…>`: the brackets go, the address stays.
+            if (!revealed(state, node.from, node.to)) for (const m of n.getChildren('LinkMark')) push(m.from, m.to, hide)
+            break
+          case 'URL': {
+            // A bare address (GFM) or an autolink's; a link's or an image's is dealt with above.
+            const parent = n.parent?.name
+            if (parent === 'Link' || parent === 'Image') break
+            push(node.from, node.to, linkMark(bareHref(state.sliceDoc(node.from, node.to)), !revealed(state, node.from, node.to)))
             break
           }
           case 'Image': {
@@ -907,7 +951,7 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
             const to = state.doc.line(toLine).to
             const doc = (f: number, t: number) => state.sliceDoc(f, t)
             const model = tableModel(doc, n, from)
-            push(from, to, Decoration.replace({ widget: new TableWidget(state.sliceDoc(from, to), model, opts.openLink), block: true }))
+            push(from, to, Decoration.replace({ widget: new TableWidget(state.sliceDoc(from, to), model, opts.openLink, opts.openUrl), block: true }))
             break
           }
           default:
@@ -952,10 +996,21 @@ export function livePreview(opts: LivePreviewOptions) {
   })
   return [
     field,
-    // Toggle task checkboxes by clicking the rendered box.
     EditorView.domEventHandlers({
       mousedown(event, view) {
         const target = event.target as HTMLElement
+        // A link follows on a click wherever its markup is hidden; where it shows, the click
+        // is for editing, and Ctrl (⌘ on a Mac) follows it instead.
+        const link = target.closest?.<HTMLElement>('.cm-link[data-href]')
+        if (link && opts.openUrl && event.button === 0) {
+          const pos = view.posAtDOM(link)
+          const editing = !opts.alwaysFolded && revealedBySelection(view.state, pos, pos)
+          if (editing && !(event.ctrlKey || event.metaKey)) return false
+          event.preventDefault()
+          opts.openUrl(link.dataset.href!)
+          return true
+        }
+        // Toggle task checkboxes by clicking the rendered box.
         if (!target.classList?.contains('cm-task-checkbox')) return false
         const pos = view.posAtDOM(target)
         const line = view.state.doc.lineAt(pos)

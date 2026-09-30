@@ -14,7 +14,8 @@
   import { syntaxTree } from '@codemirror/language'
   import type { OutlineItem } from '../lib/outline.ts'
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
-  import { embedUrlFor } from '../lib/attachments.ts'
+  import { attachmentPath, embedUrlFor } from '../lib/attachments.ts'
+  import { linkTarget } from '../lib/linktarget.ts'
   import { addTagToFrontMatter, cleanTag } from '../lib/tagedit.ts'
   import ContextMenu, { menuAt, type MenuItem, type MenuState } from './ContextMenu.svelte'
   import { baseName, extension, fileKind, folderOf } from '../lib/filetree.ts'
@@ -168,6 +169,7 @@
     },
     follow: (id, onText) => session.watchNote(id, onText),
     embedUrl: (id, target) => embedUrlFor(session, session.pathOf(id) ?? '', target),
+    openUrl: (id, href) => followUrl(session.pathOf(id) ?? '', href),
     watch: (onChange) => session.watchPaths(onChange),
   }
 
@@ -179,6 +181,24 @@
       onOpen(session.createNote(path, `# ${displayName(path)}\n\n`))
     }
   }
+
+  /**
+   * Follow a markdown link or a bare address in the note at `notePath`: the web in a new tab (in
+   * the desktop app, the system browser), a note in this pane, a file of the vault in its tab.
+   */
+  function followUrl(notePath: string, href: string) {
+    const target = linkTarget(notePath, href)
+    if (target?.kind === 'web') window.open(target.url, '_blank', 'noopener,noreferrer')
+    else if (target?.kind === 'note') openLink(target.path)
+    else if (target) {
+      // Written relative to the note, but a name alone finds it too, as an embed's does.
+      const path = session.attachments[target.path] ? target.path : attachmentPath(session, notePath, target.path)
+      if (path === undefined) return
+      if (onOpenFile) onOpenFile(session.id, path)
+      else window.open(api.attachmentUrl(session.id, session.attachments[path]!), '_blank', 'noopener,noreferrer')
+    }
+  }
+  const openUrl = (href: string) => followUrl(session.pathOf(noteId) ?? '', href)
 
   /** Paste/drop files: upload, then reference them at the cursor (images as embeds). */
   async function insertFiles(files: FileList | File[], at: number) {
@@ -386,6 +406,7 @@
     view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
       openLink,
       embedUrl,
+      openUrl,
       notes,
       noteId,
       mode,
@@ -427,7 +448,7 @@
   // position, the undo history and the collaborative binding all survive the switch.
   $effect(() => {
     const m = mode
-    if (view) setViewMode(view, m, { openLink, embedUrl, notes, noteId })
+    if (view) setViewMode(view, m, { openLink, embedUrl, openUrl, notes, noteId })
   })
 
   /** A press on the bar must not take the focus off the text it is about to indent. */

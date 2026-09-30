@@ -2,6 +2,7 @@
   import { api } from '../lib/api.ts'
   import { onMount } from 'svelte'
   import { createEditor } from '../lib/editor/setup.ts'
+  import { openWebLink } from '../lib/linktarget.ts'
   import * as Y from 'yjs'
   import { Awareness } from 'y-protocols/awareness'
 
@@ -21,6 +22,7 @@
       createEditor(host, doc.getText('content'), new Awareness(doc), {
         openLink: () => {},
         embedUrl: () => undefined,
+        openUrl: openWebLink,
         mode: 'reading',
       })
     } catch {

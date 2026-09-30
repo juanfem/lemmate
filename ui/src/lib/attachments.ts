@@ -7,13 +7,17 @@ import type { VaultSession } from './vault.svelte.ts'
  * bare filename — the order a vault written by hand tends to mean.
  */
 export function embedUrlFor(session: VaultSession, notePath: string, target: string): string | undefined {
+  const path = attachmentPath(session, notePath, target)
+  return path === undefined ? undefined : api.attachmentUrl(session.id, session.attachments[path]!)
+}
+
+/** The path of the attachment `target` names, looked for as `embedUrlFor` describes. */
+export function attachmentPath(session: VaultSession, notePath: string, target: string): string | undefined {
   const t = target.trim()
   const dir = notePath.includes('/') ? notePath.slice(0, notePath.lastIndexOf('/') + 1) : ''
   const name = t.split('/').pop() ?? t
   for (const candidate of [dir + t, t, `attachments/${name}`]) {
-    const hash = session.attachments[candidate]
-    if (hash) return api.attachmentUrl(session.id, hash)
+    if (session.attachments[candidate]) return candidate
   }
-  const byName = Object.entries(session.attachments).find(([p]) => p.split('/').pop() === name)
-  return byName ? api.attachmentUrl(session.id, byName[1]) : undefined
+  return Object.keys(session.attachments).find((p) => p.split('/').pop() === name)
 }

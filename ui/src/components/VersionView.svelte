@@ -5,6 +5,7 @@
   import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
   import { StateField } from '@codemirror/state'
   import { createEditor } from '../lib/editor/setup.ts'
+  import { openWebLink } from '../lib/linktarget.ts'
   import { changedLines } from '../lib/diff.ts'
 
   /**
@@ -49,6 +50,7 @@
     view = createEditor(host, text, new Awareness(doc), {
       mode: 'reading',
       embedUrl,
+      openUrl: openWebLink,
       openLink: () => {
         /* a link in an old version points at the note as it is now, not as it was */
       },

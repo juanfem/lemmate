@@ -267,7 +267,9 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
 ///
 /// A plain `window.open` of a page this relay serves still gets a window built here too, since a
 /// webview left to itself does something different with it on every platform — nothing at all on
-/// Linux and macOS. Anything else is left to the platform, as it was before this handler existed.
+/// Linux and macOS. That is also why a web address — a link in a note, a render's link out —
+/// goes to the system's default browser ([`for_the_browser`]). Anything else is left to the
+/// platform, as it was before this handler existed.
 fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWindowBuilder<'_, Wry, M> {
     let (opener, navigator, me) = (app.app_handle().clone(), app.app_handle().clone(), label.clone());
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
@@ -320,7 +322,11 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
         })
         .on_new_window(move |url, features| {
             if !opener.try_state::<Relay>().is_some_and(|relay| relay.serves(&url)) {
-                return NewWindowResponse::Allow;
+                if !for_the_browser(&url) {
+                    return NewWindowResponse::Allow;
+                }
+                open_in_browser(&url);
+                return NewWindowResponse::Deny;
             }
             let (handle, position) = (opener.clone(), features.position().map(|p| (p.x, p.y)));
             tauri::async_runtime::spawn(async move { open_note_window(&handle, url, position) });
@@ -386,6 +392,12 @@ impl ShellRequest {
 
 /// Hand `url` to the system's default browser, the way each platform opens a link from another
 /// program. Nothing waits for it: the browser outlives the request, and may already be running.
+/// Whether a page's `window.open` of `url` — one no relay serves — belongs in the system's
+/// browser (or mail client): the web and mail, and nothing that runs or reads local files.
+fn for_the_browser(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "mailto")
+}
+
 fn open_in_browser(url: &Url) {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -768,6 +780,17 @@ mod tests {
         assert!(!same_origin(addr, &url("https://127.0.0.1:4242/")));
         assert!(!same_origin(addr, &url("http://localhost:4242/")));
         assert!(!same_origin(addr, &url("https://example.com/")));
+    }
+
+    #[test]
+    fn web_and_mail_links_go_to_the_browser() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        assert!(for_the_browser(&url("https://example.com/a?b#c")));
+        assert!(for_the_browser(&url("http://example.com/")));
+        assert!(for_the_browser(&url("mailto:me@example.com")));
+        assert!(!for_the_browser(&url("file:///etc/passwd")));
+        assert!(!for_the_browser(&url("javascript:alert(1)")));
+        assert!(!for_the_browser(&url("ftp://example.com/")));
     }
 
     #[test]

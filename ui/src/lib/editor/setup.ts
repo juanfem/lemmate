@@ -103,6 +103,11 @@ const theme = EditorView.theme({
   '.cm-wikilink': { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer' },
   '.cm-wikilink:hover': { textDecoration: 'underline' },
   '.cm-wikilink-src': { color: 'var(--accent)' },
+  // A markdown link's text or a bare address; a pointer only where a click follows it.
+  // The highlighter's own colour for an address (the muted one of markup) is on a span inside.
+  '.cm-link, .cm-link span': { color: 'var(--accent)' },
+  '.cm-link-rendered': { cursor: 'pointer' },
+  '.cm-link-rendered:hover': { textDecoration: 'underline' },
   '.cm-math-block': { display: 'block', textAlign: 'center', padding: '0.5em 0' },
   '.cm-embed-image': { maxWidth: '100%', display: 'block', padding: '0.5em 0' },
   // A transcluded note: a frame with its name on top, and the note itself — another editor, in
@@ -309,6 +314,8 @@ export interface NoteSource {
   follow: (id: string, onText: (text: string) => void) => () => void
   /** `embedUrl`, for an attachment named inside note `id` — its folder is where it looks first. */
   embedUrl: (id: string, target: string) => string | undefined
+  /** `openUrl`, for a link inside note `id` — a relative one is relative to that note. */
+  openUrl?: (id: string, href: string) => void
   /** Call `onChange` whenever what `resolve` and `embedUrl` answer may have changed; the
    *  function returned stops. */
   watch: (onChange: () => void) => () => void
@@ -370,6 +377,7 @@ function noteEmbeds(notes: NoteSource, openLink: (t: string) => void, chain: str
               embeddedExtensions({
                 openLink,
                 embedUrl: (t) => notes.embedUrl(hit.id, t),
+                openUrl: notes.openUrl && ((href) => notes.openUrl!(hit.id, href)),
                 embedNote: noteEmbeds(notes, openLink, [...chain, hit.id]),
               }),
               followResolution(notes),
