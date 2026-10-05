@@ -12,7 +12,7 @@
   import { displayName } from '../lib/vault.svelte.ts'
 
   import { syntaxTree } from '@codemirror/language'
-  import type { OutlineItem } from '../lib/outline.ts'
+  import { headingText, type OutlineItem } from '../lib/outline.ts'
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
   import { attachmentPath, embedUrlFor } from '../lib/attachments.ts'
   import { linkTarget } from '../lib/linktarget.ts'
@@ -293,7 +293,7 @@
           }
           const m = /^ATXHeading(\d)$/u.exec(node.name)
           if (!m) return
-          const text = v.state.sliceDoc(node.from, node.to).replace(/^#+\s*/u, '').trim()
+          const text = headingText(node.node, (from, to) => v.state.sliceDoc(from, to))
           items.push({ level: Number(m[1]), text, pos: node.from })
         },
       })
