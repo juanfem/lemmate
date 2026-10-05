@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, inNewPane, moveTab, notePane, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
 import { renderTab, tabNote } from '../src/lib/rendertabs.ts'
 
 let seq = 100
@@ -161,4 +161,31 @@ test('opening in a new pane never displaces what is open', () => {
   // History panes are skipped: a note does not go into one.
   const asides = [pane(1, ['a']), pane(2, ['a'], 'a', 'history'), pane(3, ['c'], 'c', 'history')]
   assert.deepEqual(shape(inNewPane(asides, 0, 3, 'b', fresh2)), { panes: ['a [b]', '[a]', '[c]'], focused: 0 })
+})
+
+test('a render opens as a tab beside its note, or in a pane of its own when asked', () => {
+  const ra = renderTab('a')
+  // The icon: beside the note, in the note's pane.
+  assert.deepEqual(shape(placeRender([pane(1, ['a', 'b'], 'a')], 0, 3, 'a', 'tab', fresh)), { panes: [`a [${ra}] b`], focused: 0 })
+  // Open already, anywhere: brought forward, not doubled.
+  assert.deepEqual(shape(placeRender([pane(1, ['a', 'b'], 'a'), pane(2, [ra, 'c'], 'c')], 0, 3, 'a', 'tab', fresh)), {
+    panes: ['[a] b', `[${ra}] c`],
+    focused: 1,
+  })
+  // A history pane has no tabs to add to: a pane it is.
+  assert.deepEqual(shape(placeRender([pane(1, ['b']), pane(2, ['a'], 'a', 'history')], 1, 3, 'a', 'tab', fresh)), {
+    panes: ['[b]', '[a]', `[${ra}]`],
+    focused: 2,
+  })
+  // The menu: a pane beside the note's…
+  assert.deepEqual(shape(placeRender([pane(1, ['a', 'b'], 'a')], 0, 3, 'a', 'pane', fresh)), { panes: ['[a] b', `[${ra}]`], focused: 1 })
+  // …or the pane already showing a render.
+  const rc = renderTab('c')
+  assert.deepEqual(shape(placeRender([pane(1, ['a'], 'a'), pane(2, [rc], rc)], 0, 3, 'a', 'pane', fresh)), {
+    panes: ['[a]', `${rc} [${ra}]`],
+    focused: 1,
+  })
+  // A render beside its note moves out into a pane of its own; one alone in its pane stays.
+  assert.deepEqual(shape(placeRender([pane(1, ['a', ra], ra)], 0, 3, 'a', 'pane', fresh)), { panes: ['[a]', `[${ra}]`], focused: 1 })
+  assert.deepEqual(shape(placeRender([pane(1, ['a']), pane(2, [ra])], 1, 3, 'a', 'pane', fresh)), { panes: ['[a]', `[${ra}]`], focused: 1 })
 })

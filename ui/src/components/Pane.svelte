@@ -74,6 +74,7 @@
     onHistory,
     historyOpen = false,
     onRender,
+    onRenderPane,
     renderOpen = false,
     onRenameFile,
     onDeleteFile,
@@ -126,8 +127,10 @@
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
-    /** Render the note with Quarto, in a pane beside it; `renderOpen` when one already is. */
+    /** Render the note with Quarto, as a tab beside it; `renderOpen` when one is open already. */
     onRender?: () => void
+    /** …or in a pane beside this one: the `···` menu's way, for a page read beside its source. */
+    onRenderPane?: () => void
     renderOpen?: boolean
     /** A file tab's Rename / move and Delete (SPEC §9); the shell owns the dialogs. */
     onRenameFile?: (vault: string, entry: FileEntry) => void
@@ -200,7 +203,7 @@
   let bookmarked = $derived(!!session?.isBookmarked('note', activePath))
   let moreItems = $derived([
     ...(onHistory ? [{ label: 'Version history', run: onHistory }] : []),
-    ...(onRender ? [{ label: 'Render with Quarto', run: onRender }] : []),
+    ...(onRenderPane ? [{ label: 'Render with Quarto in a new pane', run: onRenderPane }] : []),
     ...(onDetach && pane.active && !isBlank(pane.active) ? [{ label: 'Move to new window', run: () => onDetach(pane.active!) }] : []),
     { label: bookmarked ? 'Remove bookmark' : 'Bookmark this note', run: onBookmark },
     ...(session?.noteOnly || !onShare ? [] : [{ label: 'Share…', run: onShare }]),

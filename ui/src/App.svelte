@@ -22,7 +22,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { inNewPane, moveTab, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { inNewPane, moveTab, placeRender, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -727,25 +727,15 @@
     }
   }
   /**
-   * What Quarto makes of the note (SPEC §5.6): a tab like any other (lib/rendertabs.ts), opened
-   * in a pane beside the note. Renders gather: the next one joins a pane already showing one,
-   * and a note rendered already goes back to its tab rather than opening another.
+   * What Quarto makes of the note (SPEC §5.6): a tab like any other (lib/rendertabs.ts), beside
+   * the note in its pane — or, `inPane`, in a pane beside it where later renders gather. A note
+   * rendered already goes back to its tab rather than opening another (`placeRender`).
    */
-  function openRender(at = focusedPane) {
+  function openRender(at = focusedPane, inPane = false) {
     const p = panes[at]
     const id = p?.active && tabNote(p.active)
     if (!p || !id || isBlank(id) || isFileTab(id) || solo) return
-    const tab = renderTab(id)
-    const seen = panes.findIndex((q) => q.kind !== 'history' && q.tabs.includes(tab))
-    const home = seen >= 0 ? seen : panes.findIndex((q) => q.kind !== 'history' && !!q.active && isRenderTab(q.active))
-    if (home >= 0) {
-      const r = panes[home]!
-      if (!r.tabs.includes(tab)) r.tabs = [...r.tabs, tab]
-      r.active = tab
-      focusedPane = home
-      return
-    }
-    const next = inNewPane(panes, at, MAX_PANES, tab, (t, like) => ({ id: ++paneSeq, tabs: [t], active: t, mode: like.mode, kind: 'note' }))
+    const next = placeRender(panes, at, MAX_PANES, id, inPane ? 'pane' : 'tab', (t, like) => ({ id: ++paneSeq, tabs: [t], active: t, mode: like.mode, kind: 'note' }))
     panes = next.panes
     focusedPane = next.focused
   }
@@ -918,6 +908,7 @@
     { id: 'export-pdf', label: 'Export note as PDF', run: () => exportActive('pdf') },
     { id: 'export-slides', label: 'Export note as slides (reveal.js)', run: () => exportActive('revealjs') },
     { id: 'render', label: 'Render with Quarto', run: () => openRender() },
+    { id: 'render-pane', label: 'Render with Quarto in a new pane', run: () => openRender(focusedPane, true) },
     { id: 'render-pdf', label: 'Render with Quarto as PDF', run: () => renderActive('pdf') },
     { id: 'render-docx', label: 'Render with Quarto as Word document', run: () => renderActive('docx') },
     { id: 'render-slides', label: 'Render with Quarto as slides (reveal.js)', run: () => renderActive('revealjs') },
@@ -1628,6 +1619,7 @@
           onHistory={solo ? undefined : () => openHistory(i)}
           historyOpen={!!p.active && panes.some((q) => q.kind === 'history' && q.active === tabNote(p.active!))}
           onRender={solo ? undefined : () => openRender(i)}
+          onRenderPane={solo ? undefined : () => openRender(i, true)}
           renderOpen={!!p.active && panes.some((q) => q.kind !== 'history' && q.tabs.includes(renderTab(tabNote(p.active!))))}
           onRenameFile={renameFile}
           onDeleteFile={deleteFile}

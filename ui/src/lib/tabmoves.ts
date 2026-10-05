@@ -2,7 +2,7 @@
 // or against a pane's edge to split it. The rules live here, apart from the DOM, so they can be
 // tested: the panes pass in, the panes pass out, and nothing else is touched.
 
-import { isRenderTab } from './rendertabs.ts'
+import { isRenderTab, renderTab } from './rendertabs.ts'
 
 /** The part of a pane a tab move cares about. `kind` absent means a note pane. */
 export interface TabPane {
@@ -176,4 +176,42 @@ export function inNewPane<P extends TabPane>(
     return { panes: panes.map((q, i) => (i === j ? { ...q, tabs, active: id } : q)), focused: j }
   }
   return { panes, focused }
+}
+
+/**
+ * Where a note's render opens (SPEC §5.6). As a `tab` — the icon on the strip, the palette —
+ * it goes beside the note in the note's own pane: a deck wants the whole width, and a split is
+ * one drag away for a page that is better read beside its source. In a `pane` — the `···`
+ * menu — it opens beside the note's pane, and later renders gather in a pane already showing
+ * one rather than opening another. A render already open is brought forward rather than made
+ * twice, except that asking for a pane takes one out of its note's pane into a pane of its own.
+ * A history pane has no tabs to add to, so a tab asked for there opens as a pane would.
+ */
+export function placeRender<P extends TabPane>(
+  panes: P[],
+  focused: number,
+  max: number,
+  note: string,
+  where: 'tab' | 'pane',
+  fresh: (tab: string, like: P) => P,
+): { panes: P[]; focused: number } {
+  const here = panes[focused]
+  if (!here) return { panes, focused }
+  const tab = renderTab(note)
+  const seen = panes.findIndex((p) => isNotes(p) && p.tabs.includes(tab))
+  const moveOut = where === 'pane' && seen === focused && here.tabs.length > 1
+  if (seen >= 0 && !moveOut) {
+    return { panes: panes.map((p, i) => (i === seen ? { ...p, active: tab } : p)), focused: seen }
+  }
+  if (where === 'tab' && isNotes(here)) {
+    const at = here.active ? here.tabs.indexOf(here.active) + 1 : here.tabs.length
+    const tabs = [...here.tabs.slice(0, at), tab, ...here.tabs.slice(at)]
+    return { panes: panes.map((p, i) => (i === focused ? { ...p, tabs, active: tab } : p)), focused }
+  }
+  const out = moveOut ? panes.map((p, i) => (i === focused ? without(p, tab) : p)) : panes
+  const home = out.findIndex((p, i) => i !== focused && isNotes(p) && !!p.active && isRenderTab(p.active))
+  if (home >= 0) {
+    return { panes: out.map((p, i) => (i === home ? { ...p, tabs: [...p.tabs, tab], active: tab } : p)), focused: home }
+  }
+  return inNewPane(out, focused, max, tab, fresh)
 }

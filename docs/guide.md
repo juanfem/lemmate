@@ -864,10 +864,10 @@ render the note text with image links left relative.
 
 ### Rendering with Quarto
 
-**Render with Quarto** — in the command palette, in a note's `···` menu, or the page icon on
-the strip of a `.qmd` note — renders the note **the way its front matter says**: the first
+**Render with Quarto** — in the command palette, or the page icon on the strip of a `.qmd`
+note — renders the note **the way its front matter says**: the first
 format it declares that a render can make. A deck (`format: revealjs`) or a page (`html`) opens
-in a pane beside the note; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
+as a tab beside the note, in the same pane; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
 the pane says so. The picker on the pane's bar renders it another way — as a plain page, as
 slides, or as a PDF or Word file to download — whatever the note declares. **Full screen** (the four corners)
 fills the screen with the render — the browser's own full screen where it has one, the whole
@@ -886,9 +886,12 @@ screen from the pane, or opened in a tab of its own. It is not reveal.js's own s
 which cannot work in a deck that runs sandboxed; this one does the same job by messages. In
 the desktop app, open the deck in your browser first (the arrow icon) and press **S** there.
 
-A render opens in a pane beside the note, and later ones gather there as **tabs**: rendering a
-second note adds a tab to the pane showing a render rather than opening another pane, and
-rendering one that is already open just brings its tab forward. A rendered tab is otherwise a tab
+To read a page beside its source, pick **Render with Quarto in a new pane** from the note's `···`
+menu (or the palette) instead — or split the pane, or drag the rendered tab against a pane's edge.
+In a pane of their own, later renders gather as **tabs**: rendering a second note that way adds a
+tab to the pane showing a render rather than opening another pane. Rendering a note that is
+already open, either way, just brings its tab forward — except that asking for a new pane moves a
+render out of its note's pane into one. A rendered tab is otherwise a tab
 like any other — drag it along the strip, into any pane (a note's included) or against a pane's
 edge to split; right-click it to pin it or *Move to new window*, or drag it out of the window.
 Each tab keeps its render, so switching away and back, or moving the tab to another pane, does
