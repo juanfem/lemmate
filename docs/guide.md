@@ -896,7 +896,8 @@ not run Quarto again (a move reloads the page, though, so a deck starts from its
 page runs in a sandboxed frame: its own scripts and styles work, and nothing in it can reach the
 app or your session. Links to other sites open in a new tab. A render takes a few seconds, so
 it runs when you ask: an edit afterwards marks the pane *Changed since this render*, and
-**Re-render** brings it up to date. If Quarto refuses the note, the pane shows its message.
+**Re-render** brings it up to date and keeps your place: a deck stays on its slide, a page
+where you had scrolled to. If Quarto refuses the note, the pane shows its message.
 
 PDFs are made through the Typst that Quarto bundles — no LaTeX needed — so a note's `pdf:`
 options that only LaTeX understands (a `documentclass`, say) do not apply; Typst's do. The

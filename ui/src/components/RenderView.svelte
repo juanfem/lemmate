@@ -2,7 +2,7 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
-  import { beforeBodyEnd, keepRender, keptRender } from '../lib/render.ts'
+  import { beforeBodyEnd, keepPlace, keepRender, keptRender, placeOf, type Place } from '../lib/render.ts'
   import Icon from './Icon.svelte'
 
   /**
@@ -131,6 +131,15 @@
    */
   const LINKS_OUT = `<script>document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a&&a.getAttribute('href').charAt(0)!=='#'){a.target='_blank';a.rel='noopener noreferrer'}},true)<\/script>`
 
+  /** Where the reader is in the page on screen, as it last said: a re-render starts there. */
+  let place: Place | null = null
+  let frame: HTMLIFrameElement | undefined = $state()
+  function onMessage(e: MessageEvent) {
+    if (!frame || e.source !== frame.contentWindow) return
+    const p = placeOf(e.data)
+    if (p) place = p
+  }
+
   async function render() {
     if (busy) return
     busy = true
@@ -145,7 +154,7 @@
       } else if (type === 'text/html') {
         renderId = r.headers.get('x-render-id') ?? ''
         const page = await r.text()
-        html = beforeBodyEnd(page, LINKS_OUT)
+        html = beforeBodyEnd(page, LINKS_OUT + keepPlace(place))
         // A self-contained deck carries its scripts first; the markup that makes it one is late.
         made = page.includes('<div class="reveal') ? 'slides' : 'page'
         saved = null
@@ -171,6 +180,7 @@
     stop = session.watchNote(noteId, (t) => (text = t))
     document.addEventListener('fullscreenchange', onFullscreenChange)
     window.addEventListener('keydown', onKey)
+    window.addEventListener('message', onMessage)
   })
   // The first render waits for the note, so that "stale" has something to compare with, and for
   // the tab to be the one showing.
@@ -183,6 +193,7 @@
   onDestroy(() => {
     document.removeEventListener('fullscreenchange', onFullscreenChange)
     window.removeEventListener('keydown', onKey)
+    window.removeEventListener('message', onMessage)
     if (full) exitFull()
     stop?.()
     if (saved) URL.revokeObjectURL(saved.url)
@@ -233,7 +244,7 @@
     </div>
   {/if}
   {#if html !== null && !saved}
-    <iframe class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
+    <iframe bind:this={frame} class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
