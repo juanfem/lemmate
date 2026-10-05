@@ -96,3 +96,20 @@ test('an image may load our attachments and other sites, and nothing else of our
     assert.equal(imageSrc(bad, origin), undefined, bad)
   }
 })
+
+test('an escape shows the character it escapes, and its backslash only on the cursor line', () => {
+  const hidden = (s: EditorState) => {
+    const out: string[] = []
+    for (const set of decos(s)) {
+      set.between(0, s.doc.length, (from, to, d) => {
+        if (d.spec.widget === undefined && to > from && !d.spec.class) out.push(s.sliceDoc(from, to))
+      })
+    }
+    return out
+  }
+  const doc = 'beta\\* and \\_x\\_\n\nother line'
+  assert.deepEqual(hidden(previewState(doc, doc.length)), ['\\', '\\', '\\'])
+  assert.deepEqual(hidden(previewState(doc, 0)), [])
+  // Inside code a backslash is just a backslash.
+  assert.deepEqual(hidden(previewState('`a\\*b`\n\nx', 9)).filter((t) => t === '\\'), [])
+})

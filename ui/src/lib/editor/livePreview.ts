@@ -821,6 +821,10 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
           case 'InlineCode':
             if (!revealed(state, node.from, node.to)) hideMarks(n, push)
             break
+          case 'Escape':
+            // `beta\*` reads `beta*`: the backslash only keeps the star from being a mark.
+            if (!revealed(state, node.from, node.to)) push(node.from, node.from + 1, hide)
+            break
           case 'Link': {
             // [text](url "title") → keep text, hide the rest. The text follows the link either way.
             const marks = n.getChildren('LinkMark')
