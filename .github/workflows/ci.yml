@@ -88,10 +88,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Upstream's build, not Ubuntu's: Debian builds pandoc without embedded data files, and
+      # under `--sandbox` (which every export runs with) that pandoc cannot find its own
+      # docx/pptx templates — "Could not find data file data/data/docx/[Content_Types].xml",
+      # jgm/pandoc#8128. Same version as the dev machine.
       - name: Install pandoc
+        env:
+          PANDOC_VERSION: 3.10.1
+          PANDOC_SHA256: b419369915e0f3181be0afdb040ec8ecc6b70e72e5992652a0d83aed9e6bc109
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pandoc
+          deb="pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          curl -fsSLO "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/${deb}"
+          echo "${PANDOC_SHA256}  ${deb}" | sha256sum -c -
+          sudo dpkg -i "${deb}"
+          pandoc --version | head -n1
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 

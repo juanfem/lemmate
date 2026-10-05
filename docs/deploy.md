@@ -99,6 +99,11 @@ sha256 pinned in the Dockerfile before it is unpacked, so another release means
 release's `quarto-<version>-checksums.txt`. PDF export through pandoc still needs a LaTeX engine,
 which is not included; Quarto's PDF does not.
 
+Outside the image, use pandoc's own release (or Quarto's bundled one) rather than a Debian or
+Ubuntu package: those are built without embedded data files, and under the `--sandbox` every
+export runs with they cannot find their own templates, so DOCX and PPTX exports fail with
+*Could not find data file …/[Content_Types].xml* ([jgm/pandoc#8128](https://github.com/jgm/pandoc/issues/8128)).
+
 The base images (`node:24-alpine`, `rust:1-bookworm`, `debian:bookworm-slim`) are deliberately
 left on floating tags, so a rebuild picks up their security updates; pin them by digest
 (`FROM debian:bookworm-slim@sha256:…`) if you need byte-for-byte reproducible images.
