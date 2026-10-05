@@ -1,0 +1,32 @@
+{
+  "title": "HTML blocks",
+  "front_matter": {
+    "title": "HTML blocks",
+    "tags": [],
+    "aliases": [],
+    "id": null
+  },
+  "tags": [],
+  "wikilinks": [],
+  "links": [
+    "https://example.org/a",
+    "figures/plot.png",
+    "notes/detail.md",
+    "figures/inline.png",
+    "figures/quoted.png",
+    "bare.png",
+    "figures/in-quote.png"
+  ],
+  "headings": [
+    {
+      "depth": 2,
+      "text": "A slide whose figure follows an HTML line"
+    }
+  ],
+  "has_math": false,
+  "has_tasks": false,
+  "code_langs": [
+    "=html"
+  ],
+  "plain_text": ""
+}

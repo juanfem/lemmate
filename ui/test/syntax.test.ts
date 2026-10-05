@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { GFM, parser } from '@lezer/markdown'
-import { noteSyntax } from '../src/lib/editor/syntax.ts'
+import { htmlBlockImages, noteSyntax } from '../src/lib/editor/syntax.ts'
 
 const p = parser.configure([GFM, noteSyntax])
 function names(src: string): string[] {
@@ -33,4 +33,12 @@ test('a fence names its language in any of the usual spellings', async () => {
   assert.equal(codeLanguage(languages, '{python}')?.name, 'Python')
   assert.equal(codeLanguage(languages, 'ts')?.name, 'TypeScript')
   assert.equal(codeLanguage(languages, 'no-such-language'), null)
+})
+
+test('images inside an HTML block are found as pandoc would read them', () => {
+  const block = '<p class="cite">After somebody</p>\n:::\n![a](figures/plot.png)\n<!-- ![](figures/hidden.png) -->'
+  assert.ok(!names(block + '\n').includes('Image'), 'CommonMark folds the image into the HTML block')
+  const found = htmlBlockImages(block)
+  assert.deepEqual(found.map((i) => i.url), ['figures/plot.png'])
+  assert.equal(block.slice(found[0]!.from, found[0]!.to), '![a](figures/plot.png)')
 })

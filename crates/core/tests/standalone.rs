@@ -396,6 +396,35 @@ async fn a_file_that_arrives_after_its_note_is_found() {
     handle.abort();
 }
 
+/// An image on the line after a raw HTML one is still the note's: CommonMark folds it into the
+/// HTML block, pandoc (and so Quarto) shows it, and the vault has to carry it for the render.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_after_an_html_line_is_an_attachment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("notes");
+    std::fs::create_dir_all(dir.join("slides/figures")).unwrap();
+    std::fs::write(dir.join("slides/figures/plot.png"), "plot").unwrap();
+    std::fs::write(dir.join("slides/figures/tag.png"), "tag").unwrap();
+    std::fs::write(
+        dir.join("slides/deck.qmd"),
+        "## Slide\n\n<p class=\"cite\">After somebody</p>\n:::\n![](figures/plot.png)\n\n\
+         Inline <img src=\"figures/tag.png\"> too.\n",
+    )
+    .unwrap();
+
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id.to_string();
+    for bytes in ["plot", "tag"] {
+        let url = format!(
+            "{base}/api/v1/vaults/{vault}/attachments/{}",
+            lemmate_core::attachments::hash_bytes(bytes.as_bytes())
+        );
+        until(bytes, async || get(url.clone()).await.0 == 200).await;
+    }
+    handle.abort();
+}
+
 /// PUT/DELETE/POST with a body and headers, answering (status, body as JSON or text).
 async fn request(
     method: &'static str,

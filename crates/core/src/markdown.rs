@@ -86,7 +86,8 @@ pub fn parse_options() -> ParseOptions {
 /// start ([`crate::store::Store::index_is_current`]).
 ///
 /// 2: table cells are indexed like paragraphs.
-pub const INDEX_VERSION: u32 = 2;
+/// 3: links inside raw HTML blocks, and `src="…"` attributes, are links.
+pub const INDEX_VERSION: u32 = 3;
 
 pub fn index(source: &str) -> Result<NoteIndex> {
     let tree = markdown::to_mdast(source, &parse_options()).map_err(|e| Error::Markdown(e.to_string()))?;
@@ -145,9 +146,38 @@ fn walk(node: &Node, ix: &mut NoteIndex, plain: &mut String) {
         _ => {}
     }
     if let Some(children) = node.children() {
+        let holds_blocks = matches!(
+            node,
+            Node::Root(_) | Node::Blockquote(_) | Node::ListItem(_) | Node::FootnoteDefinition(_)
+        );
         for c in children {
+            if holds_blocks && let Node::Html(h) = c {
+                html_block_links(&h.value, ix);
+            }
             walk(c, ix, plain);
         }
+    }
+}
+
+/// The links in a raw HTML block. CommonMark runs a block that opens with a tag like `<p>` or
+/// `<div>` on to the next blank line, so a Quarto slide's
+///
+/// ```text
+/// <p class="cite">…</p>
+/// :::
+/// ![](figures/plot.png)
+/// ```
+///
+/// is all HTML, image included. Pandoc — what Quarto renders with — reads the HTML as HTML and
+/// the lines after it as markdown, and shows the image. Read again without HTML blocks, the
+/// tags are inline HTML and the image is an image: what pandoc would find, it finds.
+fn html_block_links(html: &str, ix: &mut NoteIndex) {
+    let mut options = parse_options();
+    options.constructs.html_flow = false;
+    if let Ok(tree) = markdown::to_mdast(html, &options)
+        && let Some(children) = tree.children()
+    {
+        collect_links(children, ix);
     }
 }
 
@@ -156,12 +186,56 @@ fn collect_links(nodes: &[Node], ix: &mut NoteIndex) {
         match n {
             Node::Link(l) => ix.links.push(l.url.clone()),
             Node::Image(i) => ix.links.push(i.url.clone()),
+            Node::Html(h) => ix.links.extend(src_attributes(&h.value)),
             _ => {}
         }
         if let Some(c) = n.children() {
             collect_links(c, ix);
         }
     }
+}
+
+/// The `src` attribute values in a run of HTML — `<img src="pic.png">` names a file just as
+/// `![](pic.png)` does. Quoted or bare; the name is matched without regard to ASCII case.
+fn src_attributes(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("src").map(|i| i + from) {
+        from = at + 3;
+        if at == 0 || !bytes[at - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let mut i = at + 3;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let (start, end) = match bytes.get(i) {
+            Some(&q @ (b'"' | b'\'')) => match lower[i + 1..].find(q as char) {
+                Some(len) => (i + 1, i + 1 + len),
+                None => continue,
+            },
+            Some(_) => {
+                let len =
+                    lower[i..].find(|c: char| c.is_ascii_whitespace() || c == '>').unwrap_or(lower.len() - i);
+                (i, i + len)
+            }
+            None => continue,
+        };
+        if end > start {
+            out.push(html[start..end].to_owned());
+        }
+        from = end;
+    }
+    out
 }
 
 /// Concatenated text of inline children, skipping code and math (no tags/links live there).

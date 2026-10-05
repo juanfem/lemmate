@@ -6,7 +6,7 @@ import { RangeSet, StateEffect, StateField, type EditorState, type Text } from '
 import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode, Tree } from '@lezer/common'
 import katex from 'katex'
-import { codeLanguageName } from './syntax.ts'
+import { codeLanguageName, htmlBlockImages } from './syntax.ts'
 import { blockMarker, parseEmbed, type EmbedTarget } from './transclude.ts'
 
 export interface LivePreviewOptions {
@@ -801,6 +801,13 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
             }
             break
           }
+          case 'HTMLBlock':
+            for (const img of htmlBlockImages(state.sliceDoc(node.from, node.to))) {
+              const [from, to] = [node.from + img.from, node.from + img.to]
+              if (revealed(state, from, to)) continue
+              push(from, to, Decoration.replace({ widget: new ImageWidget(opts.embedUrl(img.url) ?? img.url, ''), block: false }))
+            }
+            break
           case 'WikiLink': {
             const text = state.sliceDoc(node.from + 2, node.to - 2)
             const [targetPart, label] = text.split('|', 2)

@@ -1,7 +1,7 @@
 // Lezer markdown extensions for the SPEC §5 dialect pieces lang-markdown lacks: wikilinks,
 // tags, and TeX math. They produce syntax nodes the live-preview plugin decorates.
 
-import type { BlockContext, InlineContext, Line, MarkdownExtension } from '@lezer/markdown'
+import { GFM, parser, type BlockContext, type InlineContext, type Line, type MarkdownExtension } from '@lezer/markdown'
 import { LanguageDescription } from '@codemirror/language'
 import { Tag, styleTags, tags as t } from '@lezer/highlight'
 
@@ -101,3 +101,26 @@ export const noteSyntax: MarkdownExtension = [
 ]
 
 export { t as highlightTags }
+
+/** The parser with no HTML blocks: their tags are inline HTML, everything else markdown. */
+let withoutHtmlBlocks: ReturnType<typeof parser.configure> | undefined
+
+/**
+ * The `![](…)` images inside a raw HTML block, as offsets into its text. CommonMark runs a
+ * block opened by a tag like `<p>` on to the next blank line, so an image on the line after
+ * `<p class="cite">…</p>` is HTML to the editor — while pandoc, and so Quarto, shows it. Read
+ * again without HTML blocks it is an image: what the indexer finds (`markdown.rs`), the
+ * preview draws.
+ */
+export function htmlBlockImages(text: string): { from: number; to: number; url: string }[] {
+  withoutHtmlBlocks ??= parser.configure([GFM, noteSyntax, { remove: ['HTMLBlock'] }])
+  const out: { from: number; to: number; url: string }[] = []
+  withoutHtmlBlocks.parse(text).iterate({
+    enter: (n) => {
+      if (n.name !== 'Image') return
+      const url = n.node.getChild('URL')
+      if (url) out.push({ from: n.from, to: n.to, url: text.slice(url.from, url.to) })
+    },
+  })
+  return out
+}

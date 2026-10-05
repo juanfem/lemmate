@@ -48,9 +48,11 @@ export interface NoteIndex {
   plain_text: string
 }
 
-export function parseTree(source: string): Root {
+export function parseTree(source: string, htmlBlocks = true): Root {
+  const extensions = [gfm(), math(), frontmatter(['yaml'])]
+  if (!htmlBlocks) extensions.push({ disable: { null: ['htmlFlow'] } })
   return fromMarkdown(source, {
-    extensions: [gfm(), math(), frontmatter(['yaml'])],
+    extensions,
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown(), frontmatterFromMarkdown(['yaml'])],
   })
 }
@@ -123,12 +125,68 @@ function walk(node: Nodes, ix: NoteIndex, plain: string[]): void {
     default:
       break
   }
-  if ('children' in node) for (const child of node.children) walk(child as Nodes, ix, plain)
+  if ('children' in node) {
+    const holdsBlocks = ['root', 'blockquote', 'listItem', 'footnoteDefinition'].includes(node.type)
+    for (const child of node.children) {
+      if (holdsBlocks && child.type === 'html') htmlBlockLinks(child.value, ix)
+      walk(child as Nodes, ix, plain)
+    }
+  }
+}
+
+/**
+ * The links in a raw HTML block. CommonMark runs a block that opens with a tag like `<p>` or
+ * `<div>` on to the next blank line, so a Quarto slide's `<p class="cite">…</p>` followed by
+ * `:::` and `![](figures/plot.png)` is all HTML, image included. Pandoc — what Quarto renders
+ * with — reads the HTML as HTML and the lines after it as markdown, and shows the image. Read
+ * again without HTML blocks, the tags are inline HTML and the image is an image.
+ */
+function htmlBlockLinks(html: string, ix: NoteIndex): void {
+  collectLinks(parseTree(html, false).children as Nodes[], ix)
+}
+
+const ASCII_SPACE = /^[ \t\n\r\f]$/u
+
+/**
+ * The `src` attribute values in a run of HTML — `<img src="pic.png">` names a file just as
+ * `![](pic.png)` does. Quoted or bare; the name is matched without regard to ASCII case.
+ */
+export function srcAttributes(html: string): string[] {
+  const lower = html.replace(/[A-Z]/gu, (c) => c.toLowerCase())
+  const space = (i: number) => i < lower.length && ASCII_SPACE.test(lower[i]!)
+  const out: string[] = []
+  let from = 0
+  for (let at = lower.indexOf('src', from); at !== -1; at = lower.indexOf('src', from)) {
+    from = at + 3
+    if (at === 0 || !space(at - 1)) continue
+    let i = at + 3
+    while (space(i)) i++
+    if (lower[i] !== '=') continue
+    i++
+    while (space(i)) i++
+    if (i >= lower.length) continue
+    let start: number
+    let end: number
+    const q = lower[i]!
+    if (q === '"' || q === "'") {
+      const close = lower.indexOf(q, i + 1)
+      if (close === -1) continue
+      ;[start, end] = [i + 1, close]
+    } else {
+      end = i
+      while (end < lower.length && !space(end) && lower[end] !== '>') end++
+      start = i
+    }
+    if (end > start) out.push(html.slice(start, end))
+    from = end
+  }
+  return out
 }
 
 function collectLinks(nodes: Nodes[], ix: NoteIndex): void {
   for (const n of nodes) {
     if (n.type === 'link' || n.type === 'image') ix.links.push(n.url)
+    if (n.type === 'html') ix.links.push(...srcAttributes(n.value))
     if ('children' in n) collectLinks(n.children as Nodes[], ix)
   }
 }
