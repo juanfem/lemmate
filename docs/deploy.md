@@ -93,9 +93,20 @@ appear to silently fail.
 [Quarto](https://quarto.org) — for *Render with Quarto* (HTML, PDF through Typst, DOCX, slides)
 and for its bundled pandoc, which is linked onto `PATH` so the plain exports work too. Quarto
 is most of the image's size (about 450 MB unpacked); `docker build --build-arg WITH_QUARTO=0 .`
-leaves it out, and rendering and export then answer 501. `--build-arg QUARTO_VERSION=…` picks
-another release. PDF export through pandoc still needs a LaTeX engine, which is not included;
-Quarto's PDF does not.
+leaves it out, and rendering and export then answer 501. The Quarto tarball is checked against a
+sha256 pinned in the Dockerfile before it is unpacked, so another release means
+`--build-arg QUARTO_VERSION=…` *and* the matching `QUARTO_SHA256_AMD64` (or `…_ARM64`) from that
+release's `quarto-<version>-checksums.txt`. PDF export through pandoc still needs a LaTeX engine,
+which is not included; Quarto's PDF does not.
+
+The base images (`node:24-alpine`, `rust:1-bookworm`, `debian:bookworm-slim`) are deliberately
+left on floating tags, so a rebuild picks up their security updates; pin them by digest
+(`FROM debian:bookworm-slim@sha256:…`) if you need byte-for-byte reproducible images.
+
+**Clients and plain `http://`.** The desktop app and the CLI send their token with every request.
+They accept an `http://` server — a LAN box without TLS is a choice people make — but warn when
+it is not on this machine (`localhost`/`127.0.0.1`), since the token then crosses the network in
+cleartext. Put the server behind HTTPS (Caddy, below) for anything you reach over a network.
 
 **Volume ownership.** The container runs as uid `10001`. A *named* volume (as above) inherits
 `/data`'s ownership from the image, so it just works. A *bind mount* does not — the host

@@ -8,6 +8,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; the one job that publishes (the draft release) asks for more itself.
+# Third-party actions are pinned by commit, with the tag they were resolved from alongside, so a
+# moved tag cannot change what runs here.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -19,22 +25,104 @@ jobs:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: cargo fmt
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude lemmate-desktop --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude lemmate-desktop --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --exclude lemmate-desktop
+        run: cargo test --locked --workspace --exclude lemmate-desktop
+
+  # The declared rust-version (workspace Cargo.toml) has to keep building: it is what distro
+  # packagers and the Gentoo toolchain on the dev machine actually have.
+  msrv:
+    name: Rust (MSRV 1.95, check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: "1.95"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: msrv
+
+      - name: cargo check
+        run: cargo check --locked --workspace --exclude lemmate-desktop --all-targets
+
+  # RustSec advisories against Cargo.lock. Informational for now — continue-on-error — because an
+  # advisory in a transitive dependency of Tauri or the like is often not ours to fix the same
+  # day; the job still shows up yellow in the run summary when there is one.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
+
+  # The live end-to-end suites in ui/test (sync, relay) skip themselves unless they are given
+  # built binaries, so the `node` job runs them inert. This job builds the binaries and runs
+  # them for real, plus the pandoc export tests, which skip unless LEMMATE_TEST_PANDOC is set.
+  e2e:
+    name: End-to-end (live server, pandoc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pandoc
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: e2e
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build the server and the CLI
+        run: cargo build --locked -p lemmate-server -p lemmate-cli
+
+      - name: pandoc tests
+        env:
+          LEMMATE_TEST_PANDOC: /usr/bin/pandoc
+        run: "cargo test --locked -p lemmate-core pandoc::"
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: node --test (live)
+        working-directory: ui
+        env:
+          LEMMATE_SERVER_BIN: ${{ github.workspace }}/target/debug/lemmate-server
+          LEMMATE_CLI_BIN: ${{ github.workspace }}/target/debug/lemmate
+        run: npm test
 
   # Type-check the Tauri desktop shell: building it would also need a bundler toolchain, and
   # nothing here produces an artifact. The system packages are Tauri 2's Linux prerequisites.
@@ -42,7 +130,7 @@ jobs:
     name: Rust (desktop, check only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Tauri system dependencies
         run: |
@@ -53,9 +141,9 @@ jobs:
             libsoup-3.0-dev \
             librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: desktop
 
@@ -67,7 +155,7 @@ jobs:
         run: mkdir -p ui/dist
 
       - name: cargo check
-        run: cargo check -p lemmate-desktop
+        run: cargo check --locked -p lemmate-desktop
 
   # macOS and Windows never run the full suite here — no runner has a vault, a server or a
   # webview to drive — but they do have to compile, including the Tauri shell (WKWebView and
@@ -81,11 +169,11 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: cross-${{ matrix.os }}
 
@@ -97,17 +185,17 @@ jobs:
         run: mkdir -p ui/dist
 
       - name: cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       # The ignored test writes a throwaway entry to the runner's real keychain (Keychain on
       # macOS, Credential Manager on Windows) and removes it: the one place the keychain
       # backend is exercised for real, since no Linux runner has an unlocked Secret Service.
       - name: cargo test (paths, keychain)
-        run: "cargo test -p lemmate-core --features keychain credentials:: -- --include-ignored"
+        run: "cargo test --locked -p lemmate-core --features keychain credentials:: -- --include-ignored"
 
   # Svelte type-check plus the markdown corpus tests. ui/test also holds live end-to-end tests
   # that skip themselves unless LEMMATE_SERVER_BIN / LEMMATE_CLI_BIN point at built binaries, so
-  # they are inert here and the Rust job stays the one that compiles them.
+  # they are inert here; the `e2e` job runs them against real ones.
   node:
     name: Web client (check, test)
     runs-on: ubuntu-latest
@@ -115,9 +203,9 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -136,11 +224,11 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
@@ -172,7 +260,7 @@ jobs:
           - os: windows-latest
             slug: windows-x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Same packages as the `desktop` job, plus what the bundlers themselves need: libxdo for
       # the desktop crate's link step, patchelf and file for the AppImage.
@@ -189,15 +277,15 @@ jobs:
             patchelf \
             file
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: artifacts-${{ matrix.slug }}
 
@@ -227,7 +315,7 @@ jobs:
           NO_STRIP: 1
         run: |
           npm install -g @tauri-apps/cli@^2
-          tauri build
+          tauri build -- --locked
 
       # Cheap proof that what is about to be uploaded actually starts on this platform: a
       # bundle that cannot run is worse than no bundle, and nothing else here executes them.
@@ -287,7 +375,7 @@ jobs:
             -exec cp {} dist/ \;
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lemmate-${{ matrix.slug }}
           path: dist/*
@@ -304,12 +392,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           fail_on_unmatched_files: true

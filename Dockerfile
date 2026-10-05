@@ -7,6 +7,10 @@
 # webkit2gtk/GTK and is never built here: every cargo invocation names -p lemmate-server
 # -p lemmate-cli explicitly. Its manifest still has to be present and stubbed below, because
 # cargo will not load a workspace with a member missing.
+#
+# The base images stay on floating tags on purpose, so a rebuild picks up their security fixes;
+# pin them by digest if you need reproducible images. Quarto, fetched from GitHub, is checked
+# against a pinned sha256 (stage 3).
 
 # ---- Stage 1: build the web client (ui/dist) -------------------------------------------------
 FROM node:24-alpine AS ui
@@ -77,12 +81,26 @@ RUN apt-get update \
 # exports (SPEC §12) work too. About 450 MB unpacked; build with `--build-arg WITH_QUARTO=0` to
 # leave it out, and both answer 501. To keep it in the image but refuse renders — they honour a
 # note's front matter, Lua filters included — set LEMMATE_DISABLE_QUARTO=true instead.
+#
+# The tarball is checked against the sha256 pinned here before it is unpacked, so a tampered or
+# swapped release asset fails the build instead of landing in the image. The sums come from the
+# release's own quarto-<version>-checksums.txt; bumping QUARTO_VERSION means bumping both.
 ARG WITH_QUARTO=1
 ARG QUARTO_VERSION=1.10.18
+ARG QUARTO_SHA256_AMD64=afad071b5bd22c02f2d300695743189d3650e0537a53073e654b630cff2b0c73
+ARG QUARTO_SHA256_ARM64=f6a07df68e25330b5df34f65d3df66bca605acce3b830c593a58e91884d4cf6c
 RUN if [ "$WITH_QUARTO" = 1 ]; then \
         arch="$(dpkg --print-architecture)" \
-        && curl -fsSL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${arch}.tar.gz" \
-           | tar -xz -C /opt \
+        && case "$arch" in \
+             amd64) sum="$QUARTO_SHA256_AMD64" ;; \
+             arm64) sum="$QUARTO_SHA256_ARM64" ;; \
+             *) echo "no Quarto checksum pinned for $arch" >&2; exit 1 ;; \
+           esac \
+        && tarball="/tmp/quarto-${QUARTO_VERSION}-linux-${arch}.tar.gz" \
+        && curl -fsSL -o "$tarball" "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${arch}.tar.gz" \
+        && echo "${sum}  ${tarball}" | sha256sum -c - \
+        && tar -xzf "$tarball" -C /opt \
+        && rm -f "$tarball" \
         && ln -s "/opt/quarto-${QUARTO_VERSION}/bin/quarto" /usr/local/bin/quarto \
         && ln -s "$(find "/opt/quarto-${QUARTO_VERSION}/bin/tools" -type f -name pandoc | head -n1)" /usr/local/bin/pandoc \
         && quarto --version && pandoc --version | head -n1; \
