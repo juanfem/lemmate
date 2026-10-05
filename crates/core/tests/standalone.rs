@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use lemmate_core::client::{LocalHandle, LocalOptions, SyncOptions, start};
 use serde_json::Value;
 
+mod common;
+use common::{keyed, remember};
+
 async fn relay(root: &Path) -> LocalHandle {
     relay_with_config(root, None).await
 }
@@ -30,8 +33,9 @@ async fn relay_with_config(root: &Path, config_path: Option<PathBuf>) -> LocalHa
         web_dir: None,
         vault_root: Some(root.to_path_buf()),
         config_path,
+        allow_remote: false,
     };
-    start(opts, local).await.unwrap()
+    remember(start(opts, local).await.unwrap())
 }
 
 async fn get(url: String) -> (u16, Value) {
@@ -43,8 +47,7 @@ async fn get(url: String) -> (u16, Value) {
 async fn post_text(url: String, body: Value) -> (u16, String) {
     tokio::task::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
-        let mut r = agent
-            .post(&url)
+        let mut r = keyed(agent.post(&url), &url)
             .header("content-type", "application/json")
             .send(body.to_string().as_bytes())
             .unwrap();
@@ -57,13 +60,13 @@ async fn post_text(url: String, body: Value) -> (u16, String) {
 async fn call(method: &'static str, url: String, body: Option<Value>) -> (u16, Value) {
     tokio::task::spawn_blocking(move || {
         let result = match (method, body) {
-            ("GET", _) => ureq::get(&url).call(),
-            ("POST", Some(b)) => {
-                ureq::post(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
-            }
-            ("PATCH", Some(b)) => {
-                ureq::patch(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
-            }
+            ("GET", _) => keyed(ureq::get(&url), &url).call(),
+            ("POST", Some(b)) => keyed(ureq::post(&url), &url)
+                .header("content-type", "application/json")
+                .send(b.to_string().as_bytes()),
+            ("PATCH", Some(b)) => keyed(ureq::patch(&url), &url)
+                .header("content-type", "application/json")
+                .send(b.to_string().as_bytes()),
             _ => unreachable!(),
         };
         match result {
@@ -197,7 +200,8 @@ async fn attachments_are_recorded_without_an_upload() {
         let url = url.clone();
         let bytes = bytes.clone();
         move || {
-            let mut r = ureq::put(&url).header("x-filename", "kettle.png").send(&bytes[..]).unwrap();
+            let mut r =
+                keyed(ureq::put(&url), &url).header("x-filename", "kettle.png").send(&bytes[..]).unwrap();
             serde_json::from_str::<Value>(&r.body_mut().read_to_string().unwrap()).unwrap()
         }
     })
@@ -217,7 +221,7 @@ async fn attachments_are_recorded_without_an_upload() {
 
     until("the attachment to be served by hash", async || get(url.clone()).await.0 == 200).await;
     let served = tokio::task::spawn_blocking(move || {
-        ureq::get(&url).call().unwrap().body_mut().read_to_vec().unwrap()
+        keyed(ureq::get(&url), &url).call().unwrap().body_mut().read_to_vec().unwrap()
     })
     .await
     .unwrap();
@@ -246,7 +250,7 @@ async fn a_note_renders_through_quarto_with_its_images() {
     let url = format!("{base}/api/v1/vaults/{vault}/attachments/{hash}");
     tokio::task::spawn_blocking({
         let url = url.clone();
-        move || ureq::put(&url).header("x-filename", "dot.png").send(&png[..]).unwrap()
+        move || keyed(ureq::put(&url), &url).header("x-filename", "dot.png").send(&png[..]).unwrap()
     })
     .await
     .unwrap();
@@ -437,14 +441,17 @@ async fn request(
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
         let mut r = match method {
             "PUT" => {
-                let mut req = agent.put(&url);
+                let mut req = keyed(agent.put(&url), &url);
                 for (k, v) in &headers {
                     req = req.header(*k, v);
                 }
                 req.send(&body[..]).unwrap()
             }
-            "POST" => agent.post(&url).header("content-type", "application/json").send(&body[..]).unwrap(),
-            "DELETE" => agent.delete(&url).call().unwrap(),
+            "POST" => keyed(agent.post(&url), &url)
+                .header("content-type", "application/json")
+                .send(&body[..])
+                .unwrap(),
+            "DELETE" => keyed(agent.delete(&url), &url).call().unwrap(),
             _ => unreachable!(),
         };
         let text = r.body_mut().read_to_string().unwrap_or_default();

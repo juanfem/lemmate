@@ -1,0 +1,32 @@
+{
+  "title": "Deep",
+  "front_matter": null,
+  "tags": [
+    "deep-quote",
+    "after-emphasis",
+    "after-brackets",
+    "listed",
+    "indent",
+    "normal"
+  ],
+  "wikilinks": [
+    {
+      "target": "[x",
+      "embed": false
+    }
+  ],
+  "links": [
+    "https://example.com/deep",
+    "https://example.com/ok"
+  ],
+  "headings": [
+    {
+      "depth": 1,
+      "text": "Deep"
+    }
+  ],
+  "has_math": false,
+  "has_tasks": false,
+  "code_langs": [],
+  "plain_text": ""
+}

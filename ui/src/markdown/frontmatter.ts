@@ -5,7 +5,7 @@
 // This is still the twin of `crates/core/src/markdown.rs`; `test/corpus.test.ts` covers it
 // through `index()`.
 
-import { parse as parseYaml } from 'yaml'
+import { isAlias, isMap, isScalar, parseDocument, type Document } from 'yaml'
 
 export interface FrontMatter {
   title: string | null
@@ -16,18 +16,31 @@ export interface FrontMatter {
 
 export const EMPTY_FM: FrontMatter = { title: null, tags: [], aliases: [], id: null }
 
-/** Mirrors serde's strictness: any field of the wrong shape voids the whole front matter. */
+/**
+ * Mirrors serde's strictness: any field of the wrong shape voids the whole front matter. As
+ * there, a scalar `title`/`id` is its text as written — `title: 2024` is "2024", `id: 1.50` is
+ * "1.50" — while `tags` and `aliases` must be strings.
+ */
 export function parseFrontMatter(src: string): FrontMatter {
-  let doc: unknown
+  let doc: Document
   try {
-    doc = parseYaml(src)
+    doc = parseDocument(src)
   } catch {
     return { ...EMPTY_FM }
   }
-  if (doc === null || doc === undefined || typeof doc !== 'object' || Array.isArray(doc)) return { ...EMPTY_FM }
-  const o = doc as Record<string, unknown>
+  if (doc.errors.length > 0 || !isMap(doc.contents)) return { ...EMPTY_FM }
+  const scalar = (key: string): string | null => {
+    let node: unknown = doc.get(key, true)
+    if (isAlias(node)) node = node.resolve(doc)
+    if (node === undefined || node === null) return null
+    if (!isScalar(node)) throw new TypeError('expected string')
+    if (node.value === null || node.value === undefined) return null
+    if (typeof node.value === 'string') return node.value
+    return node.source ?? String(node.value)
+  }
   try {
-    return { title: optString(o.title), tags: oneOrMany(o.tags), aliases: oneOrMany(o.aliases), id: optString(o.id) }
+    const o = doc.toJS() as Record<string, unknown>
+    return { title: scalar('title'), tags: oneOrMany(o.tags), aliases: oneOrMany(o.aliases), id: scalar('id') }
   } catch {
     return { ...EMPTY_FM }
   }
@@ -47,12 +60,6 @@ export function frontMatter(source: string): FrontMatter {
 export function pushTag(tags: string[], tag: string): void {
   const t = tag.trim().replace(/^\/+/u, '').replace(/\/+$/u, '').toLowerCase()
   if (t.length > 0 && !tags.includes(t)) tags.push(t)
-}
-
-function optString(v: unknown): string | null {
-  if (v === null || v === undefined) return null
-  if (typeof v === 'string') return v
-  throw new TypeError('expected string')
 }
 
 function oneOrMany(v: unknown): string[] {

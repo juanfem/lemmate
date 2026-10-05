@@ -3,6 +3,8 @@
 export interface VaultInfo {
   id: string
   notes: number
+  /** Our role in it (`viewer`, `editor`, `admin`, `owner`), from servers that say. */
+  role?: string
 }
 export interface NoteSummary {
   id: string

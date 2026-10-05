@@ -145,16 +145,8 @@ pub fn save_with(secrets: Option<&dyn Secrets>, server: &str, token: &str) -> Re
 }
 
 fn write(root: &toml::Table) -> Result<()> {
-    let p = path();
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&p, toml::to_string(root).map_err(|e| Error::Sync(e.to_string()))?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let text = toml::to_string(root).map_err(|e| Error::Sync(e.to_string()))?;
+    crate::paths::write_private(&path(), text.as_bytes())?;
     Ok(())
 }
 
@@ -297,14 +289,31 @@ impl BrowserSignIn {
     }
 }
 
-/// This machine's name, for naming what it signs in as.
+/// This machine's name, for naming what it signs in as: `$HOSTNAME`/`%COMPUTERNAME%`, then on
+/// macOS the name the user gave the Mac (`scutil --get ComputerName`), then `/etc/hostname`, then
+/// the `hostname` command.
 pub fn hostname() -> String {
+    let clean = |s: String| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    let command = |program: &str, args: &[&str]| {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(clean)
+    };
     std::env::var("HOSTNAME")
         .ok()
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+        .and_then(clean)
+        .or_else(|| std::env::var("COMPUTERNAME").ok().and_then(clean))
+        .or_else(|| {
+            cfg!(target_os = "macos").then(|| command("scutil", &["--get", "ComputerName"])).flatten()
+        })
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().and_then(clean))
+        .or_else(|| command("hostname", &[]))
         .unwrap_or_else(|| "this computer".into())
 }
 
@@ -419,6 +428,18 @@ mod tests {
         let broken = Mem(Default::default(), false);
         save_with(Some(&broken), "https://z.example", "tok3").unwrap();
         assert_eq!(load_with(Some(&broken), "https://z.example").as_deref(), Some("tok3"));
+
+        // A file holding tokens is its owner's alone, and so is the directory it is in.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn this_machine_has_a_name() {
+        assert!(!hostname().trim().is_empty());
     }
 
     /// The real keychain, with a throwaway service name. Ignored by default — it writes to the

@@ -12,14 +12,14 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ use crate::sync::Frame;
 
 /// Events the relay feeds into the engine loop.
 pub enum LocalEvent {
-    PeerConnected { id: u64, tx: mpsc::UnboundedSender<Vec<u8>> },
+    PeerConnected { id: u64, tx: Outbox },
     PeerFrame { id: u64, bytes: Vec<u8> },
     PeerGone { id: u64 },
     Query { query: LocalQuery, reply: oneshot::Sender<LocalReply> },
@@ -120,6 +120,15 @@ pub enum LocalQuery {
     /// Delete this vault's files and its sidecar, and stop. There is no undo: the caller has
     /// copied everything somewhere else first.
     Retire,
+    /// A note's whole CRDT state, so a merge carries its history across instead of making the
+    /// destination insert the text again as if it were new (SPEC §3.2).
+    NoteState(NoteId),
+    /// A note's CRDT state from a vault being merged in, recorded before its file is written so
+    /// the destination adopts the note *with* its history.
+    AdoptState {
+        id: NoteId,
+        state: Vec<u8>,
+    },
 }
 
 pub enum LocalReply {
@@ -183,6 +192,7 @@ pub enum LocalReply {
         left: Vec<String>,
         folder_removed: bool,
     },
+    NoteState(Option<Vec<u8>>),
     Error(String),
 }
 
@@ -198,6 +208,10 @@ pub struct LocalOptions {
     /// (SPEC §3.2). `None` — a relay configured by flags, like `lemmate serve` — cannot be
     /// reconfigured from the page, and `POST /api/v1/local/connect` says so.
     pub config_path: Option<PathBuf>,
+    /// Listen on an address other than loopback. Off, [`serve`] refuses one: the relay answers
+    /// for every vault it holds, so reaching it from the network is a decision, not a default.
+    /// Every request still needs the relay's key.
+    pub allow_remote: bool,
 }
 
 /// A loopback port for `vault_dir`, the same one every time.
@@ -211,9 +225,9 @@ pub struct LocalOptions {
 /// Callers must still fall back to an ephemeral port when the bind fails: the port may be
 /// taken, and a forgotten layout beats a shell that will not start.
 ///
-/// The range is IANA's dynamic/private one. A derived port is guessable by other processes on
-/// the machine, but the relay already listens without authentication on loopback and anything
-/// local can find it by scanning, so predictability costs nothing that was not spent already.
+/// The range is IANA's dynamic/private one. A derived port is guessable, which costs nothing:
+/// knowing where the relay listens is not enough to use it without its per-launch key (see
+/// [`Guard`]).
 pub fn stable_port(vault_dir: &std::path::Path) -> u16 {
     const FIRST: u32 = 49152;
     const COUNT: u32 = 65536 - FIRST;
@@ -240,7 +254,7 @@ pub(crate) struct LocalState {
     /// [`Registrar`], without dropping the connection.
     engines: RwLock<Vec<EngineRef>>,
     /// The local UIs currently connected, so an engine that arrives late can still reach them.
-    peers: RwLock<HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>,
+    peers: RwLock<HashMap<u64, Outbox>>,
     routes: Arc<Routes>,
     /// Where a request to open an unknown vault goes; `None` on a relay with a fixed set.
     wanted: Option<mpsc::UnboundedSender<VaultId>>,
@@ -394,9 +408,15 @@ struct Held {
 
 /// How long a frame waits for a vault to claim its doc, and how much waits at once. A doc
 /// nobody ever claims is a bug elsewhere; these bounds keep it from being a leak.
+///
+/// The bound is on bytes, not on frames: a new note's first frames are what the UI typed before
+/// it wrote the vault entry, and dropping the oldest of them would lose the start of the note.
+/// A doc that reaches its share has its updates merged into one (`compact_held`), which for
+/// typing — many small updates to one text — is a fraction of the size.
 const HOLD_FOR: Duration = Duration::from_secs(60);
 const HOLD_DOCS: usize = 256;
-const HOLD_FRAMES: usize = 64;
+const HOLD_DOC_BYTES: usize = 8 << 20;
+const HOLD_TOTAL_BYTES: usize = 64 << 20;
 
 impl Routes {
     pub(crate) fn owner(&self, note: NoteId) -> Option<VaultId> {
@@ -411,11 +431,25 @@ impl Routes {
             !frames.is_empty()
         });
         if t.held.len() >= HOLD_DOCS && !t.held.contains_key(&doc) {
+            tracing::warn!(%doc, "too many docs waiting for a vault; dropping a frame");
             return;
         }
+        let total: usize = t.held.values().flatten().map(|h| h.bytes.len()).sum();
         let frames = t.held.entry(doc).or_default();
-        if frames.len() >= HOLD_FRAMES {
-            frames.remove(0);
+        let size = |frames: &Vec<Held>| frames.iter().map(|h| h.bytes.len()).sum::<usize>();
+        let mine = size(frames);
+        if mine + bytes.len() > HOLD_DOC_BYTES {
+            compact_held(frames);
+        }
+        let others = total - mine;
+        let mine = size(frames);
+        if (mine > 0 && mine + bytes.len() > HOLD_DOC_BYTES) || others + mine + bytes.len() > HOLD_TOTAL_BYTES
+        {
+            // Still too big after merging: a peer sending far more than a note being created
+            // ever does. The doc is bounded either way, and the peer's next handshake resends
+            // whatever it has that the engine lacks.
+            tracing::warn!(%doc, held = mine, "held frames over their bound; dropping a frame");
+            return;
         }
         frames.push(Held { peer, bytes, since: now });
     }
@@ -448,11 +482,58 @@ impl Routes {
     }
 }
 
+/// Fold one doc's held frames into as few as say the same thing: every update into one (yrs
+/// merges them losslessly), the latest state-vector request from each peer, and no presence —
+/// which is stale by the time anyone reads it.
+fn compact_held(frames: &mut Vec<Held>) {
+    use crate::sync::{Message, SyncMessage};
+    let Some(first) = frames.first() else { return };
+    let since = first.since;
+    let mut doc_id = None;
+    let mut updates: Vec<Vec<u8>> = Vec::new();
+    let mut update_peer = first.peer;
+    let mut step1: HashMap<u64, Held> = HashMap::new();
+    let mut kept: Vec<Held> = Vec::new();
+    for h in frames.drain(..) {
+        let Ok(frame) = Frame::decode(&h.bytes) else { continue };
+        match frame.message() {
+            Ok(Message::Sync(SyncMessage::Update(u) | SyncMessage::SyncStep2(u))) => {
+                doc_id.get_or_insert(frame.doc_id);
+                update_peer = h.peer;
+                updates.push(u);
+            }
+            Ok(Message::Sync(SyncMessage::SyncStep1(_))) => {
+                step1.insert(h.peer, h);
+            }
+            Ok(Message::Awareness(_) | Message::AwarenessQuery) => {}
+            _ => kept.push(h),
+        }
+    }
+    kept.extend(step1.into_values());
+    if let Some(doc_id) = doc_id {
+        let parts: Vec<&[u8]> = updates.iter().map(Vec::as_slice).collect();
+        match yrs::merge_updates_v1(parts) {
+            Ok(merged) => {
+                let bytes = Frame::new(doc_id, &Message::Sync(SyncMessage::Update(merged))).encode();
+                kept.push(Held { peer: update_peer, bytes, since });
+            }
+            Err(e) => {
+                // Not mergeable means not decodable, which the engine would refuse anyway.
+                tracing::warn!(%e, "held updates do not merge; dropping them");
+            }
+        }
+    }
+    kept.sort_by_key(|h| h.since);
+    *frames = kept;
+}
+
 /// What [`serve`] hands back: the bound address, one event receiver per vault (in the order
 /// they were given), the server task, the routing table the engines publish into, and — when
 /// the caller allows new vaults — the requests for them and the way to answer.
 pub(crate) struct Served {
     pub addr: SocketAddr,
+    /// The per-launch secret every request must carry (see [`Guard`]).
+    pub key: String,
     pub events: Vec<mpsc::UnboundedReceiver<LocalEvent>>,
     pub task: tokio::task::JoinHandle<()>,
     pub routes: Arc<Routes>,
@@ -508,8 +589,20 @@ pub(crate) async fn serve(
         renders: crate::quarto::RenderCache::new(),
     });
     let registrar = Registrar(state.clone());
+    if !opts.bind.ip().is_loopback() {
+        if !opts.allow_remote {
+            return Err(Error::Sync(format!(
+                "refusing to serve the local relay on {}, which is not loopback; allow it explicitly \
+                 if that is what you want",
+                opts.bind
+            )));
+        }
+        tracing::warn!(bind = %opts.bind, "the local relay is reachable from the network; anyone with its key can read and write every vault it holds");
+    }
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
+    let guard = Arc::new(Guard { key: Some(new_key()?), port: addr.port(), any_host: opts.allow_remote });
+    let key = guard.key.clone().unwrap_or_default();
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
@@ -554,7 +647,8 @@ pub(crate) async fn serve(
         Some(dir) => router.fallback_service(crate::web::client(dir)),
         None => router,
     };
-    let app = router.with_state(state);
+    // Outermost, so it covers the static client and the fallback as well as the API.
+    let app = router.with_state(state).layer(axum::middleware::from_fn_with_state(guard, guard_request));
     let task = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!(%e, "local relay stopped");
@@ -562,6 +656,7 @@ pub(crate) async fn serve(
     });
     Ok(Served {
         addr,
+        key,
         events,
         task,
         routes,
@@ -576,28 +671,46 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<LocalState>>) 
     ws.on_upgrade(move |socket| peer_session(socket, state))
 }
 
+/// How much may wait for one local UI before it is disconnected. A window that stops reading —
+/// suspended, or wedged — would otherwise grow the relay without bound; reconnecting costs it
+/// one handshake, which sends whatever it missed.
+const PEER_QUEUE_BYTES: usize = 64 << 20;
+
 /// One local UI. Every engine hears about the peer — each fans its own docs out to it — while
 /// frames coming the other way go to the one engine that owns the doc they name.
-async fn peer_session(mut socket: WebSocket, state: Arc<LocalState>) {
+async fn peer_session(socket: WebSocket, state: Arc<LocalState>) {
+    use futures_util::{SinkExt, StreamExt};
     let id = state.next_peer.fetch_add(1, Ordering::Relaxed);
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = outbox(PEER_QUEUE_BYTES);
     if let Ok(mut peers) = state.peers.write() {
         peers.insert(id, tx.clone());
     }
     state.broadcast(|| LocalEvent::PeerConnected { id, tx: tx.clone() });
+    let (mut sink, mut stream) = socket.split();
+    // Writing on a task of its own, so a peer that does not read cannot stall the reading side
+    // (or hide that its queue is overflowing).
+    let mut writer = tokio::spawn(async move {
+        while let Some(bytes) = rx.recv().await {
+            if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
+                break;
+            }
+        }
+    });
     loop {
         tokio::select! {
-            msg = socket.recv() => match msg {
+            msg = stream.next() => match msg {
                 Some(Ok(WsMessage::Binary(b))) => state.route_frame(id, b.to_vec()),
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
-            out = rx.recv() => match out {
-                Some(bytes) => if socket.send(WsMessage::Binary(bytes.into())).await.is_err() { break },
-                None => break,
-            },
+            _ = tx.overflowed() => {
+                tracing::warn!(peer = id, "a local UI is not keeping up; disconnecting it");
+                break;
+            }
+            _ = &mut writer => break,
         }
     }
+    writer.abort();
     if let Ok(mut peers) = state.peers.write() {
         peers.remove(&id);
     }
@@ -1209,12 +1322,54 @@ async fn search(
 async fn attachment(
     State(s): State<Arc<LocalState>>,
     Path((vault, hash)): Path<(String, String)>,
-) -> std::result::Result<impl IntoResponse, StatusCode> {
+) -> std::result::Result<axum::response::Response, StatusCode> {
     match ask(&s, &vault, LocalQuery::Attachment(hash)).await? {
-        LocalReply::Attachment(Some((bytes, mime))) => Ok(([(header::CONTENT_TYPE, mime)], bytes)),
+        LocalReply::Attachment(Some((bytes, mime))) => Ok(attachment_response(bytes, &mime)),
         LocalReply::Attachment(None) => Err(StatusCode::NOT_FOUND),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// An attachment's bytes as the relay serves them: whatever a vault holds was written by
+/// someone, possibly someone else, and is served from the relay's own origin — where a script
+/// could use the relay's key. So nothing is sniffed, nothing runs (`sandbox`), and anything a
+/// browser would render as a document of its own (HTML, SVG, XML, scripts, and whatever is not
+/// on the short list of media) is a download instead.
+fn attachment_response(bytes: Vec<u8>, mime: &str) -> axum::response::Response {
+    let essence = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let inline = matches!(
+        essence.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/webm"
+            | "audio/flac"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "application/pdf"
+            | "text/plain"
+    );
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, mime.to_owned()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+            (header::CONTENT_SECURITY_POLICY, "sandbox".into()),
+            (header::CACHE_CONTROL, "private, max-age=31536000, immutable".into()),
+        ],
+        bytes,
+    )
+        .into_response();
+    if !inline {
+        response.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    }
+    response
 }
 
 #[derive(Serialize)]
@@ -1272,6 +1427,226 @@ pub(crate) fn err_reply(e: Error) -> LocalReply {
     LocalReply::Error(e.to_string())
 }
 
+// ---- Queues to peers ----------------------------------------------------------------------------
+
+/// A queue to something that may read slower than we write — a local UI, or the server —
+/// bounded by the bytes waiting in it.
+///
+/// Frames are CRDT updates, so silently dropping one would leave that peer behind for good.
+/// A queue that would pass its bound refuses the frame and says so instead
+/// ([`Outbox::overflowed`]); its owner closes the connection, and the handshake on reconnect sends
+/// the peer everything it is missing. A single frame bigger than the bound still goes through an
+/// empty queue: a large note must not be impossible to send.
+#[derive(Clone)]
+pub struct Outbox {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+    limit: usize,
+    full: Arc<AtomicBool>,
+    overflow: Arc<tokio::sync::Notify>,
+}
+
+pub(crate) struct OutboxRx {
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+pub(crate) fn outbox(limit: usize) -> (Outbox, OutboxRx) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let full = Arc::new(AtomicBool::new(false));
+    let overflow = Arc::new(tokio::sync::Notify::new());
+    (Outbox { tx, queued: queued.clone(), limit, full, overflow }, OutboxRx { rx, queued })
+}
+
+impl Outbox {
+    /// Queue one frame; `false` when it was not (the peer is gone, or too far behind).
+    pub(crate) fn send(&self, bytes: Vec<u8>) -> bool {
+        if self.full.load(Ordering::Relaxed) {
+            return false;
+        }
+        let len = bytes.len();
+        let before = self.queued.fetch_add(len, Ordering::Relaxed);
+        if before > 0 && before + len > self.limit {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            self.full.store(true, Ordering::Relaxed);
+            self.overflow.notify_one();
+            return false;
+        }
+        if self.tx.send(bytes).is_err() {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// Resolves once a frame has been refused for want of room.
+    pub(crate) async fn overflowed(&self) {
+        self.overflow.notified().await
+    }
+}
+
+impl OutboxRx {
+    pub(crate) async fn recv(&mut self) -> Option<Vec<u8>> {
+        let bytes = self.rx.recv().await?;
+        self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+        Some(bytes)
+    }
+}
+
+// ---- Who may use the relay ------------------------------------------------------------------------
+
+/// The relay's front door (SPEC §3.2). Loopback is not a boundary: every page in every browser
+/// on this machine can send requests to `127.0.0.1`, and a DNS name rebound to it can read the
+/// answers. So:
+///
+/// - **Host** must name the relay as a loopback address or `localhost`, on its own port — a
+///   rebound name fails here, before anything is read;
+/// - an **Origin**, when the browser sends one, must be the relay's own — no other site's page
+///   may drive it;
+/// - and every request carries the **per-launch key**: the `lemmate_relay_<port>` cookie, set
+///   when a page is first opened as `/?key=…` (the URL the shell or the CLI hands out), or
+///   `Authorization: Bearer <key>` for programs. A WebSocket may give it as `?key=` too, since
+///   a script cannot set headers on one.
+///
+/// `/healthz` answers anyone; it says nothing but "ok". The setup server uses the same guard
+/// without a key: there is nothing to read before a vault exists, but a rebound page must not
+/// fill in the form.
+pub(crate) struct Guard {
+    key: Option<String>,
+    port: u16,
+    /// Listening beyond loopback by request ([`LocalOptions::allow_remote`]): the Host is then
+    /// whatever name the relay was reached by. Origin and key still apply.
+    any_host: bool,
+}
+
+/// 32 random bytes, hex: the relay's key for this launch.
+fn new_key() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| Error::Sync(format!("no randomness for the relay key: {e}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+impl Guard {
+    fn cookie_name(&self) -> String {
+        // Per port: cookies are not, and two relays on one machine must not sign each other out.
+        format!("lemmate_relay_{}", self.port)
+    }
+
+    fn host_ok(&self, host: &str) -> bool {
+        if self.any_host {
+            return true;
+        }
+        let (name, port) = match host.strip_prefix('[') {
+            Some(rest) => match rest.split_once(']') {
+                Some((ip, tail)) => (ip, tail.strip_prefix(':')),
+                None => return false,
+            },
+            None => match host.rsplit_once(':') {
+                Some((n, p)) => (n, Some(p)),
+                None => (host, None),
+            },
+        };
+        let port_ok = match port {
+            Some(p) => p.parse::<u16>().is_ok_and(|p| p == self.port),
+            None => self.port == 80,
+        };
+        let name_ok = name.eq_ignore_ascii_case("localhost")
+            || name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        port_ok && name_ok
+    }
+
+    fn key_is(&self, given: &str) -> bool {
+        let Some(key) = &self.key else { return true };
+        // Constant time: the comparison must not say how much of a guess was right.
+        given.len() == key.len() && given.bytes().zip(key.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    }
+}
+
+async fn guard_request(
+    State(g): State<Arc<Guard>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.uri().path() == "/healthz" {
+        return next.run(req).await;
+    }
+    let headers = req.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| req.uri().authority().map(|a| a.to_string()));
+    let Some(host) = host.filter(|h| g.host_ok(h)) else {
+        return (
+            StatusCode::MISDIRECTED_REQUEST,
+            "this is a local relay; reach it by its loopback address\n",
+        )
+            .into_response();
+    };
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let own = format!("http://{host}");
+        if !origin.to_str().is_ok_and(|o| o.eq_ignore_ascii_case(&own)) {
+            return (StatusCode::FORBIDDEN, "cross-origin requests to the local relay are refused\n")
+                .into_response();
+        }
+    }
+    if g.key.is_none() {
+        return next.run(req).await;
+    }
+    let query = req.uri().query().unwrap_or("");
+    let given = query.split('&').find_map(|kv| kv.strip_prefix("key="));
+    if let Some(given) = given {
+        if !g.key_is(given) {
+            return (StatusCode::UNAUTHORIZED, "wrong key for this relay\n").into_response();
+        }
+        let upgrade = headers.contains_key(header::UPGRADE);
+        if req.method() == Method::GET && !upgrade {
+            // A page opened with its key: remember the key in a cookie, and show the address
+            // without it, so it is not left in the history or copied into a shared link.
+            let rest: Vec<&str> =
+                query.split('&').filter(|kv| !kv.starts_with("key=") && !kv.is_empty()).collect();
+            let location = if rest.is_empty() {
+                req.uri().path().to_owned()
+            } else {
+                format!("{}?{}", req.uri().path(), rest.join("&"))
+            };
+            // Lax, not Strict: a page reached from an opaque origin — the speaker view a sandboxed
+            // render opens — must still carry it. Cross-site requests are stopped by the Host
+            // and Origin checks above, not by the cookie.
+            let cookie = format!(
+                "{}={}; HttpOnly; SameSite=Lax; Path=/",
+                g.cookie_name(),
+                g.key.as_deref().unwrap_or("")
+            );
+            return (StatusCode::SEE_OTHER, [(header::LOCATION, location), (header::SET_COOKIE, cookie)])
+                .into_response();
+        }
+        return next.run(req).await;
+    }
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| g.key_is(t.trim()));
+    let name = g.cookie_name();
+    let cookie = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == name && g.key_is(v));
+    if bearer || cookie {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        "this local relay needs its key: open the address the app or `lemmate serve` printed, which ends in ?key=…\n",
+    )
+        .into_response()
+}
+
 // ---- First-run setup (SPEC §14 desktop) -------------------------------------------------------
 
 /// What the desktop shell needs before it can start the engines: a folder, and — only if the
@@ -1314,26 +1689,39 @@ pub struct SetupStatus {
     pub suggested_root_dir: String,
 }
 
+/// One submitted setup form, with the channel the shell answers on — as [`ConnectAsk`] does, so
+/// the form can say "wrong password" or "cannot reach the server" and be submitted again,
+/// instead of spinning forever on a setup that failed out of its sight.
+#[derive(Debug)]
+pub struct SetupAsk {
+    pub request: SetupRequest,
+    pub reply: oneshot::Sender<std::result::Result<(), String>>,
+}
+
 pub(crate) struct SetupState {
     config_path: PathBuf,
     suggested: PathBuf,
-    done: tokio::sync::Mutex<Option<oneshot::Sender<SetupRequest>>>,
+    /// The shell's end. Taken (`None`) once a setup has succeeded; the lock also keeps two
+    /// submissions from running at once.
+    asks: tokio::sync::Mutex<Option<mpsc::UnboundedSender<SetupAsk>>>,
 }
 
 /// Serve the web client in "setup mode" on loopback: the UI sees `configured: false` on
-/// `GET /api/v1/local/setup`, shows its setup form, and `POST`s the answers; the request is
-/// handed back to the caller (which writes the config, logs in, and starts the real relay).
+/// `GET /api/v1/local/setup`, shows its setup form, and `POST`s the answers; each submission is
+/// handed to the caller (which writes the config, logs in, and starts the real relay) and the
+/// response waits for its answer: `200` when it worked, `422 {"error"}` when it did not, and
+/// the form may then be sent again.
 pub async fn serve_setup(
     bind: SocketAddr,
     web_dir: Option<PathBuf>,
     config_path: PathBuf,
     suggested_root_dir: PathBuf,
-) -> Result<(SocketAddr, oneshot::Receiver<SetupRequest>, tokio::task::JoinHandle<()>)> {
-    let (tx, rx) = oneshot::channel();
+) -> Result<(SocketAddr, mpsc::UnboundedReceiver<SetupAsk>, tokio::task::JoinHandle<()>)> {
+    let (tx, rx) = mpsc::unbounded_channel();
     let state = Arc::new(SetupState {
         config_path,
         suggested: suggested_root_dir,
-        done: tokio::sync::Mutex::new(Some(tx)),
+        asks: tokio::sync::Mutex::new(Some(tx)),
     });
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
@@ -1346,7 +1734,8 @@ pub async fn serve_setup(
         Some(dir) => router.fallback_service(crate::web::client(&dir)),
         None => router,
     };
-    let app = router.with_state(state);
+    let guard = Arc::new(Guard { key: None, port: addr.port(), any_host: false });
+    let app = router.with_state(state).layer(axum::middleware::from_fn_with_state(guard, guard_request));
     let task = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!(%e, "setup server stopped");
@@ -1366,22 +1755,35 @@ async fn setup_status(State(s): State<Arc<SetupState>>) -> axum::Json<SetupStatu
 async fn setup_submit(
     State(s): State<Arc<SetupState>>,
     axum::Json(req): axum::Json<SetupRequest>,
-) -> StatusCode {
+) -> axum::response::Response {
+    let refuse = |code: StatusCode, error: String| {
+        (code, axum::Json(serde_json::json!({ "error": error }))).into_response()
+    };
     if req.root_dir.trim().is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return refuse(StatusCode::BAD_REQUEST, "choose a folder for the notes".into());
     }
     // A server is optional, but a half-typed one is a mistake, not a request to go standalone.
     if let Some(url) = req.server_url.as_deref().map(str::trim).filter(|u| !u.is_empty())
         && !(url.starts_with("http://") || url.starts_with("https://"))
     {
-        return StatusCode::BAD_REQUEST;
+        return refuse(StatusCode::BAD_REQUEST, "the server URL must start with http:// or https://".into());
     }
-    match s.done.lock().await.take() {
-        Some(tx) => {
-            let _ = tx.send(req);
-            StatusCode::ACCEPTED
+    // Held across the shell's answer: one submission at a time.
+    let mut asks = s.asks.lock().await;
+    let Some(tx) = asks.as_ref() else {
+        return refuse(StatusCode::CONFLICT, "this app is already set up".into());
+    };
+    let (reply, answer) = oneshot::channel();
+    if tx.send(SetupAsk { request: req, reply }).is_err() {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "the app is not listening for a setup".into());
+    }
+    match answer.await {
+        Ok(Ok(())) => {
+            asks.take();
+            StatusCode::OK.into_response()
         }
-        None => StatusCode::CONFLICT,
+        Ok(Err(error)) => refuse(StatusCode::UNPROCESSABLE_ENTITY, error),
+        Err(_) => refuse(StatusCode::SERVICE_UNAVAILABLE, "the setup did not finish".into()),
     }
 }
 
@@ -1501,6 +1903,15 @@ async fn merge_vaults(
         let text = String::from_utf8(bytes)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, format!("{} is not text", n.from)))?;
         let text = crate::merge::rewrite_references(&text, &rewrites);
+        // The note's history goes first, so the destination adopts the note it already knows
+        // rather than inserting this text into a fresh doc — which, with a server holding the
+        // same id, would merge into the text twice.
+        if let Ok(id) = n.id.parse::<NoteId>()
+            && let LocalReply::NoteState(Some(state)) =
+                ask(&s, &req.from, LocalQuery::NoteState(id)).await.map_err(moved)?
+        {
+            ask(&s, &req.into, LocalQuery::AdoptState { id, state }).await.map_err(moved)?;
+        }
         let reply =
             ask(&s, &req.into, LocalQuery::WriteFile { path: n.to.clone(), bytes: text.into_bytes() })
                 .await
@@ -1508,6 +1919,21 @@ async fn merge_vaults(
         if let LocalReply::Conflict(p) = reply {
             return Err((StatusCode::CONFLICT, format!("{p} already exists in the destination")));
         }
+    }
+
+    // Nothing is deleted until the destination holds every note under its own id: a note it
+    // did not adopt would be lost with the source.
+    let LocalReply::Survey { notes: landed, .. } =
+        ask(&s, &req.into, LocalQuery::Survey).await.map_err(fail)?
+    else {
+        return Err(fail(StatusCode::INTERNAL_SERVER_ERROR));
+    };
+    let landed: HashSet<String> = landed.into_iter().map(|(id, _)| id.to_string()).collect();
+    if let Some(missing) = plan.notes.iter().find(|n| !landed.contains(&n.id)) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{} did not arrive in the destination; nothing was removed", missing.from),
+        ));
     }
 
     // Everything is somewhere else now, so the source can go.
@@ -1733,10 +2159,79 @@ mod tests {
         assert_eq!(stable_port(std::path::Path::new("/nonexistent-vault-for-tests")), 54678);
     }
 
+    /// A note's first frames wait for a vault to claim it — however many there are. Typing a
+    /// long first paragraph before the vault entry is written used to lose its beginning.
+    #[test]
+    fn held_frames_are_never_dropped_and_merge_when_large() {
+        use crate::sync::{Message, SyncMessage};
+        let routes = Routes::default();
+        let note = NoteId::new();
+        let typed = crate::doc::NoteDoc::new();
+        let mut expected = String::new();
+        // A few hundred keystrokes, each its own frame, then enough bulk to pass the bound.
+        let append = |doc: &crate::doc::NoteDoc, text: String| {
+            let at = doc.text().len() as u32;
+            doc.apply_ops(&[crate::diff::TextOp::Insert { at, text }])
+        };
+        for i in 0..500 {
+            let update = append(&typed, (i % 10).to_string());
+            expected = typed.text();
+            let frame = Frame::new(note.to_string(), &Message::Sync(SyncMessage::Update(update))).encode();
+            routes.hold(DocId::Note(note), 1, frame);
+        }
+        // Then a large paste, sent again and again (a UI resending after reconnects): past the
+        // bound in frames, a fraction of it once merged.
+        let paste = append(&typed, "x".repeat(1 << 20));
+        let frame = Frame::new(note.to_string(), &Message::Sync(SyncMessage::Update(paste))).encode();
+        for _ in 0..12 {
+            routes.hold(DocId::Note(note), 1, frame.clone());
+        }
+        let vault = VaultId::new();
+        let released = routes.claim(vault, &HashSet::from([note]));
+        let got = crate::doc::NoteDoc::new();
+        for (_, bytes) in released {
+            if let Ok(Message::Sync(SyncMessage::Update(u))) = Frame::decode(&bytes).unwrap().message() {
+                got.apply_update(&u).unwrap();
+            }
+        }
+        assert!(got.text().starts_with(&expected), "the first keystrokes are all there");
+        assert_eq!(got.text(), typed.text());
+    }
+
+    #[tokio::test]
+    async fn a_queue_past_its_bound_says_so_instead_of_growing() {
+        let (tx, mut rx) = outbox(100);
+        assert!(tx.send(vec![0; 500]), "one big frame still goes through an empty queue");
+        assert!(!tx.send(vec![0; 10]), "but nothing more until it drains");
+        tokio::time::timeout(std::time::Duration::from_secs(1), tx.overflowed()).await.unwrap();
+        assert_eq!(rx.recv().await.map(|b| b.len()), Some(500));
+        assert!(!tx.send(vec![0; 10]), "an overflowed queue stays closed: its peer is to be dropped");
+    }
+
+    #[test]
+    fn the_guard_knows_its_own_host_and_key() {
+        let g = Guard { key: Some("k".repeat(64)), port: 4242, any_host: false };
+        for ok in ["127.0.0.1:4242", "localhost:4242", "LOCALHOST:4242", "[::1]:4242", "127.1.2.3:4242"] {
+            assert!(g.host_ok(ok), "{ok}");
+        }
+        for bad in [
+            "127.0.0.1:4243",
+            "evil.example:4242",
+            "127.0.0.1.nip.io:4242",
+            "localhost",
+            "[::1]",
+            "0.0.0.0:4242",
+        ] {
+            assert!(!g.host_ok(bad), "{bad}");
+        }
+        assert!(g.key_is(&"k".repeat(64)) && !g.key_is(&"k".repeat(63)) && !g.key_is(&"j".repeat(64)));
+        assert!(Guard { key: None, port: 80, any_host: false }.host_ok("localhost"));
+    }
+
     /// Setting up with no server at all: the standalone app (SPEC §3.2).
     #[tokio::test]
     async fn setup_accepts_a_configuration_with_no_server() {
-        let (addr, rx, task) = serve_setup(
+        let (addr, mut rx, task) = serve_setup(
             "127.0.0.1:0".parse().unwrap(),
             None,
             PathBuf::from("/tmp/x.toml"),
@@ -1744,6 +2239,12 @@ mod tests {
         )
         .await
         .unwrap();
+        // The shell's half: take the form and say it worked.
+        let seen = tokio::spawn(async move {
+            let ask = rx.recv().await.unwrap();
+            let _ = ask.reply.send(Ok(()));
+            ask.request
+        });
         let base = format!("http://{addr}");
         let code = tokio::task::spawn_blocking(move || {
             match ureq::post(format!("{base}/api/v1/local/setup"))
@@ -1757,16 +2258,16 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(code, 202);
-        let req = rx.await.unwrap();
+        assert_eq!(code, 200);
+        let req = seen.await.unwrap();
         assert_eq!(req.root_dir, "/v");
         assert_eq!(req.server_url, None, "no server means standalone, not a default one");
         task.abort();
     }
 
     #[tokio::test]
-    async fn setup_mode_hands_the_form_back_once() {
-        let (addr, rx, task) = serve_setup(
+    async fn setup_mode_hands_the_form_back_until_it_works() {
+        let (addr, mut rx, task) = serve_setup(
             "127.0.0.1:0".parse().unwrap(),
             None,
             PathBuf::from("/tmp/x.toml"),
@@ -1810,38 +2311,50 @@ mod tests {
         .unwrap();
         assert_eq!(me, 404);
 
+        // (status, body): error bodies are read too, since they carry the message for the form.
         let submit = |body: serde_json::Value| {
             let base = base.clone();
             tokio::task::spawn_blocking(move || {
-                match ureq::post(format!("{base}/api/v1/local/setup"))
+                let agent: ureq::Agent =
+                    ureq::Agent::config_builder().http_status_as_error(false).build().into();
+                let mut r = agent
+                    .post(format!("{base}/api/v1/local/setup"))
                     .header("content-type", "application/json")
                     .send(body.to_string().as_bytes())
-                {
-                    Ok(r) => r.status().as_u16(),
-                    Err(ureq::Error::StatusCode(c)) => c,
-                    Err(e) => panic!("{e}"),
-                }
+                    .unwrap();
+                (r.status().as_u16(), r.body_mut().read_to_string().unwrap_or_default())
             })
         };
-        assert_eq!(submit(serde_json::json!({"root_dir": "", "server_url": "x"})).await.unwrap(), 400);
+        // The shell's half: the first form fails (a wrong password, say), the second works.
+        let shell = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for answer in [Err("signing in: wrong password".to_owned()), Ok(())] {
+                let ask = rx.recv().await.unwrap();
+                seen.push(ask.request);
+                let _ = ask.reply.send(answer);
+            }
+            seen
+        });
+        assert_eq!(submit(serde_json::json!({"root_dir": "", "server_url": "x"})).await.unwrap().0, 400);
         // The server is optional now, but a half-typed one is still a mistake.
         assert_eq!(
-            submit(serde_json::json!({"root_dir": "/v", "server_url": "notaurl"})).await.unwrap(),
+            submit(serde_json::json!({"root_dir": "/v", "server_url": "notaurl"})).await.unwrap().0,
             400
         );
+        let form = serde_json::json!({"root_dir": "/v", "server_url": "https://s.example", "register": true});
+        // A setup that fails says why, and the form can be sent again…
+        let (code, body) = submit(form.clone()).await.unwrap();
+        assert_eq!(code, 422);
+        assert!(body.contains("wrong password"), "{body}");
+        // …until it works.
+        assert_eq!(submit(form).await.unwrap().0, 200);
+        let seen = shell.await.unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].root_dir, "/v");
+        assert!(seen[1].register);
+        // Once set up, there is nothing more to submit.
         assert_eq!(
-            submit(
-                serde_json::json!({"root_dir": "/v", "server_url": "https://s.example", "register": true})
-            )
-            .await
-            .unwrap(),
-            202
-        );
-        let req = rx.await.unwrap();
-        assert_eq!(req.root_dir, "/v");
-        assert!(req.register);
-        assert_eq!(
-            submit(serde_json::json!({"root_dir": "/v", "server_url": "https://s.example"})).await.unwrap(),
+            submit(serde_json::json!({"root_dir": "/v", "server_url": "https://s.example"})).await.unwrap().0,
             409
         );
         task.abort();

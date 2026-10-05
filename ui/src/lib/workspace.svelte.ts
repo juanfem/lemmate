@@ -32,6 +32,7 @@ export class Workspace {
     this.status = this.client.status
     this.client.onStatus = (s) => (this.status = s)
     this.client.onSynced = (docId) => this.sessions.find((s) => s.handlesDoc(docId))?.onSynced(docId)
+    this.client.onAcked = (docId) => this.sessions.find((s) => s.handlesDoc(docId))?.onAcked(docId)
     this.client.onDenied = (docId, reason) => {
       this.denied = { docId, reason }
       this.sessions.find((s) => s.handlesDoc(docId))?.onDenied(docId, reason)
@@ -62,8 +63,12 @@ export class Workspace {
     const wanted = new Set(vaults.map((v) => v.id))
     for (const s of this.sessions) if (!wanted.has(s.id)) s.destroy()
     const kept = this.sessions.filter((s) => wanted.has(s.id))
+    // A role can change between listings (an admin made us an editor); a cached list says nothing.
+    if (live) for (const s of kept) s.role = vaults.find((v) => v.id === s.id)?.role ?? null
     const known = new Set(kept.map((s) => s.id))
-    const added = vaults.filter((v) => !known.has(v.id)).map((v) => new VaultSession(v.id, { client: this.client }))
+    const added = vaults
+      .filter((v) => !known.has(v.id))
+      .map((v) => new VaultSession(v.id, { client: this.client, role: v.role }))
     this.sessions = [...kept, ...added]
     this.persist()
     return vaults
@@ -138,27 +143,36 @@ export class Workspace {
     moves: { id: string; from: string; to: string }[],
     fromVault: string,
     toVault: string,
-  ): Promise<{ moved: { id: string; path: string }[]; failed: { path: string; error: string }[] }> {
+  ): Promise<{
+    moved: { id: string; path: string }[]
+    failed: { path: string; error: string }[]
+    /** Moved, but with something left undone — links that could not be followed. */
+    warnings: string[]
+  }> {
     const src = this.get(fromVault)
     const dst = this.get(toVault)
     const moved: { id: string; path: string }[] = []
     const failed: { path: string; error: string }[] = []
-    if (!src || !dst) return { moved, failed }
+    const warnings: string[] = []
+    if (!src || !dst) return { moved, failed, warnings }
     if (fromVault === toVault) {
       for (const m of moves) {
         try {
-          await src.renameNote(m.id, m.to)
+          const warning = await src.renameNote(m.id, m.to)
+          if (warning) warnings.push(`${m.from}: ${warning}`)
           moved.push({ id: m.id, path: m.to })
         } catch (e) {
           failed.push({ path: m.from, error: String(e) })
         }
       }
-      return { moved, failed }
+      return { moved, failed, warnings }
     }
     // Cross-vault: one pass so names claimed earlier in this batch are seen by later ones.
     const taken = new Set(dst.notes.map((n) => n.path))
     for (const m of moves) {
       try {
+        // Throws unless the text is the server's: the original is deleted below, so a copy made
+        // from an offline or not-yet-loaded doc would lose the note. A failure leaves it alone.
         const body = await src.noteText(m.id)
         const path = uniquePath(m.to, taken)
         taken.add(path)
@@ -167,10 +181,10 @@ export class Workspace {
         src.deleteNote(m.id)
         moved.push({ id, path })
       } catch (e) {
-        failed.push({ path: m.from, error: String(e) })
+        failed.push({ path: m.from, error: e instanceof Error ? e.message : String(e) })
       }
     }
-    return { moved, failed }
+    return { moved, failed, warnings }
   }
 
   /**

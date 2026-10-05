@@ -149,8 +149,11 @@ impl World {
     /// As [`World::sign_in`], with `query` on the start URL.
     async fn sign_in_with(&self, claims: Value, query_string: &str) -> (String, Option<String>) {
         let start = format!("http://{}/api/v1/auth/oidc/start?{query_string}", self.lemmate);
-        let (status, to_provider, _, _) = fetch(start, None).await;
+        let (status, to_provider, state_cookie, _) = fetch(start, None).await;
         assert!((300..400).contains(&status), "{status}");
+        // The browser that started the sign-in carries this back to the callback.
+        let state_cookie = state_cookie.expect("a state cookie").split(';').next().unwrap().to_owned();
+        assert!(state_cookie.starts_with("lemmate_oidc="), "{state_cookie}");
         let q = query(&to_provider);
         assert_eq!(q["client_id"], "lemmate");
         assert_eq!(q["code_challenge_method"], "S256");
@@ -168,10 +171,10 @@ impl World {
         self.provider.lock().unwrap().codes.insert(code.clone(), (claims, q["code_challenge"].clone()));
         let back =
             format!("http://{}/api/v1/auth/oidc/callback?code={code}&state={}", self.lemmate, q["state"]);
-        let (status, location, cookie, _) = fetch(back.clone(), None).await;
+        let (status, location, cookie, _) = fetch(back.clone(), Some(state_cookie.clone())).await;
         assert!((300..400).contains(&status), "{status}");
         // A state works once: replaying the same callback is refused.
-        let (_, replay, replay_cookie, _) = fetch(back, None).await;
+        let (_, replay, replay_cookie, _) = fetch(back, Some(state_cookie)).await;
         assert!(replay.contains("signin_error"), "{replay}");
         assert!(replay_cookie.is_none());
         (location, cookie.map(|c| c.split(';').next().unwrap().to_owned()))
@@ -312,4 +315,32 @@ async fn a_sign_in_returns_to_the_page_it_began_on() {
         url::form_urlencoded::Serializer::new(String::new()).append_pair("next", "//evil.example/").finish();
     let (to, _) = w.sign_in_with(json!({"sub": "a", "email": "a@x.org"}), &q).await;
     assert_eq!(to, "/", "another origin is never followed");
+}
+
+/// Login CSRF: a callback URL made by somebody else's sign-in (theirs, with their code) does not
+/// sign this browser in, because this browser never started that sign-in.
+#[tokio::test]
+async fn a_callback_from_another_browser_is_refused() {
+    let w = world(true, false).await;
+    let start = format!("http://{}/api/v1/auth/oidc/start", w.lemmate);
+    let (_, to_provider, attacker_cookie, _) = fetch(start, None).await;
+    let q = query(&to_provider);
+    let paddr = w.provider.lock().unwrap().addr.unwrap();
+    let claims = json!({
+        "sub": "mallory", "email": "mallory@x.org", "iss": format!("http://{paddr}"), "aud": "lemmate",
+        "exp": lemmate_core::store::now_ms() / 1000 + 300, "nonce": q["nonce"],
+    });
+    w.provider.lock().unwrap().codes.insert("c1".into(), (claims, q["code_challenge"].clone()));
+    let back = format!("http://{}/api/v1/auth/oidc/callback?code=c1&state={}", w.lemmate, q["state"]);
+    // The victim's browser has no state cookie, or one from a sign-in of its own.
+    for cookie in [None, Some("lemmate_oidc=0123".to_owned())] {
+        let (_, to, set, _) = fetch(back.clone(), cookie).await;
+        assert!(to.contains("signin_error"), "{to}");
+        assert!(set.is_none(), "no session");
+    }
+    // The refusal did not use the state up: the browser that started it can still finish.
+    let cookie = attacker_cookie.unwrap().split(';').next().unwrap().to_owned();
+    let (_, to, set, _) = fetch(back, Some(cookie)).await;
+    assert_eq!(to, "/");
+    assert!(set.unwrap().starts_with("lemmate_session="));
 }

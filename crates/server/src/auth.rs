@@ -10,7 +10,9 @@
 //! never carries its user's admin rights, and cannot mint, list or revoke tokens — otherwise a
 //! narrow token would be one request away from a wide one.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -99,7 +101,7 @@ impl AuthUser {
     }
 
     /// A role as this request may use it: a read-only token is a viewer whatever its user is.
-    fn cap(&self, role: Role) -> Role {
+    pub fn cap(&self, role: Role) -> Role {
         if self.token.as_ref().is_some_and(|t| t.read_only) { role.min(Role::Viewer) } else { role }
     }
 }
@@ -143,17 +145,24 @@ pub fn token_from_headers(headers: &HeaderMap) -> Option<String> {
 pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AuthUser> {
     match state.options.auth {
         AuthMode::Disabled => Some(AuthUser::local()),
-        AuthMode::Enabled { .. } => {
-            let token = token_from_headers(headers)?;
-            let hash = token_hash(&token);
-            let mut store = state.store.lock().await;
-            if token.starts_with(TOKEN_PREFIX) {
-                let (user, row) = store.access_token_user(&hash).ok().flatten()?;
-                return Some(AuthUser::from_token(user, row));
-            }
-            store.session_user(&hash).ok().flatten().map(AuthUser::from_row)
-        }
+        AuthMode::Enabled { .. } => authenticate_token(state, &token_from_headers(headers)?).await,
     }
+}
+
+/// Resolve a session or access token as it stands *now*. A WebSocket asks this again whenever
+/// accounts or access change (`AppState::auth_changed`), so a socket does not outlive the
+/// credential it was opened with.
+pub async fn authenticate_token(state: &AppState, token: &str) -> Option<AuthUser> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Some(AuthUser::local());
+    }
+    let hash = token_hash(token);
+    let mut store = state.store.lock().await;
+    if token.starts_with(TOKEN_PREFIX) {
+        let (user, row) = store.access_token_user(&hash).ok().flatten()?;
+        return Some(AuthUser::from_token(user, row));
+    }
+    store.session_user(&hash).ok().flatten().map(AuthUser::from_row)
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
@@ -173,8 +182,8 @@ pub async fn role_or_claim(state: &AppState, user: &AuthUser, vault: VaultId, cl
         return None;
     }
     let mut store = state.store.lock().await;
-    if let Ok(Some(r)) = store.membership(vault, &user.id) {
-        return Some(user.cap(r));
+    if let Some(r) = vault_role(&store, user, vault) {
+        return Some(r);
     }
     // A read-only token creates nothing, and that includes a vault.
     let may_claim = claim && !user.token.as_ref().is_some_and(|t| t.read_only);
@@ -185,8 +194,22 @@ pub async fn role_or_claim(state: &AppState, user: &AuthUser, vault: VaultId, cl
     None
 }
 
+/// A member's role on a vault as this request may use it (token scope and cap applied), from a
+/// store the caller already holds. No claiming: see [`role_or_claim`].
+pub fn vault_role(store: &Store, user: &AuthUser, vault: VaultId) -> Option<Role> {
+    if !user.reaches(vault) {
+        return None;
+    }
+    store.membership(vault, &user.id).ok().flatten().map(|r| user.cap(r))
+}
+
 /// The role a user holds on one note: the vault role, or a direct share (SPEC §11.2 "overrides
 /// upward only"), whichever is higher.
+///
+/// The note must be in `vault`: a note whose row names another vault — trashed or not — gives
+/// no role here, so a handler that loads the note by id after this check cannot be walked into
+/// another vault's note by putting its id under a vault the caller is a member of. A note with
+/// no row yet (its text arrived before its vault entry) is the vault's to decide.
 pub async fn note_role(state: &AppState, user: &AuthUser, vault: VaultId, note: NoteId) -> Option<Role> {
     if matches!(state.options.auth, AuthMode::Disabled) {
         return Some(Role::Owner);
@@ -196,8 +219,14 @@ pub async fn note_role(state: &AppState, user: &AuthUser, vault: VaultId, note: 
         return None;
     }
     let store = state.store.lock().await;
+    let home = store.note_vault_of(note).ok()?;
+    if home.is_some_and(|h| h != vault) {
+        return None;
+    }
     let vault_role = store.membership(vault, &user.id).ok().flatten();
-    let share_role = store.note_share_role(note, &user.id).ok().flatten();
+    // A share reaches the note while it is live; a trashed note is its vault's business.
+    let live = home.is_some() && store.note_by_id(note).ok().flatten().is_some();
+    let share_role = if live { store.note_share_role(note, &user.id).ok().flatten() } else { None };
     let role = match (vault_role, share_role) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -326,6 +355,8 @@ async fn put_share(
             store
                 .share_note_with_user(id, &target.id, role, &user.id)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            // A share can be lowered as well as granted (editor → viewer).
+            state.auth_changed();
             Ok(Json(ShareOut {
                 kind: "user".into(),
                 user_id: Some(target.id),
@@ -373,6 +404,7 @@ async fn delete_share(
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let id: lemmate_core::NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     require(&state, &user, vault, Role::Editor).await?;
+    note_in_vault(&state, vault, id).await?;
     let mut store = state.store.lock().await;
     if let Some(u) = body.user_id {
         store.unshare_note_user(id, &u).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -384,6 +416,8 @@ async fn delete_share(
             }
         }
     }
+    drop(store);
+    state.auth_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -568,6 +602,53 @@ async fn register(
     Ok(session_response(&state, token, AuthUser::from_row(user)))
 }
 
+/// How long failed sign-ins for one address are counted, and how many it takes to be refused
+/// (429) until the window has passed.
+const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+const LOGIN_MAX_FAILURES: u32 = 10;
+/// Addresses tracked at most; past it, the expired entries go (and, failing that, all of them).
+const LOGIN_MAX_TRACKED: usize = 100_000;
+
+/// Failed password sign-ins per address, in memory: enough to make guessing a password over the
+/// network slow, without a table to clean up.
+#[derive(Default)]
+pub struct LoginThrottle(std::sync::Mutex<HashMap<String, (u32, Instant)>>);
+
+impl LoginThrottle {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, (u32, Instant)>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn blocked(&self, email: &str) -> bool {
+        self.map()
+            .get(email)
+            .is_some_and(|(n, since)| since.elapsed() < LOGIN_WINDOW && *n >= LOGIN_MAX_FAILURES)
+    }
+    fn failed(&self, email: &str) {
+        let mut map = self.map();
+        if map.len() >= LOGIN_MAX_TRACKED {
+            map.retain(|_, (_, since)| since.elapsed() < LOGIN_WINDOW);
+            if map.len() >= LOGIN_MAX_TRACKED {
+                map.clear();
+            }
+        }
+        let entry = map.entry(email.to_owned()).or_insert((0, Instant::now()));
+        if entry.1.elapsed() >= LOGIN_WINDOW {
+            *entry = (0, Instant::now());
+        }
+        entry.0 += 1;
+    }
+    fn succeeded(&self, email: &str) {
+        self.map().remove(email);
+    }
+}
+
+/// A hash to verify against when the address has no password, so an unknown address costs the
+/// same Argon2 run as a wrong password and the timing does not say which accounts exist.
+fn dummy_hash() -> &'static str {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| hash_password("not anybody's password").unwrap_or_default())
+}
+
 async fn login(
     State(state): State<Arc<AppState>>,
     Json(c): Json<Credentials>,
@@ -578,16 +659,30 @@ async fn login(
     if !state.options.password_login {
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut store = state.store.lock().await;
-    let user = store.user_by_email(c.email.trim()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let ok = user
-        .as_ref()
-        .and_then(|u| u.password_hash.as_deref())
-        .is_some_and(|h| verify_password(&c.password, h));
-    if !ok {
-        return Err(StatusCode::UNAUTHORIZED);
+    let email = c.email.trim().to_lowercase();
+    if state.login_throttle.blocked(&email) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    let user = user.expect("checked");
+    let user =
+        state.store.lock().await.user_by_email(&email).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Argon2 runs off the async threads and without the store held.
+    let hash = user.as_ref().and_then(|u| u.password_hash.clone());
+    let password = c.password.clone();
+    let ok = tokio::task::spawn_blocking(move || match hash {
+        Some(h) => verify_password(&password, &h),
+        None => {
+            let _ = verify_password(&password, dummy_hash());
+            false
+        }
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some(user) = user.filter(|_| ok) else {
+        state.login_throttle.failed(&email);
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    state.login_throttle.succeeded(&email);
+    let mut store = state.store.lock().await;
     let token = issue_session(&mut store, &user, c.device.as_deref()).await?;
     Ok(session_response(&state, token, AuthUser::from_row(user)))
 }
@@ -606,6 +701,8 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         } else {
             let _ = store.delete_session(&hash);
         }
+        drop(store);
+        state.auth_changed();
     }
     let mut resp = StatusCode::NO_CONTENT.into_response();
     resp.headers_mut().insert(
@@ -765,6 +862,7 @@ async fn revoke_token(
         .await
         .delete_access_token(&user.id, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.auth_changed();
     if gone { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
 }
 
@@ -838,6 +936,8 @@ async fn change_password(
     let sessions_revoked = store
         .delete_sessions_of(&target.id, keep.as_deref())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    drop(store);
+    state.auth_changed();
     Ok(Json(PasswordChanged { sessions_revoked }))
 }
 
@@ -996,7 +1096,13 @@ async fn put_member(
         .user_by_email(&m.email)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // An owner may hand the vault over, but not leave it with nobody to own it.
+    if role < Role::Owner && last_owner(&store, vault, &target.id)? {
+        return Err(StatusCode::CONFLICT);
+    }
     store.set_membership(vault, &target.id, role).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    drop(store);
+    state.auth_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1011,17 +1117,19 @@ async fn delete_member(
         return Err(StatusCode::FORBIDDEN); // members may leave; only owners remove others
     }
     let mut store = state.store.lock().await;
-    if role == Role::Owner && target == user.id {
-        let owners = store
-            .members(vault)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .iter()
-            .filter(|(_, r)| *r == Role::Owner)
-            .count();
-        if owners <= 1 {
-            return Err(StatusCode::CONFLICT); // the last owner cannot leave
-        }
+    if last_owner(&store, vault, &target)? {
+        return Err(StatusCode::CONFLICT); // the last owner cannot leave
     }
     store.remove_membership(vault, &target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    drop(store);
+    state.auth_changed();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether `user` is the only owner `vault` has.
+fn last_owner(store: &Store, vault: VaultId, user: &str) -> Result<bool, StatusCode> {
+    let members = store.members(vault).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let owners: Vec<&str> =
+        members.iter().filter(|(_, r)| *r == Role::Owner).map(|(u, _)| u.id.as_str()).collect();
+    Ok(owners == [user])
 }

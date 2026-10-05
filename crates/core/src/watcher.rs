@@ -3,7 +3,7 @@
 //! detection (content-hash within 2 s) are the caller's job in the sync loop.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -22,8 +22,9 @@ pub struct VaultWatcher {
 }
 
 impl VaultWatcher {
-    /// Start watching `projection.root()` recursively, sending note-file events to `tx`.
-    pub fn start(projection: Projection, tx: Sender<FsEvent>) -> Result<Self> {
+    /// Start watching `projection.root()` recursively, sending note-file events to `tx`. The
+    /// channel is bounded: when the engine falls behind, the watcher's thread waits for it.
+    pub fn start(projection: Projection, tx: SyncSender<FsEvent>) -> Result<Self> {
         let root = projection.root().to_path_buf();
         let mut inner = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
@@ -56,7 +57,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = Projection::new(dir.path());
         std::fs::create_dir_all(p.sidecar_dir()).unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(64);
         let _w = VaultWatcher::start(p.clone(), tx).unwrap();
         std::thread::sleep(Duration::from_millis(200));
 

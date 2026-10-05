@@ -1,0 +1,28 @@
+{
+  "title": "Links with fragments",
+  "front_matter": null,
+  "tags": [
+    "linked",
+    "real",
+    "café"
+  ],
+  "wikilinks": [],
+  "links": [
+    "https://example.com/#anchor",
+    "https://a.example/#section",
+    "http://www.example.org/#frag",
+    "mailto:me@example.com",
+    "mailto:me@example.com",
+    "https://x.example/#hidden"
+  ],
+  "headings": [
+    {
+      "depth": 1,
+      "text": "Links with fragments"
+    }
+  ],
+  "has_math": false,
+  "has_tasks": false,
+  "code_langs": [],
+  "plain_text": ""
+}

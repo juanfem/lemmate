@@ -148,7 +148,11 @@ First run **publishes** the folder as a new vault and prints the id; to
 join an existing vault into an empty folder, pass `--vault-id <ULID>`. Add `--once` to sync and
 exit. Add `--serve 127.0.0.1:8081 --web-dir ui/dist` to also run the local relay, which serves
 the sync socket, the API and the web client on loopback — this is exactly what the desktop app
-embeds.
+embeds. The relay answers only requests that carry its key, which is new at every start: open
+the address it prints (`http://127.0.0.1:8081/?key=…`) and the key moves into a cookie. It also
+refuses any `Host` but loopback and any `Origin` but its own, so neither another local user nor
+a web page can reach your notes through it. A non-loopback `--serve` address is refused unless
+you add `--allow-remote`.
 
 For a private CA, `--ca-cert ca.pem` (or `LEMMATE_CA_CERT`); `--server https://…` implies `wss://`.
 
@@ -860,7 +864,14 @@ the host. This works on the server and on the local relay alike.
 
 `export/defaults.yaml` (passed as `--defaults`) and image resource paths apply only where the
 exporter has the vault folder — the local relay (desktop app, `lemmate serve`); server exports
-render the note text with image links left relative.
+render the note text with image links left relative and embed no images.
+
+Because any collaborator can write it, `export/defaults.yaml` is cut down to options that
+neither run code nor read files: `filters`, `include-*`, `data-dir`, `resource-path`,
+`output-file` and nested `defaults` are dropped (with a log line), and `template` and
+`reference-doc` must stay inside `export/`. Pandoc itself runs with `--sandbox`: a DOCX or PDF
+embeds only images inside the vault — an absolute path, `../`, a hidden folder or a web image
+becomes its alt text — and metadata blocks inside the note are not read.
 
 ### Rendering with Quarto
 
@@ -918,8 +929,7 @@ What goes in:
 - **Wikilinks become their labels.** Another note is not part of the rendered document, so
   `[[Plan|the plan]]` renders as *the plan* (marked `.wikilink` for a stylesheet to find).
 - **Companion files come along too.** Any file the front matter names — `theme: [cosmo,
-  custom.scss]`, `css:`, `include-in-header:`, `filters: [wordcount.lua]`, `reference-doc:`,
-  `bibliography:` — relative to the note, the vault root, or `attachments/`, and whatever a
+  custom.scss]`, `css:`, `reference-doc:`, `bibliography:` — relative to the note, the vault root, or `attachments/`, and whatever a
   stylesheet `@import`s, `@use`s or `@forward`s in turn (`'vars'` finds `_vars.scss`).
 - **The vault's own Quarto settings.** A `_quarto.yml` at the vault root is the base for every
   render, so a theme shared across documents goes there once; `_metadata.yml` files apply to
@@ -946,10 +956,17 @@ the desktop app and `lemmate serve`, and `PATH` otherwise; without one, renderin
 "revealjs"}` is the endpoint behind all of it; a render Quarto rejects answers **422** with its
 message.
 
-**On a shared server**, a note's front matter can name Lua filters and files to include, and
-those run and are read on the server when the note is rendered — by anyone who can edit a note.
-In a container that reaches only the container, but if that is still more than you want, set
-`--disable-quarto` / `LEMMATE_DISABLE_QUARTO=true` and renders answer 501.
+**Nothing in a note runs or reaches out.** A shared vault means anyone who can edit a note
+decides what Quarto is told, on the server and on every collaborator's desktop alike. So every
+YAML block Quarto would read — front matter, later blocks, `_metadata.yml`, `_quarto.yml`, at
+any depth under `format:` — loses the keys that run code or pull in files: `filters`,
+`shortcodes`, `engine`/`jupyter`/`knitr`/`execute`, `include-*`, `template*`,
+`metadata-files`, `resources`, `pdf-engine*`, `pre-render`/`post-render` and the like. The
+`include`, `embed` and `env` shortcodes are shown, not run; paths that leave the project
+(absolute, `~`, `file:`, `../` past the vault) are dropped from metadata, stylesheets and raw
+HTML; Quarto starts with a cleared environment and `_extensions/` is never laid out. On the
+server at most two renders run at once. If you would rather have no renders at all, set
+`--disable-quarto` / `LEMMATE_DISABLE_QUARTO=true` and they answer 501.
 
 Whole-vault export never needs pandoc: `lemmate export zip <vault> <out.zip>` writes the markdown
 and attachments as they are. And because the vault is already a folder of files, `pandoc` or

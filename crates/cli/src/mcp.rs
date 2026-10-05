@@ -65,29 +65,42 @@ fn encode_path(path: &str) -> String {
     out
 }
 
-fn decode_path(path: &str) -> String {
+/// Undo [`encode_path`]. Works on bytes (a `%` may be followed by anything, multibyte characters
+/// included); a `%` without two hex digits stays literal, and a result that is not UTF-8 is `None`.
+fn decode_path(path: &str) -> Option<String> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let bytes = path.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&path[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
         {
-            out.push(b);
+            out.push(hi << 4 | lo);
             i += 3;
         } else {
             out.push(bytes[i]);
             i += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).ok()
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     match args.get(key).and_then(Value::as_str).map(str::trim) {
         Some(s) if !s.is_empty() => Ok(s),
         _ => bail!("missing required argument {key:?}"),
+    }
+}
+
+/// The `content` of a write. It may be empty, but it must be there: a client that forgot it
+/// would otherwise blank the note.
+fn content_arg(args: &Value) -> Result<&str> {
+    match args.get("content") {
+        Some(Value::String(s)) => Ok(s),
+        Some(_) => bail!("argument \"content\" must be a string"),
+        None => bail!("missing required argument \"content\""),
     }
 }
 
@@ -212,10 +225,12 @@ impl<'a> Server<'a> {
                 let found = self.api.resolve_note(v, target)?;
                 Ok(self.api.note(v, &found.id)?.content)
             }
+            // Writes resolve exactly (path or id), never fuzzily: a near miss creates a new note
+            // rather than overwriting a different one.
             "write_note" => {
                 let target = str_arg(args, "path_or_id")?;
-                let content = args.get("content").and_then(Value::as_str).unwrap_or_default();
-                let note = match self.api.lookup_note(v, target)? {
+                let content = content_arg(args)?;
+                let note = match self.api.lookup_exact(v, target)? {
                     Some(found) => self.api.replace(v, &found.id, content)?,
                     None => {
                         if target.parse::<lemmate_core::NoteId>().is_ok() {
@@ -228,8 +243,8 @@ impl<'a> Server<'a> {
             }
             "append_to_note" => {
                 let target = str_arg(args, "path_or_id")?;
-                let addition = args.get("content").and_then(Value::as_str).unwrap_or_default();
-                let note = match self.api.lookup_note(v, target)? {
+                let addition = content_arg(args)?;
+                let note = match self.api.lookup_exact(v, target)? {
                     Some(found) => {
                         let current = self.api.note(v, &found.id)?.content;
                         let mut text = current;
@@ -350,7 +365,8 @@ impl<'a> Server<'a> {
         if vault != self.vault {
             return Err((-32602, format!("uri names vault {vault}, this server serves {}", self.vault)));
         }
-        let path = decode_path(path);
+        let path =
+            decode_path(path).ok_or_else(|| (-32602, format!("uri path is not valid UTF-8: {uri}")))?;
         let found = self.api.resolve_note(&self.vault, &path).map_err(|e| {
             if is_not_found(&e) { (-32002, format!("resource not found: {uri}")) } else { internal(e) }
         })?;
@@ -444,8 +460,9 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "get_daily_note",
-            "Get the daily note for a date (today by default), creating `Daily/<date>.md` if it \
-             does not exist yet. Returns its markdown content.",
+            "Get the daily note for a date (today by default), creating it if it does not exist \
+             yet — in the vault's daily-notes folder, named by its configured date format and \
+             filled from its template if it has one. Returns its markdown content.",
             schema(
                 json!({
                     "date": { "type": "string", "description": "Calendar date as YYYY-MM-DD. Defaults to today.", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
@@ -472,18 +489,26 @@ pub fn tools() -> Vec<Value> {
 pub fn serve_stdio(api: &dyn NotesApi, vault: String) -> Result<()> {
     let server = Server::new(api, vault);
     eprintln!("lemmate mcp: serving vault {} (protocol {DEFAULT_PROTOCOL})", server.vault());
-    let mut stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
-    let mut line = String::new();
+    serve(&server, std::io::stdin().lock(), std::io::stdout().lock())
+}
+
+/// The line loop behind [`serve_stdio`], over any reader and writer. Lines are read as bytes: one
+/// that is not UTF-8 is answered with a parse error, and the session goes on.
+pub fn serve(server: &Server<'_>, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+    let mut line = Vec::new();
     loop {
         line.clear();
-        if stdin.read_line(&mut line)? == 0 {
+        if input.read_until(b'\n', &mut line)? == 0 {
             return Ok(());
         }
-        if let Some(response) = server.handle_line(&line) {
-            serde_json::to_writer(&mut stdout, &response)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+        let response = match std::str::from_utf8(&line) {
+            Ok(text) => server.handle_line(text),
+            Err(e) => Some(error(Value::Null, -32700, format!("parse error: input is not UTF-8: {e}"))),
+        };
+        if let Some(response) = response {
+            serde_json::to_writer(&mut output, &response)?;
+            output.write_all(b"\n")?;
+            output.flush()?;
         }
     }
 }
@@ -762,7 +787,96 @@ mod tests {
     #[test]
     fn note_uris_percent_round_trip() {
         for path in ["a/b.md", "My Notes/über #1.md", "plain.md"] {
-            assert_eq!(decode_path(&encode_path(path)), path);
+            assert_eq!(decode_path(&encode_path(path)).as_deref(), Some(path));
         }
+        // A `%` before a multibyte character, or at the very end, is literal — no panic.
+        assert_eq!(decode_path("a%éb").as_deref(), Some("a%éb"));
+        assert_eq!(decode_path("%€x").as_deref(), Some("%€x"));
+        assert_eq!(decode_path("50%").as_deref(), Some("50%"));
+        assert_eq!(decode_path("%zz").as_deref(), Some("%zz"));
+        // Escapes that decode to invalid UTF-8 are refused rather than mangled.
+        assert_eq!(decode_path("%FF.md"), None);
+        let api = Fake::default();
+        let s = Server::new(&api, "V");
+        let r = ask(
+            &s,
+            json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"note://V/%C3"}}),
+        );
+        assert_eq!(r["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn writes_without_content_are_tool_errors() {
+        let api = Fake::with(&[("N0", "plan.md", "keep me\n")]);
+        let s = Server::new(&api, "V");
+        for tool in ["write_note", "append_to_note"] {
+            let r = ask(
+                &s,
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                       "params":{"name":tool,"arguments":{"path_or_id":"plan"}}}),
+            );
+            assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+            assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("content"), "{r}");
+        }
+        assert_eq!(api.notes.borrow()[0].content, "keep me\n");
+        // An explicit empty string is a deliberate blank, and allowed.
+        let r = ask(
+            &s,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                   "params":{"name":"write_note","arguments":{"path_or_id":"plan","content":""}}}),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        assert_eq!(api.notes.borrow()[0].content, "");
+    }
+
+    #[test]
+    fn writes_resolve_exactly_and_reads_refuse_to_guess() {
+        let api = Fake::with(&[
+            ("N0", "Projects/plan.md", "projects plan\n"),
+            ("N1", "TODO.md", "upper\n"),
+            ("N2", "A/notes.md", "a\n"),
+            ("N3", "B/notes.md", "b\n"),
+        ]);
+        let s = Server::new(&api, "V");
+        let call = |name: &str, args: Value| {
+            ask(
+                &s,
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}),
+            )
+        };
+        // A bare name and a different case create new notes instead of overwriting.
+        let r = call("write_note", json!({ "path_or_id": "plan", "content": "root plan\n" }));
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let r = call("append_to_note", json!({ "path_or_id": "todo.md", "content": "lower" }));
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let notes = api.notes.borrow().clone();
+        assert_eq!(notes[0].content, "projects plan\n", "Projects/plan.md untouched");
+        assert_eq!(notes[1].content, "upper\n", "TODO.md untouched");
+        assert!(notes.iter().any(|n| n.path == "plan.md" && n.content == "root plan\n"));
+        assert!(notes.iter().any(|n| n.path == "todo.md" && n.content == "lower"));
+
+        // Reads still take the quick switcher's shortcuts…
+        let r = call("read_note", json!({ "path_or_id": "Projects/PLAN" }));
+        assert_eq!(r["result"]["content"][0]["text"], "projects plan\n", "{r}");
+        // …but an ambiguous one names the candidates.
+        let r = call("read_note", json!({ "path_or_id": "notes" }));
+        assert_eq!(r["result"]["isError"], true);
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("A/notes.md") && text.contains("B/notes.md"), "{text}");
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_does_not_end_the_session() {
+        let api = Fake::default();
+        let s = Server::new(&api, "V");
+        let input: &[u8] = b"\xff\xfe junk\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n";
+        let mut out = Vec::new();
+        serve(&s, input, &mut out).unwrap();
+        let lines: Vec<Value> =
+            String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0]["error"]["code"], -32700);
+        assert_eq!(lines[1]["id"], 7);
+        assert_eq!(lines[1]["result"], json!({}));
     }
 }

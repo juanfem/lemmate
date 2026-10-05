@@ -26,9 +26,9 @@ use crate::frontmatter;
 use crate::ids::{DocId, NoteId, VaultId};
 use crate::import::{Upload, UploadReport};
 pub use crate::local::LocalOptions;
-use crate::local::{LocalEvent, LocalQuery, LocalReply, Routes, err_reply};
+use crate::local::{LocalEvent, LocalQuery, LocalReply, Outbox, Routes, err_reply, outbox};
 use crate::markdown::{self, NoteIndex};
-use crate::projection::{Projection, ingest_external_edit};
+use crate::projection::{Projection, check_path, ingest_external_edit};
 use crate::store::{NoteRow, RetentionPolicy, Store, now_ms};
 use crate::sync::{Frame, Message, SyncMessage};
 use crate::vault_doc::VaultDoc;
@@ -45,6 +45,15 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const UPLOAD_RETRY: Duration = Duration::from_secs(5);
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// A connection must have lasted this long before the reconnect delay starts over: a server
+/// that accepts the upgrade and drops it at once would otherwise be hammered every second.
+const RECONNECT_HEALTHY: Duration = Duration::from_secs(10);
+/// How much may wait to be written to the server before the connection is dropped and the
+/// reconnect handshake catches it up instead (see `local::Outbox`).
+const SERVER_QUEUE_BYTES: usize = 64 << 20;
+/// Filesystem events waiting for the engine. When the engine is busy the watcher thread waits,
+/// rather than the queue growing.
+const FS_QUEUE: usize = 16 * 1024;
 /// Sidecar marker: attachments were recorded while standalone, so their bytes have never been
 /// offered to a server. Set when [`Engine::flush_uploads`] records one, cleared once a
 /// connected run has uploaded them all (SPEC §3.2, "a server is optional").
@@ -87,6 +96,9 @@ pub async fn run(opts: SyncOptions) -> Result<SyncReport> {
 /// the tasks to await or abort.
 pub struct LocalHandle {
     pub addr: SocketAddr,
+    /// The relay's key for this launch: every request needs it (`local::Guard`). Hand it to a
+    /// page as [`LocalHandle::page_url`] does, or to a program as `Authorization: Bearer`.
+    pub key: String,
     /// The first vault opened — the only one for a single-vault relay, and what a caller that
     /// wants to open the UI on one vault should use.
     pub vault_id: VaultId,
@@ -106,6 +118,12 @@ pub struct LocalHandle {
 }
 
 impl LocalHandle {
+    /// The address to open the UI at: `/` with the key, which the relay trades for a cookie and
+    /// drops from the address. `fragment` is the client-side route, `""` or like `#/v/…`.
+    pub fn page_url(&self, fragment: &str) -> String {
+        format!("http://{}/?key={}{fragment}", self.addr, self.key)
+    }
+
     /// Run until the relay's listener stops — which is never, short of a bind error, so this is
     /// how a shell says "serve until I am killed".
     ///
@@ -200,6 +218,7 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
     };
     Ok(LocalHandle {
         addr: served.addr,
+        key: served.key,
         vault_id: vaults[0],
         vaults,
         connect: served.connect,
@@ -269,12 +288,12 @@ async fn run_inner(
     engine.adopt_imports()?;
     engine.maintain_all()?;
 
-    let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<FsEvent>();
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<FsEvent>();
+    let (fs_tx, mut fs_rx) = mpsc::channel::<FsEvent>(FS_QUEUE);
+    let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<FsEvent>(FS_QUEUE);
     let _watcher = VaultWatcher::start(engine.proj.clone(), std_tx)?;
     std::thread::spawn(move || {
         while let Ok(ev) = std_rx.recv() {
-            if fs_tx.send(ev).is_err() {
+            if fs_tx.blocking_send(ev).is_err() {
                 break;
             }
         }
@@ -286,9 +305,10 @@ async fn run_inner(
     let ws_url = ws_url(&server_url)?;
     let ca = opts.ca_cert.as_deref();
     let tls = if ws_url.starts_with("wss://") { Some(crate::tls::client_config(ca)?) } else { None };
-    let agent = crate::tls::http_agent(ca)?;
-    // Kept for the retirement path below; the transfer worker takes the original.
-    let retire_agent = agent.clone();
+    // Attachment bodies (up to 100 MiB) get the long transfer timeout; the retirement path below
+    // is one small API call and gets the short one.
+    let agent = crate::tls::transfer_agent(ca)?;
+    let retire_agent = crate::tls::http_agent(ca)?;
     let (job_tx, job_rx) = mpsc::unbounded_channel::<TransferJob>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TransferDone>();
     tokio::spawn(transfer_worker(
@@ -309,9 +329,10 @@ async fn run_inner(
         match connect_async_tls_with_config(request, None, false, connector).await {
             Ok((ws, _)) => {
                 info!(url = %ws_url, "connected");
-                backoff = RECONNECT_MIN;
+                let connected_at = Instant::now();
                 let (mut sink, mut stream) = ws.split();
-                let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let (out_tx, mut out_rx) = outbox(SERVER_QUEUE_BYTES);
+                let overflow = out_tx.clone();
                 let writer = tokio::spawn(async move {
                     while let Some(bytes) = out_rx.recv().await {
                         if sink.send(WsMsg::Binary(bytes.into())).await.is_err() {
@@ -330,8 +351,12 @@ async fn run_inner(
                             Some(Ok(WsMsg::Close(_))) | None | Some(Err(_)) => break false,
                             Some(Ok(_)) => {}
                         },
+                        _ = overflow.overflowed() => {
+                            warn!("the server is not keeping up; reconnecting to catch it up");
+                            break false;
+                        }
                         ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
-                        done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
+                        done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done) },
                         ev = local_rx.recv(), if local_alive => match ev {
                             Some(ev) => {
                                 engine.on_local_event(ev);
@@ -361,7 +386,7 @@ async fn run_inner(
                             None => local_alive = false,
                         },
                         _ = ticker.tick() => {
-                            engine.tick()?;
+                            engine.tick();
                             if let Some(msg) = engine.fatal.take() {
                                 return Err(Error::Sync(msg));
                             }
@@ -381,6 +406,7 @@ async fn run_inner(
                 if finished {
                     return Ok(engine.report());
                 }
+                backoff = retry_delay(backoff, connected_at.elapsed());
                 if opts.once {
                     return Err(Error::Sync("connection lost before sync completed".into()));
                 }
@@ -398,7 +424,7 @@ async fn run_inner(
         while Instant::now() < deadline {
             tokio::select! {
                 ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
-                done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done)? },
+                done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done) },
                 ev = local_rx.recv(), if local_alive => match ev {
                     Some(ev) => {
                         engine.on_local_event(ev);
@@ -408,7 +434,7 @@ async fn run_inner(
                     }
                     None => local_alive = false,
                 },
-                _ = tokio::time::sleep(TICK) => engine.tick()?,
+                _ = tokio::time::sleep(TICK) => engine.tick(),
             }
         }
         backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -426,7 +452,7 @@ async fn run_standalone(
     mut engine: Engine,
     opts: &SyncOptions,
     mut local_rx: mpsc::UnboundedReceiver<LocalEvent>,
-    mut fs_rx: mpsc::UnboundedReceiver<FsEvent>,
+    mut fs_rx: mpsc::Receiver<FsEvent>,
 ) -> Result<SyncReport> {
     info!(vault = %engine.vault_id, "standalone: no server configured");
     let mut local_alive = true;
@@ -448,7 +474,7 @@ async fn run_standalone(
                 None => local_alive = false,
             },
             _ = ticker.tick() => {
-                engine.tick()?;
+                engine.tick();
                 if let Some(msg) = engine.fatal.take() {
                     return Err(Error::Sync(msg));
                 }
@@ -465,6 +491,13 @@ async fn run_standalone(
             }
         }
     }
+}
+
+/// The delay before reconnecting after a connection that lasted `lasted`. Only one that held up
+/// starts the delay over; one dropped straight after the upgrade is a server in trouble, and
+/// backs off like a refused connection does.
+fn retry_delay(backoff: Duration, lasted: Duration) -> Duration {
+    if lasted >= RECONNECT_HEALTHY { RECONNECT_MIN } else { backoff }
 }
 
 /// Delete a vault on the server, which is how a merged-away vault stops existing for every
@@ -603,7 +636,8 @@ fn run_transfer(
     let bearer = token.map(|t| format!("Bearer {t}"));
     match job {
         TransferJob::Upload { path } => {
-            let bytes = match std::fs::read(root.join(&path)) {
+            let read = Projection::new(root).read_bytes(&path);
+            let bytes = match read {
                 Ok(b) => b,
                 Err(e) => return TransferDone::Failed { path, upload: true, error: e.to_string() },
             };
@@ -649,6 +683,12 @@ fn run_transfer(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsgKind {
+    Step2,
+    Other,
+}
+
 /// Where a frame came from: the real server, or a local UI connected to the relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -657,7 +697,7 @@ enum Origin {
 }
 
 struct Peer {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: Outbox,
     subs: HashSet<String>,
 }
 
@@ -693,7 +733,7 @@ pub struct Engine {
     pending_fs: HashMap<String, Instant>,
     pending_removals: Vec<PendingRemoval>,
     handshakes: HashMap<String, Handshake>,
-    out: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    out: Option<Outbox>,
     policy: RetentionPolicy,
     last_maintenance: Instant,
     once: bool,
@@ -739,6 +779,18 @@ pub struct Engine {
     routes: Option<Arc<Routes>>,
     /// Set whenever the set of notes this engine holds changes, so `sync_routes` republishes it.
     routes_dirty: bool,
+    /// Notes taken in from a file that names an id this replica has no history for, while the
+    /// server may well have one (a folder re-joined with a fresh sidecar). Their doc waits for
+    /// the server's state before the file is applied to it as an *edit* — inserting it into an
+    /// empty doc would merge with the server's copy into the text twice. Never projected while
+    /// waiting: the file is the truth until then.
+    awaiting: HashSet<NoteId>,
+    /// The vault's folder ignores case (macOS and Windows by default): `a.md` and `A.md` are
+    /// one file, so two notes so named are a path clash.
+    case_insensitive: bool,
+    /// Notes whose vault path cannot be written on this disk (`projection::check_path`), with
+    /// that path — reported once, not on every reconcile.
+    unplaced: HashMap<NoteId, String>,
 }
 
 impl Engine {
@@ -761,11 +813,20 @@ impl Engine {
 
         let mut notes = HashMap::new();
         let mut by_path = HashMap::new();
+        let mut awaiting = HashSet::new();
         for row in store.list_notes(vault_id)? {
             let doc = store.load_doc(DocId::Note(row.id))?;
+            // Taken in from a file and still waiting for the server when we last stopped: no
+            // history yet, but a projected text — which is the file, not an empty note.
+            if doc.state_vector() == yrs::StateVector::default()
+                && store.projected_text(DocId::Note(row.id))?.is_some_and(|(_, t)| !t.is_empty())
+            {
+                awaiting.insert(row.id);
+            }
             by_path.insert(row.path.clone(), row.id);
             notes.insert(row.id, NoteState { doc, path: row.path });
         }
+        let case_insensitive = folder_ignores_case(&proj.sidecar_dir());
         info!(%vault_id, notes = notes.len(), dir = %proj.root().display(), "vault opened");
         Ok(Self {
             store,
@@ -801,6 +862,9 @@ impl Engine {
             pending_docs: HashMap::new(),
             routes: None,
             routes_dirty: true,
+            awaiting,
+            case_insensitive,
+            unplaced: HashMap::new(),
         })
     }
 
@@ -810,6 +874,7 @@ impl Engine {
 
     fn is_idle(&self) -> bool {
         (self.standalone || self.out.is_some())
+            && self.awaiting.is_empty()
             && self.handshakes.values().all(|h| *h == Handshake::Done)
             && self.dirty.is_empty()
             && self.pending_fs.is_empty()
@@ -891,14 +956,26 @@ impl Engine {
                 }
             }
         }
+        // One file that cannot be read — or named, on this disk — is that file's problem, not
+        // the vault's: it is reported, and every other one is taken in.
         for path in on_disk {
-            self.process_path(&path)?;
+            if let Err(e) = self.process_path(&path) {
+                warn!(%path, %e, "skipping a note file");
+            }
         }
         self.finalize_removals(true)?;
+        // With no server there is nothing to wait for (see `awaiting`).
+        if self.standalone {
+            for id in self.awaiting.clone() {
+                self.finish_adoption(id)?;
+            }
+        }
         // Notes that predate `id:` in front matter gain one on first sync.
         let ids: Vec<NoteId> = self.notes.keys().copied().collect();
         for id in ids {
-            self.normalize_note(id)?;
+            if let Err(e) = self.normalize_note(id) {
+                warn!(%id, %e, "adding the id to a note");
+            }
         }
         self.known_kept = self.kept_now();
         // Files may have arrived while we were not running — an image a note already linked to,
@@ -927,7 +1004,7 @@ impl Engine {
         let abs = match ev {
             FsEvent::Created(p) | FsEvent::Modified(p) | FsEvent::Removed(p) => p,
         };
-        if let Ok(rel) = abs.strip_prefix(self.proj.root()) {
+        if let Some(rel) = self.proj.relative(&abs) {
             let rel = rel.to_string_lossy().replace('\\', "/");
             if Projection::is_note_path(&abs) {
                 self.pending_fs.insert(rel, Instant::now());
@@ -984,23 +1061,72 @@ impl Engine {
             text = fixed;
             self.proj.write(rel, &text)?;
         }
-        let doc = NoteDoc::new();
-        let update = doc.set_text(&text);
-        self.store.append_update(DocId::Note(id), &update, None)?;
+        // An adopted id may already have a history. Here: a note that was trashed, or one a
+        // merge carried across (`LocalQuery::AdoptState`). Then the file is an *edit* of that
+        // note, made by diffing — inserting the text into a fresh doc would, once the histories
+        // meet, put it in twice. Unknown here but possibly known to the server (a folder joined
+        // with a fresh sidecar): wait for the server's copy (`awaiting`) and diff against that.
+        let adopted = fm_id == Some(id);
+        let pending = self.pending_docs.remove(&id);
+        let doc = match pending {
+            Some(doc) => doc,
+            None if adopted => self.store.load_doc(DocId::Note(id))?,
+            None => NoteDoc::new(),
+        };
+        let await_server = adopted && !self.standalone && doc.state_vector() == yrs::StateVector::default();
+        let update = if await_server { Vec::new() } else { doc.set_text(&text) };
+        if !update.is_empty() {
+            self.store.append_update(DocId::Note(id), &update, None)?;
+        }
         self.store.set_projected_text(DocId::Note(id), rel, &text)?;
         self.by_path.insert(rel.to_owned(), id);
         self.notes.insert(id, NoteState { doc, path: rel.to_owned() });
         self.routes_dirty = true;
+        if await_server {
+            self.awaiting.insert(id);
+        }
         self.index(id, rel, &text)?;
         let vu = self.vault.set_path(id, rel);
         self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
         self.handshake(DocId::Note(id));
         self.send_update(DocId::Note(id), update);
-        info!(path = %rel, %id, "new note");
+        if await_server {
+            info!(path = %rel, %id, "note taken in from disk; waiting for the server's copy of it");
+        } else {
+            info!(path = %rel, %id, "new note");
+        }
+        Ok(())
+    }
+
+    /// The server has answered for a note in `awaiting`: its doc now holds whatever history the
+    /// server had (possibly none), and the file is applied to that as an edit.
+    fn finish_adoption(&mut self, id: NoteId) -> Result<()> {
+        if !self.awaiting.remove(&id) {
+            return Ok(());
+        }
+        let Some(state) = self.notes.get(&id) else { return Ok(()) };
+        let path = state.path.clone();
+        let Ok(on_disk) = self.proj.read(&path) else {
+            // The file went meanwhile; the server's copy is all there is.
+            self.dirty.insert(id, Instant::now());
+            return Ok(());
+        };
+        let update = state.doc.set_text(&on_disk);
+        if !update.is_empty() {
+            self.store.append_update(DocId::Note(id), &update, None)?;
+            self.send_update(DocId::Note(id), update);
+        }
+        self.store.set_projected_text(DocId::Note(id), &path, &on_disk)?;
+        self.index(id, &path, &on_disk)?;
+        debug!(path = %path, "note taken in from disk, against the server's copy");
+        self.normalize_note(id)?;
         Ok(())
     }
 
     fn local_edit(&mut self, id: NoteId, rel: &str) -> Result<()> {
+        if self.awaiting.contains(&id) {
+            return Ok(()); // the file is read when the server answers
+        }
         let on_disk = self.proj.read(rel)?;
         let last = self.store.projected_text(DocId::Note(id))?.map(|(_, t)| t).unwrap_or_default();
         if on_disk == last {
@@ -1062,11 +1188,13 @@ impl Engine {
             due
         };
         for r in due {
-            if self.proj.resolve(&r.path)?.is_file() {
+            if self.proj.resolve(&r.path).is_ok_and(|p| p.is_file()) {
                 continue; // reappeared (editor swap-file dance); a later event handles it
             }
             info!(path = %r.path, id = %r.id, "note removed locally → trash");
-            self.forget(r.id, &r.path)?;
+            if let Err(e) = self.forget(r.id, &r.path) {
+                warn!(path = %r.path, %e, "trashing a removed note");
+            }
             let vu = self.vault.remove(r.id);
             self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
         }
@@ -1121,8 +1249,29 @@ impl Engine {
         self.rewrite_links(&old, new_rel)
     }
 
+    /// Take in a save to a note's file that the watcher has not delivered yet — the file differs
+    /// from what this replica last wrote or read there. Called before anything overwrites,
+    /// moves or deletes the file, which would otherwise lose that save.
+    fn ingest_unsaved(&mut self, id: NoteId) {
+        let Some(path) = self.notes.get(&id).map(|s| s.path.clone()) else { return };
+        let differs = match (self.store.projected_text(DocId::Note(id)), self.proj.read(&path)) {
+            (Ok(Some((p, last))), Ok(on_disk)) => p == path && on_disk != last,
+            _ => false,
+        };
+        if differs {
+            self.pending_fs.remove(&path);
+            if let Err(e) = self.local_edit(id, &path) {
+                warn!(%path, %e, "taking in a save before writing over it");
+            }
+        }
+    }
+
     /// Write a note's current text to disk (remote change or post-merge write-back).
     fn project(&mut self, id: NoteId) -> Result<()> {
+        if self.awaiting.contains(&id) {
+            return Ok(());
+        }
+        self.ingest_unsaved(id);
         let Some(state) = self.notes.get(&id) else { return Ok(()) };
         let (path, text) = (state.path.clone(), state.doc.text());
         let unchanged =
@@ -1158,12 +1307,15 @@ impl Engine {
         }))
     }
 
+    /// A note path from the API, or `None` if no replica could write it (`check_path`). Only a
+    /// `..` *segment* climbs: `v1..2.md` is an ordinary name.
     fn api_path(path: &str) -> Option<String> {
         let p = path.trim().trim_start_matches('/');
-        if p.is_empty() || p.contains("..") || p.contains('\\') {
+        if p.is_empty() {
             return None;
         }
-        Some(if p.ends_with(".md") || p.ends_with(".qmd") { p.to_owned() } else { format!("{p}.md") })
+        let p = if p.ends_with(".md") || p.ends_with(".qmd") { p.to_owned() } else { format!("{p}.md") };
+        check_path(&p).is_ok().then_some(p)
     }
 
     fn api_create(&mut self, path: &str, content: &str) -> Result<LocalReply> {
@@ -1186,7 +1338,12 @@ impl Engine {
     fn api_import(&mut self, files: Vec<(String, Vec<u8>)>) -> Result<UploadReport> {
         let mut report = UploadReport::default();
         for (rel, bytes) in files {
-            let Some(upload) = crate::import::import_upload(&rel, bytes) else { continue };
+            let Some(upload) = crate::import::import_upload(&rel, bytes) else {
+                if crate::import::upload_rejected(&rel) {
+                    report.skipped += 1;
+                }
+                continue;
+            };
             match upload {
                 Upload::Note { path, text, callouts, embeds } => match self.api_create(&path, &text)? {
                     LocalReply::Conflict(_) => report.skipped += 1,
@@ -1197,7 +1354,11 @@ impl Engine {
                     }
                 },
                 Upload::Attachment { path, bytes } => {
-                    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES || self.proj.resolve(&path)?.exists() {
+                    // A name no replica could hold (`check_path`) is skipped, not the whole batch.
+                    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES
+                        || self.proj.resolve(&path).is_ok_and(|p| p.exists())
+                        || check_path(&path).is_err()
+                    {
                         report.skipped += 1;
                         continue;
                     }
@@ -1288,7 +1449,7 @@ impl Engine {
     /// attachment is only written: it becomes an attachment of this vault when a note that
     /// references it is indexed, which is exactly what happens a moment later.
     fn merge_write(&mut self, path: &str, bytes: &[u8]) -> Result<LocalReply> {
-        if path.trim().is_empty() || path.contains("..") || path.contains('\\') {
+        if check_path(path).is_err() {
             return Ok(LocalReply::Conflict(format!("bad path {path}")));
         }
         if self.by_path.contains_key(path) {
@@ -1307,22 +1468,34 @@ impl Engine {
     /// else the folder happens to hold is somebody's, not ours, so it stays — and is reported,
     /// along with whether the folder went with it.
     fn retire(&mut self) -> Result<LocalReply> {
+        // Everything that can fail comes first, while nothing is gone yet. The same attachment
+        // list the survey used, so one recorded a moment ago is not left behind.
+        let attachments = self.merge_attachments()?;
         let paths: Vec<String> = self.notes.values().map(|s| s.path.clone()).collect();
+        // The sidecar is what makes the folder a vault (SPEC §6.2): with it gone, nothing on
+        // the next launch will open this directory as one. Its database is closed first —
+        // Windows will not move or delete a file that is open — and the folder is renamed out
+        // of the way in one step, so a failure leaves the vault exactly as it was.
+        let sidecar = self.proj.sidecar_dir();
+        if sidecar.is_dir() {
+            let db = sidecar.join("local.db");
+            self.store = Store::open_in_memory()?;
+            let tomb = self.proj.root().join(format!(".lemmate-retired-{}", self.vault_id));
+            if let Err(e) = std::fs::rename(&sidecar, &tomb) {
+                self.store = Store::open(&db)?;
+                return Err(e.into());
+            }
+            if let Err(e) = std::fs::remove_dir_all(&tomb) {
+                warn!(path = %tomb.display(), %e, "could not remove a retired vault's sidecar");
+            }
+        }
         for path in paths {
             if let Err(e) = self.proj.remove(&path) {
                 warn!(%path, %e, "removing a merged note");
             }
         }
-        // The same list the survey used, so an attachment recorded a moment ago is not left
-        // behind by the vault that no longer exists.
-        for (path, _) in self.merge_attachments()? {
+        for (path, _) in attachments {
             let _ = self.proj.remove(&path);
-        }
-        // The sidecar is what makes the folder a vault (SPEC §6.2): with it gone, nothing on
-        // the next launch will open this directory as one.
-        let sidecar = self.proj.sidecar_dir();
-        if sidecar.is_dir() {
-            std::fs::remove_dir_all(&sidecar)?;
         }
         self.retiring = true;
         let left = self.proj.walk_files().unwrap_or_default();
@@ -1536,6 +1709,11 @@ impl Engine {
         Ok(LocalReply::FileMoved { path: to.to_owned(), rewritten })
     }
 
+    /// Whether a vault-doc attachment entry names a place an attachment may be written.
+    fn attachment_path_ok(rel: &str) -> bool {
+        check_path(rel).is_ok() && !Projection::is_note_path(Path::new(rel))
+    }
+
     fn is_attachment_file(&self, rel: &str) -> Result<bool> {
         let Ok(abs) = self.proj.resolve(rel) else { return Ok(false) };
         Ok(abs.is_file() && !Projection::is_note_path(&abs) && !self.proj.is_ignored(&abs))
@@ -1618,7 +1796,8 @@ impl Engine {
             if self.too_large.get(&path) == Some(&hash) {
                 continue;
             }
-            let size = self.proj.resolve(&path)?.metadata().map(|m| m.len()).unwrap_or(0);
+            let Ok(abs) = self.proj.resolve(&path) else { continue };
+            let size = abs.metadata().map(|m| m.len()).unwrap_or(0);
             if size > MAX_ATTACHMENT_BYTES {
                 warn!(
                     path = %path,
@@ -1647,7 +1826,13 @@ impl Engine {
             if self.in_flight.contains(&path) || self.pending_uploads.contains_key(&path) {
                 continue;
             }
-            if self.local_hash(&path)?.as_deref() == Some(hash.as_str()) {
+            // An entry is another replica's word for where a file goes. Somewhere no replica
+            // may write (`check_path`), or over a note, it does not go.
+            if !Self::attachment_path_ok(&path) {
+                debug!(path = %path, "not fetching an attachment to a path that cannot hold one");
+                continue;
+            }
+            if self.local_hash(&path).ok().flatten().as_deref() == Some(hash.as_str()) {
                 continue;
             }
             if let Some(tx) = &self.transfers {
@@ -1739,7 +1924,14 @@ impl Engine {
         }
     }
 
-    fn on_transfer_done(&mut self, done: TransferDone) -> Result<()> {
+    /// One failure here is one attachment's: reported, and the engine carries on.
+    fn on_transfer_done(&mut self, done: TransferDone) {
+        if let Err(e) = self.try_transfer_done(done) {
+            warn!(%e, "finishing an attachment transfer");
+        }
+    }
+
+    fn try_transfer_done(&mut self, done: TransferDone) -> Result<()> {
         match done {
             TransferDone::Uploaded { path, hash } => {
                 self.in_flight.remove(&path);
@@ -1758,6 +1950,9 @@ impl Engine {
             }
             TransferDone::Downloaded { path, hash, bytes } => {
                 self.in_flight.remove(&path);
+                if !Self::attachment_path_ok(&path) {
+                    return Err(Error::PathEscape(path));
+                }
                 self.proj.write_bytes(&path, &bytes)?;
                 self.local_hashes.insert(path.clone(), hash);
                 info!(path = %path, size = bytes.len(), "attachment downloaded");
@@ -1791,82 +1986,243 @@ impl Engine {
 
     /// Make the local note set match the vault doc: adopt new notes, move renamed files,
     /// remove deleted ones, and resolve two notes claiming one path (SPEC §4.3).
+    ///
+    /// Done in an order that cannot trip over itself. Whatever is on disk and not yet taken in
+    /// is taken in first, so nothing below overwrites or deletes a save. Then every removal and
+    /// every move gives up its old path — in the store and on disk — before any note takes a
+    /// new one, so a swap, or a note moving onto a path another has just left, or a remote
+    /// note landing where a local one was renamed away from, all simply work. A failure is one
+    /// note's: it is logged and the rest goes ahead, with memory and store kept in step.
     fn reconcile_vault(&mut self) -> Result<()> {
-        let entries = self.vault.entries();
+        self.take_in_occupants();
+        self.resolve_collisions()?;
+        let wanted: HashMap<NoteId, String> = self.vault.entries().into_iter().collect();
 
-        // Path collisions: the lowest id keeps the path; others get a numbered suffix. Every
-        // replica applies the same deterministic rule, so they converge without coordination.
-        let mut seen: HashMap<String, NoteId> = HashMap::new();
-        for (id, path) in &entries {
-            if let Some(&winner) = seen.get(path)
-                && winner != *id
-            {
-                let mut n = 2;
-                let mut candidate = suffixed(path, n);
-                while seen.contains_key(&candidate) || self.by_path.get(&candidate).is_some_and(|x| x != id) {
-                    n += 1;
-                    candidate = suffixed(path, n);
-                }
-                warn!(path = %path, %id, renamed_to = %candidate, "path collision resolved");
-                let vu = self.vault.set_path(*id, &candidate);
-                self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
-                seen.insert(candidate, *id);
-                continue;
-            }
-            seen.insert(path.clone(), *id);
-        }
-        let entries = self.vault.entries();
-
-        let remote_ids: HashSet<NoteId> = entries.iter().map(|(id, _)| *id).collect();
-        for (id, path) in entries {
-            match self.notes.get(&id) {
-                None => {
-                    let doc = match self.pending_docs.remove(&id) {
-                        Some(doc) => doc,
-                        None => self.store.load_doc(DocId::Note(id))?,
-                    };
-                    self.store.upsert_note(id, self.vault_id, &path, file_stem(&path).as_deref())?;
-                    self.by_path.insert(path.clone(), id);
-                    self.notes.insert(id, NoteState { doc, path: path.clone() });
-                    self.dirty.insert(id, Instant::now());
-                    self.routes_dirty = true;
-                    self.handshake(DocId::Note(id));
-                    info!(path = %path, %id, "adopted note from vault");
-                }
-                Some(state) if state.path != path => {
-                    let old = state.path.clone();
-                    let old_abs = self.proj.resolve(&old)?;
-                    let new_abs = self.proj.resolve(&path)?;
-                    if old_abs.is_file() {
-                        if let Some(parent) = new_abs.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::rename(&old_abs, &new_abs)?;
+        let mut gone: Vec<NoteId> = Vec::new();
+        let mut moves: Vec<(NoteId, String, String)> = Vec::new();
+        let mut unplaceable: Vec<(NoteId, String)> = Vec::new();
+        for (id, state) in &self.notes {
+            match wanted.get(id) {
+                None => gone.push(*id),
+                Some(to) if *to != state.path => {
+                    if check_path(to).is_ok() {
+                        moves.push((*id, state.path.clone(), to.clone()));
+                    } else {
+                        unplaceable.push((*id, to.clone()));
                     }
-                    self.by_path.remove(&old);
-                    self.by_path.insert(path.clone(), id);
-                    self.notes.get_mut(&id).unwrap().path = path.clone();
-                    let text = self.notes[&id].doc.text();
-                    self.store.set_projected_text(DocId::Note(id), &path, &text)?;
-                    self.index(id, &path, &text)?;
-                    self.dirty.insert(id, Instant::now());
-                    info!(from = %old, to = %path, "moved by remote");
-                    self.rewrite_links(&old, &path)?;
                 }
                 Some(_) => {}
             }
         }
-        // Entries only leave the vault doc through an explicit remove (local creates merge into
-        // whatever the server sends), so anything we hold that is absent has been deleted.
-        let gone: Vec<NoteId> = self.notes.keys().filter(|id| !remote_ids.contains(id)).copied().collect();
+        let mut new: Vec<(NoteId, String)> = Vec::new();
+        for (id, path) in &wanted {
+            if self.notes.contains_key(id) {
+                continue;
+            }
+            if check_path(path).is_ok() {
+                new.push((*id, path.clone()));
+            } else {
+                unplaceable.push((*id, path.clone()));
+            }
+        }
+        for (id, path) in unplaceable {
+            if self.unplaced.get(&id) != Some(&path) {
+                warn!(%id, %path, "this note's path cannot be a file on any replica; it stays in the vault without one here");
+                self.unplaced.insert(id, path);
+            }
+        }
+        // A target still held by a note that is not leaving it — one whose own new path cannot
+        // be written here — is not free. The note waits; nothing is overwritten.
+        let leaving: HashSet<String> = gone
+            .iter()
+            .filter_map(|id| self.notes.get(id).map(|s| self.path_key(&s.path)))
+            .chain(moves.iter().map(|(_, from, _)| self.path_key(from)))
+            .collect();
+        let held: HashMap<String, NoteId> =
+            self.by_path.iter().map(|(p, id)| (self.path_key(p), *id)).collect();
+        let blocked = |id: &NoteId, to: &str| {
+            let key = self.path_key(to);
+            held.get(&key).is_some_and(|holder| holder != id) && !leaving.contains(&key)
+        };
+        moves.retain(|(id, _, to)| !blocked(id, to));
+        new.retain(|(id, to)| !blocked(id, to));
+
+        // 1. Saves not yet taken in, for every note about to be moved or removed.
+        for id in gone.iter().chain(moves.iter().map(|(id, _, _)| id)) {
+            if self.awaiting.contains(id)
+                && let Err(e) = self.finish_adoption(*id)
+            {
+                warn!(%id, %e, "taking in a note before it moves");
+            }
+            self.ingest_unsaved(*id);
+        }
+        // A note whose file could not be taken in keeps its file where it is.
+        moves.retain(|(id, _, _)| !self.awaiting.contains(id));
+
+        // 2. Removals. Only a file this replica wrote or read is deleted: anything else at that
+        //    path is not the note's.
         for id in gone {
             let path = self.notes[&id].path.clone();
             info!(path = %path, %id, "removed by remote → trash");
-            self.proj.remove(&path)?;
-            self.forget(id, &path)?;
+            if self.projected_at(id, &path)
+                && !self.awaiting.remove(&id)
+                && let Err(e) = self.proj.remove(&path)
+            {
+                warn!(%path, %e, "removing a note's file");
+            }
+            if let Err(e) = self.forget(id, &path) {
+                warn!(%path, %e, "trashing a note removed by remote");
+            }
         }
-        self.drop_removed_kept_files()?;
-        self.reconcile_attachments()
+
+        // 3. Moves: every old path is given up before any new one is taken. The store row is
+        //    parked in the trash meanwhile, which frees its place in the (vault, path) index.
+        for (id, from, _) in &moves {
+            if let Err(e) = self.store.trash_note(*id) {
+                warn!(%from, %e, "freeing a moved note's path");
+            }
+            if self.projected_at(*id, from)
+                && let Err(e) = self.proj.remove(from)
+            {
+                warn!(%from, %e, "removing a moved note's old file");
+            }
+            if self.by_path.get(from) == Some(id) {
+                self.by_path.remove(from);
+            }
+        }
+        for (id, from, to) in &moves {
+            self.by_path.insert(to.clone(), *id);
+            if let Some(state) = self.notes.get_mut(id) {
+                state.path = to.clone();
+            }
+            self.dirty.remove(id);
+            if let Err(e) = self.place_moved(*id, to) {
+                warn!(%from, %to, %e, "writing a moved note");
+            }
+            info!(%from, %to, "moved by remote");
+        }
+        for (_, from, to) in &moves {
+            if let Err(e) = self.rewrite_links(from, to) {
+                warn!(%from, %to, %e, "rewriting links after a move");
+            }
+        }
+
+        // 4. Notes new to this replica.
+        for (id, path) in new {
+            let pending = self.pending_docs.remove(&id);
+            let doc = match pending {
+                Some(doc) => doc,
+                None => match self.store.load_doc(DocId::Note(id)) {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        warn!(%path, %e, "loading a note from the vault");
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = self.store.upsert_note(id, self.vault_id, &path, file_stem(&path).as_deref()) {
+                warn!(%path, %e, "adopting a note from the vault");
+                self.pending_docs.insert(id, doc);
+                continue;
+            }
+            self.unplaced.remove(&id);
+            self.by_path.insert(path.clone(), id);
+            self.notes.insert(id, NoteState { doc, path: path.clone() });
+            self.dirty.insert(id, Instant::now());
+            self.routes_dirty = true;
+            self.handshake(DocId::Note(id));
+            info!(path = %path, %id, "adopted note from vault");
+        }
+        if let Err(e) = self.drop_removed_kept_files() {
+            warn!(%e, "removing kept files deleted elsewhere");
+        }
+        if let Err(e) = self.reconcile_attachments() {
+            warn!(%e, "fetching attachments");
+        }
+        Ok(())
+    }
+
+    /// Two notes may not share a path; nor, on a folder that ignores case, a spelling.
+    fn path_key(&self, path: &str) -> String {
+        if self.case_insensitive { path.to_lowercase() } else { path.to_owned() }
+    }
+
+    /// Whether the file at `path` is one this replica last wrote or read for `id`.
+    fn projected_at(&self, id: NoteId, path: &str) -> bool {
+        self.store.projected_text(DocId::Note(id)).ok().flatten().is_some_and(|(p, _)| p == path)
+    }
+
+    /// A moved note, written at its new path with the text it has *now* — which includes any
+    /// edit that arrived just before the move — and indexed there, which also takes it back
+    /// out of the trash it was parked in.
+    fn place_moved(&mut self, id: NoteId, to: &str) -> Result<()> {
+        let text = self.notes[&id].doc.text();
+        self.index(id, to, &text)?;
+        match self.proj.write(to, &text) {
+            Ok(()) => self.store.set_projected_text(DocId::Note(id), to, &text),
+            Err(e) => {
+                // Nothing of this note is on disk now: say so, or the next start would read the
+                // missing file as a deletion. It is written again on its next change.
+                self.store.delete_projection(DocId::Note(id))?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Note files saved where the vault doc now puts a note, that this engine has not taken in
+    /// yet — the watcher's event is still waiting out its debounce. They are taken in now, as
+    /// the notes they are, so the collision rule sees two notes where the write that follows
+    /// would otherwise have erased one.
+    fn take_in_occupants(&mut self) {
+        let held: HashSet<String> = self.by_path.keys().map(|p| self.path_key(p)).collect();
+        let occupied: Vec<String> = self
+            .vault
+            .entries()
+            .into_iter()
+            .filter(|(id, p)| self.notes.get(id).is_none_or(|s| s.path != *p))
+            .map(|(_, p)| p)
+            .filter(|p| !held.contains(&self.path_key(p)))
+            .filter(|p| Projection::is_note_path(Path::new(p)))
+            .filter(|p| self.proj.resolve(p).is_ok_and(|a| a.is_file()))
+            .collect();
+        for path in occupied {
+            self.pending_fs.remove(&path);
+            if let Err(e) = self.local_create(&path) {
+                warn!(%path, %e, "taking in a note file before a remote one lands on it");
+            }
+        }
+    }
+
+    /// Two notes claiming one path: the lowest id keeps it, the others get a numbered suffix.
+    /// Every replica applies the same rule to the same entries, so they converge without
+    /// coordination. A folder that ignores case compares spellings, so `A.md` and `a.md` clash.
+    fn resolve_collisions(&mut self) -> Result<()> {
+        let entries = self.vault.entries();
+        let mut taken: HashSet<String> = entries.iter().map(|(_, p)| self.path_key(p)).collect();
+        taken.extend(self.by_path.keys().map(|p| self.path_key(p)));
+        let mut seen: HashMap<String, NoteId> = HashMap::new();
+        for (id, path) in &entries {
+            let key = self.path_key(path);
+            match seen.get(&key) {
+                Some(winner) if winner != id => {
+                    let mut n = 2;
+                    let mut candidate = suffixed(path, n);
+                    while taken.contains(&self.path_key(&candidate)) {
+                        n += 1;
+                        candidate = suffixed(path, n);
+                    }
+                    warn!(path = %path, %id, renamed_to = %candidate, "path collision resolved");
+                    let vu = self.vault.set_path(*id, &candidate);
+                    self.persist_and_send(DocId::Vault(self.vault_id), vu)?;
+                    taken.insert(self.path_key(&candidate));
+                    seen.insert(self.path_key(&candidate), *id);
+                }
+                _ => {
+                    seen.insert(key, *id);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The kept files and their hashes, as the vault doc has them now.
@@ -1889,9 +2245,13 @@ impl Engine {
             if self.vault.attachment_hash(&path).is_some() {
                 continue;
             }
-            if self.is_attachment_file(&path)? && self.local_hash(&path)?.as_deref() == Some(hash.as_str()) {
+            if self.is_attachment_file(&path)?
+                && self.local_hash(&path).ok().flatten().as_deref() == Some(hash.as_str())
+            {
                 info!(path = %path, "kept file removed elsewhere; removing the copy here");
-                self.proj.remove(&path)?;
+                if let Err(e) = self.proj.remove(&path) {
+                    warn!(%path, %e, "removing a kept file");
+                }
                 self.local_hashes.remove(&path);
             }
         }
@@ -1914,7 +2274,7 @@ impl Engine {
 
     // ---- Network side -----------------------------------------------------------------------
 
-    fn on_connect(&mut self, out: mpsc::UnboundedSender<Vec<u8>>) {
+    fn on_connect(&mut self, out: Outbox) {
         self.out = Some(out);
         self.handshakes.clear();
         // Whatever was refused before is about to be asked again; the answer may differ, since
@@ -2118,6 +2478,20 @@ impl Engine {
                 LocalQuery::ReadFile(path) => LocalReply::File(self.proj.read_bytes(&path).ok()),
                 LocalQuery::WriteFile { path, bytes } => self.merge_write(&path, &bytes)?,
                 LocalQuery::Retire => self.retire()?,
+                LocalQuery::NoteState(id) => {
+                    LocalReply::NoteState(self.doc_for(id).map(NoteDoc::encode_full))
+                }
+                LocalQuery::AdoptState { id, state } => {
+                    if self.notes.contains_key(&id) {
+                        LocalReply::Conflict(id.to_string())
+                    } else {
+                        // Checked before it is journaled: a state that does not decode would
+                        // make the note unloadable from then on.
+                        NoteDoc::from_updates([state.as_slice()])?;
+                        self.store.append_update(DocId::Note(id), &state, None)?;
+                        LocalReply::Done
+                    }
+                }
                 LocalQuery::ReplaceNote { id, content } => self.api_replace(id, &content)?,
                 LocalQuery::RenameNote { id, path } => self.api_rename(id, &path)?,
                 LocalQuery::DeleteNote(id) => self.api_delete(id)?,
@@ -2214,6 +2588,10 @@ impl Engine {
         let frame = Frame::decode(bytes)?;
         let doc: DocId = frame.doc_id.parse()?;
         let msg = frame.message()?;
+        let msg_kind = match &msg {
+            Message::Sync(SyncMessage::SyncStep2(_)) => MsgKind::Step2,
+            _ => MsgKind::Other,
+        };
         let is_vault = doc == DocId::Vault(self.vault_id);
         match doc {
             DocId::Vault(v) if v != self.vault_id => return Ok(()),
@@ -2268,6 +2646,9 @@ impl Engine {
                 }
             }
             Message::Sync(SyncMessage::SyncStep2(update)) | Message::Sync(SyncMessage::Update(update)) => {
+                // The server's answer to our state vector: for a note taken in from a file,
+                // the moment its history is here and the file can be applied as an edit.
+                let answered = matches!(msg_kind, MsgKind::Step2) && origin == Origin::Server;
                 let changed = match doc {
                     DocId::Vault(_) => self.vault.apply_update(&update)?,
                     DocId::Note(id) => self.doc_for(id).expect("checked above").apply_update(&update)?,
@@ -2298,6 +2679,9 @@ impl Engine {
                 {
                     *h = Handshake::Step2Received;
                 }
+                if answered && let DocId::Note(id) = doc {
+                    self.finish_adoption(id)?;
+                }
             }
             Message::Awareness(_) => {
                 // Presence is relayed verbatim in both directions.
@@ -2319,6 +2703,10 @@ impl Engine {
                     warn!(doc = %frame.doc_id, %reason, "the server refused this doc");
                     self.denied.insert(frame.doc_id.clone(), bytes.to_vec());
                     self.broadcast_local(&frame.doc_id, bytes, None);
+                    // No history is coming for it: the file is all there is.
+                    if let DocId::Note(id) = doc {
+                        self.finish_adoption(id)?;
+                    }
                 }
             }
             Message::AwarenessQuery | Message::Custom(..) => {}
@@ -2350,11 +2738,16 @@ impl Engine {
         Ok(())
     }
 
-    fn tick(&mut self) -> Result<()> {
+    /// The debounced work. Nothing in here ends the engine: a note that cannot be written, or
+    /// a store hiccup, is that note's or that moment's problem — logged, and retried when it
+    /// next comes round — while every other vault file keeps syncing.
+    fn tick(&mut self) {
         self.sync_routes();
         let now = Instant::now();
-        if now.duration_since(self.last_maintenance) >= MAINTENANCE_INTERVAL {
-            self.maintain_all()?;
+        if now.duration_since(self.last_maintenance) >= MAINTENANCE_INTERVAL
+            && let Err(e) = self.maintain_all()
+        {
+            warn!(%e, "store maintenance");
         }
         let due: Vec<String> = self
             .pending_fs
@@ -2373,7 +2766,9 @@ impl Engine {
                 }
             }
         }
-        self.finalize_removals(false)?;
+        if let Err(e) = self.finalize_removals(false) {
+            warn!(%e, "finishing removals");
+        }
 
         let due: Vec<String> = self
             .pending_attachment_fs
@@ -2389,9 +2784,13 @@ impl Engine {
         }
         if !self.touched_files.is_empty() {
             let touched = std::mem::take(&mut self.touched_files);
-            self.refresh_dependencies(Some(&touched))?;
+            if let Err(e) = self.refresh_dependencies(Some(&touched)) {
+                warn!(%e, "refreshing attachment dependencies");
+            }
         }
-        self.flush_uploads()?;
+        if let Err(e) = self.flush_uploads() {
+            warn!(%e, "queueing uploads");
+        }
 
         let ready: Vec<NoteId> = self
             .dirty
@@ -2401,12 +2800,17 @@ impl Engine {
             .collect();
         for id in ready {
             self.dirty.remove(&id);
-            self.project(id)?;
+            if let Err(e) = self.project(id) {
+                let path = self.notes.get(&id).map(|s| s.path.clone()).unwrap_or_default();
+                warn!(%id, %path, %e, "could not write a note to disk; it keeps syncing");
+            }
         }
-        if self.orphan_check_due && self.is_idle() {
-            self.cleanup_orphans()?;
+        if self.orphan_check_due
+            && self.is_idle()
+            && let Err(e) = self.cleanup_orphans()
+        {
+            warn!(%e, "dropping unreferenced attachments");
         }
-        Ok(())
     }
 }
 
@@ -2428,6 +2832,20 @@ fn strip_id_line(text: &str) -> String {
 
 fn content_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// Whether names in `dir` are matched without regard to case, found by asking the filesystem
+/// rather than guessing from the platform: a case-sensitive APFS volume, or a Linux folder on a
+/// FAT stick, are both real.
+fn folder_ignores_case(dir: &Path) -> bool {
+    let probe = dir.join(format!("case-probe-{}", NoteId::new()));
+    let upper = dir.join(probe.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default());
+    if std::fs::write(&probe, b"").is_err() {
+        return cfg!(any(windows, target_os = "macos"));
+    }
+    let ignores = upper.exists();
+    let _ = std::fs::remove_file(&probe);
+    ignores
 }
 
 fn file_stem(rel: &str) -> Option<String> {
@@ -2460,6 +2878,311 @@ mod tests {
         assert_eq!(http_url("ws://h:1/ws").unwrap(), "http://h:1");
         assert_eq!(http_url("wss://h").unwrap(), "https://h");
         assert!(http_url("h").is_err());
+    }
+
+    #[test]
+    fn reconnecting_backs_off_unless_the_connection_held() {
+        let long = Duration::from_secs(16);
+        assert_eq!(retry_delay(long, Duration::from_millis(200)), long, "dropped at once: keep backing off");
+        assert_eq!(retry_delay(long, RECONNECT_HEALTHY), RECONNECT_MIN);
+    }
+
+    #[test]
+    fn api_paths_refuse_only_what_climbs_or_hides() {
+        assert_eq!(Engine::api_path("v1..2").as_deref(), Some("v1..2.md"));
+        assert_eq!(Engine::api_path("/Projects/plan.qmd").as_deref(), Some("Projects/plan.qmd"));
+        for bad in ["../up", "a/../../up.md", ".lemmate/x", ".git/config", "a\\b", "", "What?", "CON"] {
+            assert_eq!(Engine::api_path(bad), None, "{bad:?}");
+        }
+    }
+
+    // ---- The engine against a scripted server ----------------------------------------------
+    //
+    // A replica of the vault doc stands in for the server: changes made on it are fed to the
+    // engine as the frames the server would send, and nothing runs on a timer unless asked.
+
+    fn engine_at(dir: &Path) -> Engine {
+        Engine::open(&SyncOptions {
+            vault_dir: dir.into(),
+            server_url: Some("http://x".into()),
+            vault_id: None,
+            once: true,
+            ca_cert: None,
+            token: None,
+        })
+        .unwrap()
+    }
+
+    fn from_server(e: &mut Engine, doc: DocId, msg: SyncMessage) {
+        let frame = Frame::new(doc.to_string(), &Message::Sync(msg)).encode();
+        e.try_handle_frame(Origin::Server, &frame).unwrap();
+    }
+
+    fn to_vault(e: &mut Engine, msg: SyncMessage) {
+        let vault = DocId::Vault(e.vault_id);
+        from_server(e, vault, msg);
+    }
+
+    fn remote_vault(e: &Engine) -> VaultDoc {
+        VaultDoc::from_updates([e.vault.encode_full().as_slice()]).unwrap()
+    }
+
+    /// Several vault changes as the one update the server would relay after a reconnect.
+    fn at_once(updates: &[Vec<u8>]) -> SyncMessage {
+        SyncMessage::Update(
+            yrs::merge_updates_v1(updates.iter().map(Vec::as_slice).collect::<Vec<_>>()).unwrap(),
+        )
+    }
+
+    /// Write every note with a pending remote change, as the tick does once the debounce is out.
+    fn settle(e: &mut Engine) {
+        for t in e.dirty.values_mut() {
+            *t -= PROJECT_DEBOUNCE;
+        }
+        e.tick();
+    }
+
+    /// A text for a note made elsewhere, front matter and all.
+    fn remote_text(id: NoteId, body: &str) -> (NoteDoc, Vec<u8>) {
+        let doc = NoteDoc::new();
+        let u = doc.set_text(&format!("---\nid: {id}\n---\n{body}"));
+        (doc, u)
+    }
+
+    /// The audit's wedge: offline, this device made `D.md`; meanwhile another made `D.md` too,
+    /// with a lower id. The lower id keeps the path everywhere, so *ours* moves aside — and it
+    /// has to be out of the store's (vault, path) slot before theirs is adopted into it.
+    #[test]
+    fn a_remote_note_landing_on_a_local_ones_path_moves_the_local_one_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        let theirs: NoteId = "00000000000000000000000001".parse().unwrap();
+        proj.write("D.md", "# from this device\n").unwrap();
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let ours = e.by_path["D.md"];
+        let remote = remote_vault(&e);
+        let (_, text) = remote_text(theirs, "# from the server\n");
+        to_vault(&mut e, SyncMessage::Update(remote.set_path(theirs, "D.md")));
+        from_server(&mut e, DocId::Note(theirs), SyncMessage::Update(text));
+        settle(&mut e);
+        assert_eq!(e.by_path.get("D.md"), Some(&theirs));
+        assert_eq!(e.by_path.get("D (2).md"), Some(&ours));
+        assert_eq!(e.vault.path_of(ours).as_deref(), Some("D (2).md"));
+        assert!(proj.read("D.md").unwrap().contains("# from the server"));
+        assert!(proj.read("D (2).md").unwrap().contains("# from this device"));
+        assert_eq!(e.store.note_by_path(e.vault_id, "D.md").unwrap().map(|r| r.id), Some(theirs));
+        assert_eq!(e.store.note_by_path(e.vault_id, "D (2).md").unwrap().map(|r| r.id), Some(ours));
+    }
+
+    /// Two notes trading paths, and a note moving onto a path another has just left, in one
+    /// update: every old path is given up before any new one is taken.
+    #[test]
+    fn swaps_and_moves_into_freed_paths_land_with_the_right_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        for (p, t) in [("a.md", "# A\n"), ("b.md", "# B\n"), ("c.md", "# C\n")] {
+            proj.write(p, t).unwrap();
+        }
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let (a, b, c) = (e.by_path["a.md"], e.by_path["b.md"], e.by_path["c.md"]);
+        let remote = remote_vault(&e);
+        let swap = [remote.set_path(a, "b.md"), remote.set_path(b, "a.md")];
+        to_vault(&mut e, at_once(&swap));
+        assert!(proj.read("a.md").unwrap().contains("# B") && proj.read("b.md").unwrap().contains("# A"));
+        assert_eq!((e.by_path["a.md"], e.by_path["b.md"]), (b, a));
+        // c takes a's path, and a moves on to a new one.
+        let chain = [remote.set_path(a, "d.md"), remote.set_path(c, "b.md")];
+        to_vault(&mut e, at_once(&chain));
+        settle(&mut e);
+        assert!(proj.read("d.md").unwrap().contains("# A"));
+        assert!(proj.read("b.md").unwrap().contains("# C"));
+        assert!(!dir.path().join("c.md").exists());
+        assert_eq!(e.vault.entries().len(), 3);
+        assert_eq!(e.store.list_notes(e.vault_id).unwrap().len(), 3);
+    }
+
+    /// A remote edit and, before it reached the disk, a remote rename: the file lands at the new
+    /// path with the edit in it, and the watcher's view of that move changes nothing.
+    #[test]
+    fn a_remote_edit_survives_a_remote_rename_right_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        proj.write("T.md", "# T\n\nbody\n").unwrap();
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let id = e.by_path["T.md"];
+        let there = NoteDoc::from_updates([e.notes[&id].doc.encode_full().as_slice()]).unwrap();
+        let edit = there.set_text(&there.text().replace("body", "body EDITED REMOTELY"));
+        let remote = remote_vault(&e);
+        from_server(&mut e, DocId::Note(id), SyncMessage::Update(edit));
+        to_vault(&mut e, SyncMessage::Update(remote.set_path(id, "moved.md")));
+        assert!(proj.read("moved.md").unwrap().contains("EDITED REMOTELY"));
+        assert!(!dir.path().join("T.md").exists());
+        e.on_fs_event(FsEvent::Removed(dir.path().join("T.md")));
+        e.on_fs_event(FsEvent::Created(dir.path().join("moved.md")));
+        for t in e.pending_fs.values_mut() {
+            *t -= FS_DEBOUNCE;
+        }
+        e.tick();
+        settle(&mut e);
+        assert!(e.notes[&id].doc.text().contains("EDITED REMOTELY"), "{}", e.notes[&id].doc.text());
+        assert!(proj.read("moved.md").unwrap().contains("EDITED REMOTELY"));
+    }
+
+    /// An editor saved the file and the watcher has not said so yet when a remote change comes
+    /// to be written, or a remote delete: the save is taken in first, not written over.
+    #[test]
+    fn a_save_not_yet_seen_is_taken_in_before_a_remote_write_or_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        proj.write("n.md", "# N\n\nfirst\n").unwrap();
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let id = e.by_path["n.md"];
+        let on_disk = proj.read("n.md").unwrap();
+        std::fs::write(dir.path().join("n.md"), format!("{on_disk}saved in vim\n")).unwrap();
+        let there = NoteDoc::from_updates([e.notes[&id].doc.encode_full().as_slice()]).unwrap();
+        let edit = there.set_text(&there.text().replace("first", "first (remote)"));
+        from_server(&mut e, DocId::Note(id), SyncMessage::Update(edit));
+        settle(&mut e);
+        let now = proj.read("n.md").unwrap();
+        assert!(now.contains("first (remote)") && now.contains("saved in vim"), "{now}");
+        assert_eq!(e.notes[&id].doc.text(), now);
+
+        std::fs::write(dir.path().join("n.md"), format!("{now}unsaved before the delete\n")).unwrap();
+        let remote = remote_vault(&e);
+        to_vault(&mut e, SyncMessage::Update(remote.remove(id)));
+        assert!(!dir.path().join("n.md").exists());
+        let kept = e.store.load_doc(DocId::Note(id)).unwrap().text();
+        assert!(kept.contains("unsaved before the delete"), "the save is in the trashed note: {kept}");
+    }
+
+    /// On a folder that ignores case, `Plan.md` and `plan.md` are one file: a path clash.
+    #[test]
+    fn notes_differing_only_in_case_clash_on_a_folder_that_ignores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = engine_at(dir.path());
+        e.case_insensitive = true;
+        let (one, two): (NoteId, NoteId) =
+            ("00000000000000000000000001".parse().unwrap(), "00000000000000000000000002".parse().unwrap());
+        let remote = remote_vault(&e);
+        let both = [remote.set_path(one, "Plan.md"), remote.set_path(two, "plan.md")];
+        to_vault(&mut e, at_once(&both));
+        assert_eq!(e.vault.path_of(one).as_deref(), Some("Plan.md"));
+        assert_eq!(e.vault.path_of(two).as_deref(), Some("plan (2).md"));
+    }
+
+    /// One note at a path this disk cannot hold — under a file — is that note's problem: the
+    /// engine keeps going, and the next note is written.
+    #[test]
+    fn a_note_that_cannot_be_written_does_not_stop_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        proj.write("a.md", "# a\n").unwrap();
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let (blocked, later) = (NoteId::new(), NoteId::new());
+        let remote = remote_vault(&e);
+        let both = [remote.set_path(blocked, "a.md/b.md"), remote.set_path(later, "later.md")];
+        to_vault(&mut e, at_once(&both));
+        from_server(&mut e, DocId::Note(blocked), SyncMessage::Update(remote_text(blocked, "# b\n").1));
+        from_server(&mut e, DocId::Note(later), SyncMessage::Update(remote_text(later, "# later\n").1));
+        settle(&mut e);
+        assert!(proj.read("later.md").unwrap().contains("# later"));
+        assert!(e.notes.contains_key(&blocked), "still held, and still syncing");
+    }
+
+    /// What another replica can name is not what may be written: a note in the sidecar, files
+    /// in `.git`, an attachment over a note.
+    #[test]
+    fn hostile_paths_from_the_vault_doc_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = Projection::new(dir.path());
+        proj.write("T.md", "# T\n").unwrap();
+        let mut e = engine_at(dir.path());
+        e.reconcile_disk().unwrap();
+        let evil = NoteId::new();
+        let remote = remote_vault(&e);
+        let all = [
+            remote.set_path(evil, ".lemmate/evil.md"),
+            remote.set_attachment(".git/config", &"a".repeat(64)),
+            remote.set_attachment("T.md", &"b".repeat(64)),
+        ];
+        to_vault(&mut e, at_once(&all));
+        settle(&mut e);
+        assert!(!dir.path().join(".lemmate/evil.md").exists() && !dir.path().join(".git").exists());
+        assert!(!e.notes.contains_key(&evil) && e.unplaced.contains_key(&evil));
+        assert_eq!(e.vault.path_of(evil).as_deref(), Some(".lemmate/evil.md"), "kept in the vault doc");
+        assert!(!Engine::attachment_path_ok(".git/config") && !Engine::attachment_path_ok("T.md"));
+        assert!(Engine::attachment_path_ok("attachments/x.png"));
+        let err = e.try_transfer_done(TransferDone::Downloaded {
+            path: "T.md".into(),
+            hash: "b".repeat(64),
+            bytes: b"overwritten".to_vec(),
+        });
+        assert!(err.is_err());
+        assert!(proj.read("T.md").unwrap().contains("# T"));
+    }
+
+    /// A folder joined with a fresh sidecar holds files whose ids the server already has, with
+    /// their history. The file waits for the server's copy and is applied to it as an edit —
+    /// inserting it into a new doc would merge with the server's into the text twice.
+    #[test]
+    fn a_file_whose_id_the_server_knows_is_not_inserted_twice() {
+        let first = tempfile::tempdir().unwrap();
+        Projection::new(first.path()).write("Plan.md", "# Plan\n\nunique body line\n").unwrap();
+        let mut e = engine_at(first.path());
+        e.reconcile_disk().unwrap();
+        let id = e.by_path["Plan.md"];
+        let server_copy = e.notes[&id].doc.encode_full();
+        let text = e.notes[&id].doc.text();
+        let vault = e.vault_id;
+        drop(e);
+
+        let again = tempfile::tempdir().unwrap();
+        Projection::new(again.path()).write("Plan.md", &text).unwrap();
+        let mut e = Engine::open(&SyncOptions {
+            vault_dir: again.path().into(),
+            server_url: Some("http://x".into()),
+            vault_id: Some(vault),
+            once: true,
+            ca_cert: None,
+            token: None,
+        })
+        .unwrap();
+        e.reconcile_disk().unwrap();
+        assert!(e.awaiting.contains(&id));
+        settle(&mut e);
+        assert_eq!(Projection::new(again.path()).read("Plan.md").unwrap(), text, "not written while waiting");
+        from_server(&mut e, DocId::Note(id), SyncMessage::SyncStep2(server_copy));
+        assert!(!e.awaiting.contains(&id));
+        assert_eq!(e.notes[&id].doc.text(), text);
+        assert_eq!(e.notes[&id].doc.text().matches("unique body line").count(), 1);
+    }
+
+    /// Retiring renames the sidecar away in one step; when that fails, nothing is gone and the
+    /// vault carries on.
+    #[cfg(unix)]
+    #[test]
+    fn a_retire_that_cannot_remove_the_sidecar_removes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("v");
+        Projection::new(&root).write("n.md", "# n\n").unwrap();
+        let mut e = engine_at(&root);
+        e.reconcile_disk().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(root.join("probe"), b"").is_ok() {
+            return; // running as root: permissions do not stop us, so nothing to test
+        }
+        let result = e.retire();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert!(root.join("n.md").is_file() && root.join(".lemmate/local.db").is_file());
+        assert!(!e.retiring);
+        assert_eq!(e.store.list_notes(e.vault_id).unwrap().len(), 1, "the real store is back");
     }
 
     #[test]

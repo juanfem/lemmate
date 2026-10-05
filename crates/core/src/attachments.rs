@@ -379,9 +379,13 @@ impl AttachmentStore {
         }
         let parent = target.parent().expect("hash path has a parent");
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".{hash}.tmp"));
-        fs::write(&tmp, bytes)?;
-        fs::rename(&tmp, &target)?;
+        // A temp name of its own per write: two uploads of the same bytes at once must not
+        // write into (or rename away) each other's file.
+        let tmp = parent.join(format!(".{hash}.{}.tmp", ulid::Ulid::generate()));
+        if let Err(e) = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, &target)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok((hash, true))
     }
 
@@ -589,5 +593,27 @@ mod tests {
         assert!(!store.exists(v, &h));
         assert_eq!(mime_for_path("a/b.png"), "image/png");
         assert_eq!(mime_for_path("weird.zzz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn concurrent_puts_of_the_same_bytes_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::new(dir.path());
+        let v = VaultId::new();
+        let bytes = vec![7u8; 4 << 20];
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8).map(|_| s.spawn(|| store.put(v, &bytes))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in &results {
+            assert!(r.is_ok(), "{r:?}");
+        }
+        let h = &results[0].as_ref().unwrap().0;
+        assert_eq!(store.get(v, h).unwrap().as_deref(), Some(&bytes[..]));
+        let left: Vec<_> = std::fs::read_dir(store.path_for(v, h).unwrap().parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "no temp file left behind: {left:?}");
     }
 }

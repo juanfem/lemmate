@@ -5,6 +5,7 @@
 
 <script lang="ts">
   import { untrack } from 'svelte'
+  import { trapFocus } from '../lib/focustrap.ts'
 
   let {
     title,
@@ -68,7 +69,7 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="backdrop" onmousedown={onCancel} role="presentation">
-  <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
+  <div class="dialog" use:trapFocus onmousedown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
     <h2>{title}</h2>
     {#if body}<p class="body">{body}</p>{/if}
     {#if kind === 'prompt'}

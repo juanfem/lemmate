@@ -5,6 +5,7 @@
   import { createFileEditor } from '../lib/editor/setup.ts'
   import { baseName, fileKind, folderOf, humanSize, isText } from '../lib/filetree.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
+  import { fileTab, setUnsaved } from '../lib/filetabs.ts'
 
   /**
    * A vault file that is not a note, in a tab of its own (SPEC §9). Text — a stylesheet,
@@ -139,6 +140,14 @@
     a.download = baseName(path)
     a.click()
   }
+
+  // Closing the tab asks first while there is something unsaved here (App's `close`).
+  const holder = Symbol('file editor')
+  $effect(() => {
+    const tab = fileTab(session.id, path)
+    setUnsaved(tab, holder, dirty)
+    return () => setUnsaved(tab, holder, false)
+  })
 
   function beforeUnload(e: BeforeUnloadEvent) {
     if (dirty) e.preventDefault()

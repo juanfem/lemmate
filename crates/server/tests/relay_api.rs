@@ -8,6 +8,10 @@ use lemmate_core::{Store, VaultId};
 use lemmate_server::{ServerOptions, build_state, router};
 use serde_json::Value;
 
+#[path = "../../core/tests/common/mod.rs"]
+mod common;
+use common::{keyed, remember};
+
 async fn server() -> (SocketAddr, std::sync::Arc<lemmate_server::AppState>) {
     let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -26,33 +30,36 @@ async fn relay(server: SocketAddr, dir: &std::path::Path) -> LocalHandle {
         ca_cert: None,
         token: None,
     };
-    start(
-        opts,
-        LocalOptions {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            web_dir: None,
-            vault_root: None,
-            config_path: None,
-        },
+    remember(
+        start(
+            opts,
+            LocalOptions {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                web_dir: None,
+                vault_root: None,
+                config_path: None,
+                allow_remote: false,
+            },
+        )
+        .await
+        .unwrap(),
     )
-    .await
-    .unwrap()
 }
 
 async fn call(method: &'static str, url: String, body: Option<Value>) -> (u16, Value) {
     tokio::task::spawn_blocking(move || {
         let result = match (method, body) {
-            ("GET", _) => ureq::get(&url).call(),
-            ("DELETE", _) => ureq::delete(&url).call(),
-            ("POST", Some(b)) => {
-                ureq::post(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
-            }
-            ("PUT", Some(b)) => {
-                ureq::put(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
-            }
-            ("PATCH", Some(b)) => {
-                ureq::patch(&url).header("content-type", "application/json").send(b.to_string().as_bytes())
-            }
+            ("GET", _) => keyed(ureq::get(&url), &url).call(),
+            ("DELETE", _) => keyed(ureq::delete(&url), &url).call(),
+            ("POST", Some(b)) => keyed(ureq::post(&url), &url)
+                .header("content-type", "application/json")
+                .send(b.to_string().as_bytes()),
+            ("PUT", Some(b)) => keyed(ureq::put(&url), &url)
+                .header("content-type", "application/json")
+                .send(b.to_string().as_bytes()),
+            ("PATCH", Some(b)) => keyed(ureq::patch(&url), &url)
+                .header("content-type", "application/json")
+                .send(b.to_string().as_bytes()),
             _ => unreachable!(),
         };
         match result {
@@ -90,7 +97,7 @@ fn multipart(files: &[(&str, &[u8])]) -> Vec<u8> {
 async fn import(url: String, files: &[(&str, &[u8])]) -> (u16, Value) {
     let body = multipart(files);
     tokio::task::spawn_blocking(move || {
-        let result = ureq::post(&url)
+        let result = keyed(ureq::post(&url), &url)
             .header("content-type", &format!("multipart/form-data; boundary={BOUNDARY}"))
             .send(&body[..]);
         match result {
@@ -264,21 +271,21 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
         tokio::task::spawn_blocking(move || {
             let mut r = match method {
                 "GET" => {
-                    let mut req = agent.get(&url);
+                    let mut req = keyed(agent.get(&url), &url);
                     if let Some(t) = &bearer {
                         req = req.header("authorization", &format!("Bearer {t}"));
                     }
                     req.call().unwrap()
                 }
                 "PUT" => {
-                    let mut req = agent.put(&url).header("content-type", "application/json");
+                    let mut req = keyed(agent.put(&url), &url).header("content-type", "application/json");
                     if let Some(t) = &bearer {
                         req = req.header("authorization", &format!("Bearer {t}"));
                     }
                     req.send(body.unwrap_or(Value::Null).to_string().as_bytes()).unwrap()
                 }
                 _ => {
-                    let mut req = agent.post(&url).header("content-type", "application/json");
+                    let mut req = keyed(agent.post(&url), &url).header("content-type", "application/json");
                     if let Some(t) = &bearer {
                         req = req.header("authorization", &format!("Bearer {t}"));
                     }
@@ -326,9 +333,11 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
                     web_dir: None,
                     vault_root: None,
                     config_path: config,
+                    allow_remote: false,
                 },
             )
             .await
+            .map(remember)
             .unwrap()
         }
     };
@@ -401,9 +410,11 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
             web_dir: None,
             vault_root: None,
             config_path: None,
+            allow_remote: false,
         },
     )
     .await
+    .map(remember)
     .unwrap();
     let (s, _) = send("GET", format!("http://{}/api/v1/auth/me", alone.addr), None, None).await.unwrap();
     assert_eq!(s, 404);

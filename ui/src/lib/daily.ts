@@ -56,12 +56,22 @@ export function parseIso(s: string): Day | null {
   return d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= daysInMonth(d.year, d.month) ? d : null
 }
 
+/**
+ * Midnight UTC of a day, as a `Date`; `day` may run past the month. Not `Date.UTC`, which reads
+ * the years 0–99 as 1900–1999.
+ */
+function utc(year: number, month0: number, day: number): Date {
+  const t = new Date(0)
+  t.setUTCFullYear(year, month0, day)
+  return t
+}
+
 export function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+  return utc(year, month, 0).getUTCDate()
 }
 
 export function addDays(d: Day, n: number): Day {
-  const t = new Date(Date.UTC(d.year, d.month - 1, d.day + n))
+  const t = utc(d.year, d.month - 1, d.day + n)
   return { year: t.getUTCFullYear(), month: t.getUTCMonth() + 1, day: t.getUTCDate() }
 }
 
@@ -71,11 +81,11 @@ export function compare(a: Day, b: Day): number {
 
 /** 0 = Sunday … 6 = Saturday. */
 export function weekday(d: Day): number {
-  return new Date(Date.UTC(d.year, d.month - 1, d.day)).getUTCDay()
+  return utc(d.year, d.month - 1, d.day).getUTCDay()
 }
 
 function ordinal(d: Day): number {
-  return (Date.UTC(d.year, d.month - 1, d.day) - Date.UTC(d.year, 0, 1)) / 86_400_000 + 1
+  return (utc(d.year, d.month - 1, d.day).getTime() - utc(d.year, 0, 1).getTime()) / 86_400_000 + 1
 }
 
 function isoWeek(d: Day): [number, number] {
@@ -98,10 +108,14 @@ export const MONTHS = [
 ]
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
-/** Longest first, so `MMMM` wins over `MM` — the same list, in the same order, as the Rust. */
+/**
+ * Longest first, so `MMMM` wins over `MM` — the same list, in the same order, as the Rust. A day
+ * has no time of its own: the time tokens give midnight, and `X`/`x` count to midnight UTC.
+ */
 const TOKENS = [
   'YYYY', 'GGGG', 'gggg', 'MMMM', 'DDDD', 'dddd', 'MMM', 'DDD', 'ddd', 'YY', 'GG', 'gg', 'MM', 'DD',
-  'Do', 'dd', 'WW', 'ww', 'Q', 'M', 'D', 'd', 'E', 'e', 'W', 'w',
+  'Do', 'dd', 'WW', 'ww', 'HH', 'hh', 'kk', 'mm', 'ss', 'Q', 'M', 'D', 'd', 'E', 'e', 'W', 'w', 'H', 'h',
+  'k', 'm', 's', 'A', 'a', 'X', 'x',
 ]
 
 function ordinalSuffix(n: number): string {
@@ -138,6 +152,14 @@ function token(t: string, d: Day): string {
     case 'gg': return pad(localeWeek(d)[0] % 100)
     case 'ww': return pad(localeWeek(d)[1])
     case 'w': return String(localeWeek(d)[1])
+    case 'HH': case 'mm': case 'ss': return '00'
+    case 'H': case 'm': case 's': return '0'
+    case 'hh': case 'h': return '12'
+    case 'kk': case 'k': return '24'
+    case 'A': return 'AM'
+    case 'a': return 'am'
+    case 'X': return String(utc(d.year, d.month - 1, d.day).getTime() / 1000)
+    case 'x': return String(utc(d.year, d.month - 1, d.day).getTime())
     default: return t
   }
 }
@@ -210,6 +232,9 @@ export function dayOf(s: DailySettings, path: string): Day | null {
       case 'dddd': re += `(?:${WEEKDAYS.join('|')})`; break
       case 'ddd': re += `(?:${WEEKDAYS.map((w) => w.slice(0, 3)).join('|')})`; break
       case 'dd': re += `(?:${WEEKDAYS.map((w) => w.slice(0, 2)).join('|')})`; break
+      case 'A': re += 'AM'; break
+      case 'a': re += 'am'; break
+      case 'X': case 'x': re += '-?\\d+'; break
       // Anything else is derivable from the date (or not enough to find it): match and ignore.
       default: re += '\\d+'
     }

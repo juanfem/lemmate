@@ -38,7 +38,8 @@
   /** The entry before the one shown, as text: '' when the shown one is where the note began,
    *  null while it loads or when older history has been pruned. */
   let previous: string | null = $state(null)
-  let current = $state('')
+  /** The note as it stands now; null until it has loaded. */
+  let current: string | null = $state(null)
   let mode = $state<Mode>('changes')
   let title = $derived(displayName(session.pathOf(noteId) ?? ''))
   let trail = $derived((session.pathOf(noteId) ?? '').split('/').slice(0, -1))
@@ -58,13 +59,13 @@
     void reload()
   })
 
-  // The note as it stands, for marking what a version no longer matches. Read and released at
-  // once: a history pane watches nothing, it only needs the text that is there now.
+  // The note as it stands, for marking what a version no longer matches and for "Compared
+  // with now". Followed for as long as the page is up — "now" moves while it is being read —
+  // and taken from the server, not from an offline copy or a doc that has not loaded yet.
   $effect(() => {
     const id = noteId
-    const { doc, release } = session.acquire(id)
-    current = doc.getText('content').toString()
-    release()
+    current = null
+    return session.watchNote(id, (text) => (current = text), { synced: true })
   })
 
   $effect(() => {
@@ -267,9 +268,13 @@
   </div>
   {#if seq !== 0 && shown}
     {#if view === 'read'}
-      <VersionView content={shown.content} {current} embedUrl={(t) => embedUrlFor(session, session.pathOf(noteId) ?? '', t)} />
+      <VersionView content={shown.content} current={current ?? shown.content} embedUrl={(t) => embedUrlFor(session, session.pathOf(noteId) ?? '', t)} />
     {:else if view === 'since'}
-      <DiffView before={shown.content} after={current} />
+      {#if current === null}
+        <p class="none">Loading the note…</p>
+      {:else}
+        <DiffView before={shown.content} after={current} />
+      {/if}
     {:else if previous !== null}
       <DiffView before={previous} after={shown.content} />
     {/if}

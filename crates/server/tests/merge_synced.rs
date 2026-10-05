@@ -16,6 +16,10 @@ use lemmate_core::client::{LocalHandle, LocalOptions, SyncOptions, start_many};
 use lemmate_server::{ServerOptions, build_state, router};
 use serde_json::Value;
 
+#[path = "../../core/tests/common/mod.rs"]
+mod common;
+use common::{keyed, remember};
+
 async fn server(attachments: &Path) -> SocketAddr {
     let opts = ServerOptions { attachments_dir: attachments.to_path_buf(), ..Default::default() };
     let state = build_state(Store::open_in_memory().unwrap(), opts);
@@ -43,12 +47,13 @@ async fn relay(root: &Path, dirs: &[&str], server: SocketAddr) -> LocalHandle {
         web_dir: None,
         vault_root: Some(root.to_path_buf()),
         config_path: None,
+        allow_remote: false,
     };
-    start_many(opts, local).await.unwrap()
+    remember(start_many(opts, local).await.unwrap())
 }
 
 async fn get(url: String) -> (u16, Value) {
-    tokio::task::spawn_blocking(move || match ureq::get(&url).call() {
+    tokio::task::spawn_blocking(move || match keyed(ureq::get(&url), &url).call() {
         Ok(mut r) => {
             let status = r.status().as_u16();
             let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -64,8 +69,7 @@ async fn get(url: String) -> (u16, Value) {
 async fn json(url: String, body: Value) -> Value {
     let (code, text) = tokio::task::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
-        let mut r = agent
-            .post(&url)
+        let mut r = keyed(agent.post(&url), &url)
             .header("content-type", "application/json")
             .send(body.to_string().as_bytes())
             .unwrap();
@@ -103,7 +107,7 @@ async fn a_synced_vault_merged_away_moves_its_notes_and_stops_existing() {
     let hash = hash_bytes(&bytes);
     tokio::task::spawn_blocking({
         let (url, bytes) = (format!("{base}/api/v1/vaults/{from}/attachments/{hash}"), bytes.clone());
-        move || ureq::put(&url).header("x-filename", "diagram.png").send(&bytes[..]).unwrap()
+        move || keyed(ureq::put(&url), &url).header("x-filename", "diagram.png").send(&bytes[..]).unwrap()
     })
     .await
     .unwrap();

@@ -2,12 +2,13 @@
 // place, and revealed again on any line the selection touches. Lossless by construction.
 
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
-import { RangeSet, StateEffect, StateField, type EditorState, type Text } from '@codemirror/state'
+import { RangeSet, StateEffect, StateField, type EditorState, type Text, type TransactionSpec } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
 import type { SyntaxNode, Tree } from '@lezer/common'
 import katex from 'katex'
 import { codeLanguageName, htmlBlockImages } from './syntax.ts'
 import { blockMarker, parseEmbed, type EmbedTarget } from './transclude.ts'
+import { imageSrc, linkTarget } from '../linktarget.ts'
 
 export interface LivePreviewOptions {
   /** Never reveal markup (read-only views have no meaningful cursor). */
@@ -107,7 +108,11 @@ class ImageWidget extends WidgetType {
   toDOM() {
     const img = document.createElement('img')
     img.className = 'cm-embed-image'
-    img.src = this.url
+    // Whoever wrote the note chooses the address, and the reader's browser fetches it with the
+    // reader's session: nothing of ours but an attachment may be asked for this way.
+    const src = imageSrc(this.url)
+    if (src === undefined) img.dataset.refused = this.url
+    else img.src = src
     img.alt = this.alt
     return img
   }
@@ -193,11 +198,13 @@ class CheckboxWidget extends WidgetType {
   eq(other: CheckboxWidget) {
     return other.checked === this.checked
   }
-  toDOM() {
+  toDOM(view: EditorView) {
     const box = document.createElement('input')
     box.type = 'checkbox'
     box.checked = this.checked
     box.className = 'cm-task-checkbox'
+    // A transclusion's or a past version's: ticking it would change a copy nobody keeps.
+    if (view.state.readOnly) box.disabled = true
     return box
   }
   ignoreEvent() {
@@ -486,6 +493,15 @@ export function tableModel(doc: (f: number, t: number) => string, table: SyntaxN
   return { align: model.align, header: fit(model.header), rows: model.rows.map(fit) }
 }
 
+/**
+ * The `href` a rendered link may carry: a web address only — never a `javascript:` one, and a
+ * relative one means a file of the vault, which only the click handler knows how to open.
+ */
+export function webHref(href: string): string | undefined {
+  const target = linkTarget('', href)
+  return target?.kind === 'web' && /^https?:/iu.test(target.url) ? target.url : undefined
+}
+
 function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string) => void, openUrl?: (href: string) => void) {
   for (const it of content) {
     switch (it.kind) {
@@ -508,7 +524,8 @@ function renderInlines(parent: HTMLElement, content: Inline[], open: (t: string)
       }
       case 'link': {
         const a = document.createElement('a')
-        a.href = it.href
+        const href = webHref(it.href)
+        if (href !== undefined) a.href = href
         a.target = '_blank'
         a.rel = 'noopener noreferrer'
         if (openUrl) {
@@ -678,6 +695,53 @@ function frontMatterSummary(body: string): string {
   return `${shown.join(' · ')} · ${keys.length} ${keys.length === 1 ? 'property' : 'properties'}`
 }
 
+/** A callout: its opening and closing fence lines (1-based), and what its title bar says. */
+export interface CalloutSpan {
+  open: number
+  close: number
+  title: string
+}
+
+/**
+ * The callouts among `count` lines, read by `line(n)`. Lines up to `skipTo` (the front matter)
+ * are not markdown, and neither is a fenced code block, so a `:::` in either opens or closes
+ * nothing. A callout is only one once its closing fence turns up: pandoc reads an unclosed one
+ * as text, and styling the rest of the note as a callout over one missing line is worse.
+ * Fenced divs nest; the callout closes with the fence that matches its own.
+ */
+export function calloutSpans(line: (n: number) => string, count: number, skipTo = 0): CalloutSpan[] {
+  const out: CalloutSpan[] = []
+  let open: { at: number; title: string; depth: number } | null = null
+  let fence: { ch: string; len: number } | null = null
+  for (let ln = skipTo + 1; ln <= count; ln++) {
+    const t = line(ln).trim()
+    if (fence) {
+      const m = /^(`{3,}|~{3,})\s*$/u.exec(t)
+      if (m && m[1]![0] === fence.ch && m[1]!.length >= fence.len) fence = null
+      continue
+    }
+    const f = /^(`{3,}|~{3,})/u.exec(t)
+    if (f && !(f[1]![0] === '`' && t.slice(f[1]!.length).includes('`'))) {
+      fence = { ch: f[1]![0]!, len: f[1]!.length }
+      continue
+    }
+    if (!open) {
+      if (/^:{3,}\s*\{?\.?callout/u.test(t)) {
+        const title = /title="([^"]*)"/u.exec(t)?.[1] ?? /callout-([a-z]+)/u.exec(t)?.[1] ?? 'note'
+        open = { at: ln, title, depth: 0 }
+      }
+      continue
+    }
+    if (/^:{3,}\s*$/u.test(t)) {
+      if (open.depth === 0) {
+        out.push({ open: open.at, close: ln, title: open.title })
+        open = null
+      } else open.depth--
+    } else if (/^:{3,}\s*\S/u.test(t)) open.depth++
+  }
+  return out
+}
+
 /** Does any selection range touch the lines spanned by [from, to]? */
 function revealedBySelection(state: EditorState, from: number, to: number): boolean {
   const a = state.doc.lineAt(from).from
@@ -697,29 +761,20 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
   const push = (from: number, to: number, deco: Decoration) => items.push({ from, to, deco })
   const indents: { from: number; to: number }[] = []
 
+  const fm = frontMatterRange(state)
+
   // Pandoc fenced divs / Quarto callouts (SPEC §5.3): `::: {.callout-note title="…"}` … `:::`
-  let inCallout = false
-  for (let ln = 1; ln <= state.doc.lines; ln++) {
-    const line = state.doc.line(ln)
-    const t = line.text.trim()
-    if (!inCallout && /^:{3,}\s*\{?\.?callout/u.test(t)) {
-      inCallout = true
-      push(line.from, line.from, Decoration.line({ class: 'cm-callout cm-callout-fence' }))
-      const title = /title="([^"]*)"/u.exec(t)?.[1] ?? /callout-([a-z]+)/u.exec(t)?.[1] ?? 'note'
-      if (!revealed(state, line.from, line.to)) push(line.from, line.to, Decoration.replace({ widget: new CalloutTitle(title) }))
-      continue
-    }
-    if (inCallout) {
-      const closing = /^:{3,}\s*$/u.test(t)
-      push(line.from, line.from, Decoration.line({ class: closing ? 'cm-callout cm-callout-fence' : 'cm-callout' }))
-      if (closing) {
-        if (!revealed(state, line.from, line.to)) push(line.from, line.to, hide)
-        inCallout = false
-      }
+  const lines = (ln: number) => state.doc.line(ln).text
+  for (const c of calloutSpans(lines, state.doc.lines, fm ? state.doc.lineAt(fm.to).number : 0)) {
+    for (let ln = c.open; ln <= c.close; ln++) {
+      const line = state.doc.line(ln)
+      const fence = ln === c.open || ln === c.close
+      push(line.from, line.from, Decoration.line({ class: fence ? 'cm-callout cm-callout-fence' : 'cm-callout' }))
+      if (!fence || revealed(state, line.from, line.to)) continue
+      push(line.from, line.to, ln === c.open ? Decoration.replace({ widget: new CalloutTitle(c.title) }) : hide)
     }
   }
 
-  const fm = frontMatterRange(state)
   if (fm && !revealed(state, fm.from, fm.to)) {
     push(fm.from, fm.to, Decoration.replace({ widget: new FrontMatterWidget(frontMatterSummary(fm.body)), block: true }))
   }
@@ -983,10 +1038,31 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
   return { deco: Decoration.set(ranges, true), indents: Decoration.set(indents.map((r) => hide.range(r.from, r.to))) }
 }
 
+/**
+ * The lines each selection range starts and ends on — all `revealedBySelection` depends on: a
+ * span of whole lines is touched by a range exactly when the range's first line is not after
+ * the span's last, and its last line not before the span's first.
+ */
+export function selectionLines(state: EditorState): string {
+  return state.selection.ranges.map((r) => `${state.doc.lineAt(r.from).number}:${state.doc.lineAt(r.to).number}`).join(',')
+}
+
 function hideMarks(n: SyntaxNode, push: (f: number, t: number, d: Decoration) => void) {
   for (const name of ['EmphasisMark', 'CodeMark', 'StrikethroughMark']) {
     for (const m of n.getChildren(name)) push(m.from, m.to, hide)
   }
+}
+
+/**
+ * Tick or untick the task whose `[ ]` starts at `pos` — the box stands in for the TaskMarker
+ * itself, wherever the item is: nested, numbered, or inside a `>` quote. Null when there is no
+ * marker there, or the document is read-only (a transclusion, a past version).
+ */
+export function toggleTaskAt(state: EditorState, pos: number): TransactionSpec | null {
+  if (state.readOnly) return null
+  const mark = /^\[( |x|X)\]$/u.exec(state.sliceDoc(pos, pos + 3))
+  if (!mark) return null
+  return { changes: { from: pos + 1, to: pos + 2, insert: mark[1] === ' ' ? 'x' : ' ' } }
 }
 
 export function livePreview(opts: LivePreviewOptions) {
@@ -994,8 +1070,19 @@ export function livePreview(opts: LivePreviewOptions) {
   // front matter) are only allowed from fields. Recomputed on document or selection changes.
   const field = StateField.define<Preview>({
     create: (state) => build(state, opts),
-    update: (preview, tr) =>
-      tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview)) ? build(tr.state, opts) : preview,
+    update: (preview, tr) => {
+      // The parser works through a long note in slices, in the background: each slice it adds
+      // is more of the note to draw, with neither the text nor the selection changing.
+      if (tr.docChanged || tr.effects.some((e) => e.is(refreshPreview)) || syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
+        return build(tr.state, opts)
+      }
+      // A move of the cursor changes only what is revealed, which depends only on which lines
+      // the selection touches (see `revealedBySelection`): along a line, nothing to redo.
+      if (tr.selection && !opts.alwaysFolded && selectionLines(tr.state) !== selectionLines(tr.startState)) {
+        return build(tr.state, opts)
+      }
+      return preview
+    },
     provide: (f) => [
       EditorView.decorations.from(f, (p) => p.deco),
       EditorView.atomicRanges.of((view) => view.state.field(f).indents),
@@ -1019,13 +1106,9 @@ export function livePreview(opts: LivePreviewOptions) {
         }
         // Toggle task checkboxes by clicking the rendered box.
         if (!target.classList?.contains('cm-task-checkbox')) return false
-        const pos = view.posAtDOM(target)
-        const line = view.state.doc.lineAt(pos)
-        const m = /^(\s*(?:[-*+]|\d+[.)])\s+\[)( |x|X)(\])/u.exec(line.text)
-        if (!m) return false
-        const at = line.from + m[1]!.length
-        view.dispatch({ changes: { from: at, to: at + 1, insert: m[2] === ' ' ? 'x' : ' ' } })
         event.preventDefault()
+        const toggle = toggleTaskAt(view.state, view.posAtDOM(target))
+        if (toggle) view.dispatch(toggle)
         return true
       },
     }),

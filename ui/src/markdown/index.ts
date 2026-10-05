@@ -57,6 +57,111 @@ export function parseTree(source: string, htmlBlocks = true): Root {
   })
 }
 
+/** Container markers (`>`, list bullets and numbers) a line may open before the rest is text. */
+export const MAX_CONTAINERS = 32
+/** Columns of whitespace (a tab counts 4) a line's container prefix may hold. */
+export const MAX_INDENT = 128
+/** Emphasis delimiters (`*`, `~`, and `_` not inside a word) a block may hold. */
+export const MAX_EMPHASIS = 500
+/**
+ * How deep `[` may nest within a block — and how many `]` closing nothing it may hold, each of
+ * which sends the parser looking back through the whole block for a `[`.
+ */
+export const MAX_BRACKETS = 32
+
+const ASCII_ALNUM = /^[A-Za-z0-9]$/u
+const ASCII_PUNCT = /^[!-/:-@[-`{-~]$/u
+
+/**
+ * The source with pathological nesting defused, before the parser sees it — the twin of
+ * `markdown::tame`. Each level of nesting is a level of recursion and the parser's work grows
+ * with the square of the depth, so a note of ten thousand `>` or `*` would overflow the stack or
+ * hang the tab. No real note comes near these limits; past them, markers are escaped with `\`
+ * and read as text. A *block* here is a run of non-blank lines.
+ */
+export function tame(source: string): string {
+  const out: string[] = []
+  let changed = false
+  let emphasis = 0
+  let brackets = 0
+  let stray = 0
+  const counted = (n: number, limit: number): [number, boolean] => (n >= limit ? [n, true] : [n + 1, false])
+  for (const line of source.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
+    if (/^[ \t\r\n]*$/u.test(line)) {
+      emphasis = 0
+      brackets = 0
+      stray = 0
+      out.push(line)
+      continue
+    }
+    let i = 0
+    let ws = 0
+    let markers = 0
+    for (;;) {
+      const start = i
+      let cols = 0
+      while (line[i] === ' ' || line[i] === '\t') {
+        cols += line[i] === '\t' ? 4 : 1
+        i++
+      }
+      if (ws + cols > MAX_INDENT) {
+        // At least one space stays, or the marker before it would stop being one.
+        const keep = Math.max(MAX_INDENT - ws, 1)
+        out.push(' '.repeat(keep))
+        ws += keep
+        changed = true
+      } else {
+        out.push(line.slice(start, i))
+        ws += cols
+      }
+      const m = containerMarker(line, i)
+      if (m === 0) break
+      out.push(line.slice(i, i + m - 1))
+      if (markers === MAX_CONTAINERS) {
+        out.push('\\')
+        changed = true
+      }
+      out.push(line[i + m - 1]!)
+      i += m
+      if (markers === MAX_CONTAINERS) break
+      markers++
+    }
+    for (; i < line.length; i++) {
+      const c = line[i]!
+      if (c === '\\' && i + 1 < line.length && ASCII_PUNCT.test(line[i + 1]!)) {
+        out.push(line.slice(i, i + 2))
+        i++
+        continue
+      }
+      let escape = false
+      if (c === '*' || c === '~') [emphasis, escape] = counted(emphasis, MAX_EMPHASIS)
+      else if (c === '_' && !(i > 0 && ASCII_ALNUM.test(line[i - 1]!) && ASCII_ALNUM.test(line[i + 1] ?? '')))
+        [emphasis, escape] = counted(emphasis, MAX_EMPHASIS)
+      else if (c === '[') [brackets, escape] = counted(brackets, MAX_BRACKETS)
+      else if (c === ']' && brackets === 0) [stray, escape] = counted(stray, MAX_BRACKETS)
+      else if (c === ']') brackets--
+      if (escape) {
+        out.push('\\')
+        changed = true
+      }
+      out.push(c)
+    }
+  }
+  return changed ? out.join('') : source
+}
+
+/** The length of the container marker at `i` — see `container_marker` in the Rust — or 0. */
+function containerMarker(line: string, i: number): number {
+  const spaced = (at: number) => at >= line.length || ' \t\r\n'.includes(line[at]!)
+  const c = line[i]
+  if (c === '>') return 1
+  if ((c === '-' || c === '+' || c === '*') && spaced(i + 1)) return 1
+  let n = 0
+  while (i + n < line.length && line[i + n]! >= '0' && line[i + n]! <= '9') n++
+  if (n > 0 && n <= 9 && (line[i + n] === '.' || line[i + n] === ')') && spaced(i + n + 1)) return n + 1
+  return 0
+}
+
 export function index(source: string): NoteIndex {
   const ix: NoteIndex = {
     title: null,
@@ -71,7 +176,7 @@ export function index(source: string): NoteIndex {
     plain_text: '',
   }
   const plain: string[] = []
-  walk(parseTree(source), ix, plain)
+  walk(parseTree(tame(source)), ix, plain)
   ix.plain_text = plain.join('\n').split(/\s+/u).filter(Boolean).join(' ')
 
   const fm = ix.front_matter
@@ -86,50 +191,54 @@ export function index(source: string): NoteIndex {
   return ix
 }
 
-function walk(node: Nodes, ix: NoteIndex, plain: string[]): void {
-  switch (node.type) {
-    case 'yaml':
-      ix.front_matter = parseFrontMatter(node.value)
-      break
-    case 'heading': {
-      const text = inlineText(node.children)
-      scanInline(text, ix)
-      plain.push(text)
-      collectLinks(node.children, ix)
-      ix.headings.push({ depth: node.depth, text })
-      break
-    }
-    // A table cell holds inline content just as a paragraph does, and the same links and tags.
-    case 'paragraph':
-    case 'tableCell': {
-      const text = inlineText(node.children)
-      scanInline(text, ix)
-      plain.push(text)
-      collectLinks(node.children, ix)
-      break
-    }
-    case 'math':
-    case 'inlineMath':
-      ix.has_math = true
-      break
-    case 'listItem':
-      if (node.checked !== null && node.checked !== undefined) ix.has_tasks = true
-      break
-    case 'code': {
-      if (node.lang) {
-        const lang = node.lang.replace(/^[{}]+/u, '').replace(/[{}]+$/u, '')
-        if (lang && !ix.code_langs.includes(lang)) ix.code_langs.push(lang)
+/** Pre-order over the tree, with an explicit stack: however deep a note nests, no recursion. */
+function walk(root: Nodes, ix: NoteIndex, plain: string[]): void {
+  // Each node, and whether its parent holds blocks (so a raw HTML child is read for links).
+  const stack: [Nodes, boolean][] = [[root, false]]
+  for (let top = stack.pop(); top; top = stack.pop()) {
+    const [node, inBlocks] = top
+    if (inBlocks && node.type === 'html') htmlBlockLinks(node.value, ix)
+    switch (node.type) {
+      case 'yaml':
+        ix.front_matter = parseFrontMatter(node.value)
+        break
+      case 'heading': {
+        const [text, scan] = inlineText(node.children)
+        scanInline(scan, ix)
+        plain.push(text)
+        collectLinks(node.children, ix)
+        ix.headings.push({ depth: node.depth, text })
+        break
       }
-      break
+      // A table cell holds inline content just as a paragraph does, and the same links and tags.
+      case 'paragraph':
+      case 'tableCell': {
+        const [text, scan] = inlineText(node.children)
+        scanInline(scan, ix)
+        plain.push(text)
+        collectLinks(node.children, ix)
+        break
+      }
+      case 'math':
+      case 'inlineMath':
+        ix.has_math = true
+        break
+      case 'listItem':
+        if (node.checked !== null && node.checked !== undefined) ix.has_tasks = true
+        break
+      case 'code': {
+        if (node.lang) {
+          const lang = node.lang.replace(/^[{}]+/u, '').replace(/[{}]+$/u, '')
+          if (lang && !ix.code_langs.includes(lang)) ix.code_langs.push(lang)
+        }
+        break
+      }
+      default:
+        break
     }
-    default:
-      break
-  }
-  if ('children' in node) {
-    const holdsBlocks = ['root', 'blockquote', 'listItem', 'footnoteDefinition'].includes(node.type)
-    for (const child of node.children) {
-      if (holdsBlocks && child.type === 'html') htmlBlockLinks(child.value, ix)
-      walk(child as Nodes, ix, plain)
+    if ('children' in node) {
+      const holdsBlocks = ['root', 'blockquote', 'listItem', 'footnoteDefinition'].includes(node.type)
+      for (let k = node.children.length - 1; k >= 0; k--) stack.push([node.children[k] as Nodes, holdsBlocks])
     }
   }
 }
@@ -184,38 +293,65 @@ export function srcAttributes(html: string): string[] {
 }
 
 function collectLinks(nodes: Nodes[], ix: NoteIndex): void {
-  for (const n of nodes) {
+  const stack = [...nodes].reverse()
+  for (let n = stack.pop(); n; n = stack.pop()) {
     if (n.type === 'link' || n.type === 'image') ix.links.push(n.url)
     if (n.type === 'html') ix.links.push(...srcAttributes(n.value))
-    if ('children' in n) collectLinks(n.children as Nodes[], ix)
+    if ('children' in n) for (let k = n.children.length - 1; k >= 0; k--) stack.push(n.children[k] as Nodes)
   }
 }
 
-/** Concatenated text of inline children, skipping code and math (no tags/links live there). */
-function inlineText(nodes: Nodes[]): string {
+/**
+ * Concatenated text of inline children, skipping code and math (no tags/links live there): the
+ * text itself, and the same with every autolinked URL blanked out — what is scanned for tags and
+ * wikilinks, so that `https://example.com/#anchor` does not tag the note `anchor`.
+ */
+function inlineText(nodes: Nodes[]): [string, string] {
   let s = ''
-  for (const n of nodes) {
+  let scan = ''
+  const stack: [Nodes, boolean][] = [...nodes].reverse().map((n) => [n, false])
+  for (let top = stack.pop(); top; top = stack.pop()) {
+    const [n, url] = top
     switch (n.type) {
       case 'text':
         s += n.value
+        scan += url ? ' ' : n.value
         break
       case 'inlineCode':
       case 'inlineMath':
         s += ' '
+        scan += ' '
         break
       case 'break':
         s += '\n'
+        scan += '\n'
         break
       default:
-        if ('children' in n) s += inlineText(n.children as Nodes[])
+        if ('children' in n) {
+          const inUrl = url || (n.type === 'link' && isAutolink(n.url, n.children as Nodes[]))
+          for (let k = n.children.length - 1; k >= 0; k--) stack.push([n.children[k] as Nodes, inUrl])
+        }
     }
   }
-  return s
+  return [s, scan]
+}
+
+/**
+ * Whether a link is its own URL written out — `<https://…>`, `<a@b.c>`, or a bare URL or `www.`
+ * address GFM links by itself — rather than text someone wrote for it.
+ */
+function isAutolink(url: string, children: Nodes[]): boolean {
+  const only = children.length === 1 ? children[0] : undefined
+  if (only?.type !== 'text') return false
+  const text = only.value
+  return url === text || url === `http://${text}` || url === `mailto:${text}`
 }
 
 const ALNUM = /^[\p{Alphabetic}\p{N}]$/u
 const TAG_CHAR = /^[\p{Alphabetic}\p{N}_\-/]$/u
 const LETTER = /\p{Alphabetic}/u
+/** An ASCII character that cannot be in a tag; where the word a tag is read from ends. */
+const WORD_END = /^[\x00-\x2c.:-@[-^`{-\x7f]$/u
 
 function prevChar(text: string, i: number): string {
   if (i === 0) return ''
@@ -242,19 +378,18 @@ function scanInline(text: string, ix: NoteIndex): void {
         }
       }
     }
+    // The body is read composed (NFC), so `#áb` typed as `a` + a combining accent is `áb`.
     if (text[i] === '#') {
       const boundary = i === 0 || !ALNUM.test(prevChar(text, i))
       if (boundary) {
+        let end = i + 1
+        while (end < text.length && !WORD_END.test(text[end]!)) end++
         let body = ''
-        for (const ch of text.slice(i + 1)) {
+        for (const ch of text.slice(i + 1, end).normalize('NFC')) {
           if (!TAG_CHAR.test(ch)) break
           body += ch
         }
-        if (LETTER.test(body) && !body.startsWith('/')) {
-          pushTag(ix.tags, body)
-          i += 1 + body.length
-          continue
-        }
+        if (LETTER.test(body) && !body.startsWith('/')) pushTag(ix.tags, body)
       }
     }
     i += 1

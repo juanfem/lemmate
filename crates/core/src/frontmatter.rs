@@ -6,14 +6,15 @@
 //! own line.
 
 /// Byte range of the YAML lines (excluding both fences) and the index just past the closing
-/// fence line, if the text starts with a front-matter block.
+/// fence line, if the text starts with a front-matter block. A fence may carry trailing spaces
+/// or tabs, as it may for micromark — the indexers' parser.
 pub fn block(text: &str) -> Option<(std::ops::Range<usize>, usize)> {
-    let rest = text.strip_prefix("---")?;
+    let rest = text.strip_prefix("---")?.trim_start_matches([' ', '\t']);
     let rest = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))?;
     let body_start = text.len() - rest.len();
     let mut pos = body_start;
     for line in text[body_start..].split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_end_matches(['\n', '\r', ' ', '\t']);
         if trimmed == "---" || trimmed == "..." {
             return Some((body_start..pos, pos + line.len()));
         }
@@ -126,6 +127,10 @@ mod tests {
         assert_eq!(normalize("---\nid: OTHER\n---\nbody\n", "X"), None);
         assert_eq!(block("no front matter\n---\n"), None);
         assert_eq!(block("---\nunterminated\n"), None);
+        // Trailing blanks on either fence, as micromark allows.
+        assert_eq!(id_of("--- \t\nid: X\n---  \nbody\n").as_deref(), Some("X"));
+        assert_eq!(block("--- \na: 1\n--- \nbody"), Some((5..10, 15)));
+        assert_eq!(block("---x\na\n---\n"), None);
     }
 
     #[test]

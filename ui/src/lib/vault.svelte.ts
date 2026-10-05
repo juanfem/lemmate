@@ -18,11 +18,15 @@ import { loadVault, noteKey, putNotes, removeNotes, type StoredNote } from './se
 const PREFETCH_GAP_MS = 50
 /** How often an installed client re-checks the server for notes that changed elsewhere. */
 const REFRESH_EVERY_MS = 60_000
+/** How long an edit made on the user's behalf waits for a note to sync before giving up. */
+const SYNC_WAIT_MS = 10_000
 import { SyncClient, type SyncStatus } from './sync.ts'
 import { rewriteWikilinks } from './links.ts'
+import { safeVaultPath } from './notename.ts'
 export { rewriteWikilinks }
 import { ulid } from './ulid.ts'
 import { restampId } from './moves.ts'
+import { replaceText } from './ytext.ts'
 import type { DailySettings } from './daily.ts'
 
 export interface NoteEntry {
@@ -90,13 +94,25 @@ export class VaultSession {
   vaultLoaded = $derived(this.vaultSynced || this.notes.length > 0)
   /** Last permission denial from the server, for the shell to show. */
   denied: { docId: string; reason: string } | null = $state(null)
+  /** Our role in this vault, when the vault listing says (`viewer`, `editor`, …). */
+  role: string | null = $state(null)
+  /** The server refused a write to the vault doc, whatever the listing said. */
+  private vaultWriteDenied = $state(false)
 
   /** Without the vault doc: for notes shared directly (SPEC §11.2), which grant only the note. */
   readonly noteOnly: boolean
+  /**
+   * Whether we may create notes here. Not a viewer, and not a note shared on its own, which
+   * comes without the vault doc that creating, moving or renaming a note writes to.
+   */
+  get canCreate(): boolean {
+    return !this.noteOnly && this.role !== 'viewer' && !this.vaultWriteDenied
+  }
 
-  constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string; client?: SyncClient } = {}) {
+  constructor(id: string, opts: { noteOnly?: boolean; wsUrl?: string; client?: SyncClient; role?: string } = {}) {
     this.id = id
     this.noteOnly = opts.noteOnly ?? false
+    this.role = opts.role ?? null
     this.pendingKey = `lemmate.pending.${id}`
     this.pending = loadIds(this.pendingKey)
     this.ownsClient = !opts.client
@@ -105,6 +121,7 @@ export class VaultSession {
       // A shared client is driven by the workspace, which fans these out to every session.
       this.client.onStatus = (s) => (this.status = s)
       this.client.onSynced = (docId) => this.onSynced(docId)
+      this.client.onAcked = (docId) => this.onAcked(docId)
       this.client.onDenied = (docId, reason) => this.onDenied(docId, reason)
     }
     this.notesMap = this.vaultDoc.getMap<string>('notes')
@@ -175,6 +192,15 @@ export class VaultSession {
     }
     for (const resolve of this.syncWaiters.get(docId) ?? []) resolve()
     this.syncWaiters.delete(docId)
+  }
+
+  /**
+   * The server has applied every change of ours to `docId` (SyncClient.onAcked). Not on
+   * `onSynced`: that fires as soon as *we* hold the server's state, before it has had the
+   * SyncStep2 carrying ours — clearing the mark then would forget an offline edit the moment
+   * the connection that was to deliver it dropped.
+   */
+  onAcked(docId: string) {
     // The server has this note now, so it no longer has to be held open on our account.
     if (this.pending.delete(docId)) {
       saveIds(this.pendingKey, this.pending)
@@ -183,15 +209,36 @@ export class VaultSession {
     }
   }
 
-  /** Resolve when the socket reports `docId` synced, or after `ms` — offline is an answer. */
-  private whenSynced(docId: string, ms = 5000): Promise<void> {
-    if (this.client.isSynced(docId)) return Promise.resolve()
-    return new Promise<void>((resolve) => {
+  /**
+   * Resolve when the socket reports `docId` synced — true — or with false after `ms`: offline
+   * is an answer, and the caller decides whether it is good enough.
+   */
+  private whenSynced(docId: string, ms = 5000): Promise<boolean> {
+    if (this.client.isSynced(docId)) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
       const waiters = this.syncWaiters.get(docId) ?? []
-      waiters.push(resolve)
+      const done = () => (clearTimeout(timer), resolve(true))
+      waiters.push(done)
       this.syncWaiters.set(docId, waiters)
-      setTimeout(resolve, ms)
+      const timer = setTimeout(() => {
+        const left = (this.syncWaiters.get(docId) ?? []).filter((w) => w !== done)
+        if (left.length) this.syncWaiters.set(docId, left)
+        else this.syncWaiters.delete(docId)
+        resolve(this.client.isSynced(docId))
+      }, ms)
     })
+  }
+
+  /**
+   * Wait for a note to hold what the server holds, or throw. For edits made on the user's
+   * behalf — a link rewritten, a note copied — where the text read is the text written back:
+   * reading the offline copy, or an empty doc that has not loaded yet, and writing that over
+   * the note would undo whatever changed elsewhere, or empty it.
+   */
+  private async mustSync(id: string) {
+    if (!(await this.whenSynced(id, SYNC_WAIT_MS))) {
+      throw new Error(`“${this.pathOf(id) ?? id}” has not loaded from the server (offline?)`)
+    }
   }
 
   /** Note this doc as needing a push, and keep it subscribed until it gets one. */
@@ -290,6 +337,9 @@ export class VaultSession {
 
   onDenied(docId: string, reason: string) {
     this.denied = { docId, reason }
+    // Reading the vault doc is allowed to anyone who can see the vault, so a refusal after it
+    // has synced is a refused write: a viewer, whatever the listing told us.
+    if (docId === this.vaultDocId && this.vaultSynced) this.vaultWriteDenied = true
   }
 
   /** Rename the vault for everyone (SPEC §4.3): the label lives in the vault doc. */
@@ -410,6 +460,7 @@ export class VaultSession {
 
   /** Create a note at `path` with front matter carrying its id (SPEC §6.3). */
   createNote(path: string, body = ''): string {
+    path = safeVaultPath(path)
     const id = ulid()
     const { doc, release } = this.acquire(id)
     doc.getText('content').insert(0, `---\nid: ${id}\n---\n${body}`)
@@ -423,6 +474,7 @@ export class VaultSession {
    * copy into a second vault is a different note, and two of them may not share an id.
    */
   adoptNote(path: string, text: string): string {
+    path = safeVaultPath(path)
     const id = ulid()
     const { doc, release } = this.acquire(id)
     doc.getText('content').insert(0, restampId(text, id))
@@ -431,74 +483,80 @@ export class VaultSession {
     return id
   }
 
-  /** Rename/move, then rewrite `[[links]]` in referring notes (SPEC §4.4). */
-  async renameNote(id: string, path: string) {
+  /**
+   * Rename/move, then rewrite `[[links]]` in referring notes (SPEC §4.4). The rename itself
+   * always happens; what comes back is a warning for the user when some links could not be
+   * followed — a referrer that never loaded is left alone rather than rewritten from a stale
+   * or empty copy — and null when they all were.
+   */
+  async renameNote(id: string, path: string): Promise<string | null> {
+    path = safeVaultPath(path)
     const old = this.notesMap.get(id)
-    if (old === path) return
+    if (old === path) return null
     this.notesMap.set(id, path)
-    if (!old) return
-    let referrers: { id: string }[] = []
+    if (!old) return null
+    let referrers: { id: string; path?: string }[] = []
     try {
-      referrers = await (await fetch(`/api/v1/vaults/${this.id}/notes/${id}/backlinks`)).json()
+      const r = await fetch(`/api/v1/vaults/${this.id}/notes/${id}/backlinks`)
+      if (!r.ok) throw new Error(String(r.status))
+      referrers = await r.json()
     } catch {
-      return
+      return `Renamed, but links to it were not updated: the list of notes linking here is unavailable.`
     }
+    const stuck: string[] = []
     for (const r of referrers) {
       if (r.id === id) continue
       const { doc, release } = this.acquire(r.id)
       try {
-        await this.whenLoaded(r.id, doc)
+        if (!(await this.whenSynced(r.id, SYNC_WAIT_MS))) {
+          stuck.push(this.pathOf(r.id) ?? r.path ?? r.id)
+          continue
+        }
         const text = doc.getText('content')
         const fixed = rewriteWikilinks(text.toString(), old, path)
-        if (fixed !== null) doc.transact(() => (text.delete(0, text.length), text.insert(0, fixed)))
+        if (fixed !== null) replaceText(text, fixed)
       } finally {
         release()
       }
     }
+    return stuck.length
+      ? `Renamed, but links in ${stuck.length} ${stuck.length === 1 ? 'note' : 'notes'} were not updated, because they have not loaded from the server: ${stuck.join(', ')}`
+      : null
   }
 
   /**
    * Rewrite a set of notes in one pass — what a tag renamed or deleted across the vault is.
    * `edit` returns null for a note that turns out to have nothing to change, which is the usual
-   * answer for at least some of the notes a tag search hands back. Returns how many changed.
+   * answer for at least some of the notes a tag search hands back. Returns how many changed,
+   * and the paths of those left alone because they never synced (see `mustSync`).
    */
-  async rewriteNotes(ids: string[], edit: (text: string) => string | null): Promise<number> {
+  async rewriteNotes(
+    ids: string[],
+    edit: (text: string) => string | null,
+  ): Promise<{ changed: number; skipped: string[] }> {
     let changed = 0
+    const skipped: string[] = []
     for (const id of ids) {
       const { doc, release } = this.acquire(id)
       try {
-        await this.whenLoaded(id, doc)
+        if (!(await this.whenSynced(id, SYNC_WAIT_MS))) {
+          skipped.push(this.pathOf(id) ?? id)
+          continue
+        }
         const text = doc.getText('content')
-        const before = text.toString()
-        const next = edit(before)
-        if (next === null || next === before) continue
-        // Replace only the span that actually differs. A whole-document delete-and-insert puts
-        // the entire note through the update log and drops everyone else's cursor to the top,
-        // for an edit that is usually a handful of characters.
-        let head = 0
-        while (head < before.length && head < next.length && before[head] === next[head]) head++
-        let tail = 0
-        while (
-          tail < before.length - head &&
-          tail < next.length - head &&
-          before[before.length - 1 - tail] === next[next.length - 1 - tail]
-        )
-          tail++
-        doc.transact(() => {
-          text.delete(head, before.length - head - tail)
-          text.insert(head, next.slice(head, next.length - tail))
-        })
-        changed++
+        const next = edit(text.toString())
+        if (next !== null && replaceText(text, next)) changed++
       } finally {
         release()
       }
     }
-    return changed
+    return { changed, skipped }
   }
 
   /**
-   * Resolve once a note doc has content to read: either the socket says it is synced, or the
-   * first update lands. The timeout is the offline case — an empty doc is still an answer.
+   * Resolve once a note doc has content to *show*: either the socket says it is synced, or the
+   * first update lands (often the offline copy). The timeout is the offline case — an empty doc
+   * is still an answer. Only for reading: anything written back waits for `mustSync`.
    */
   private whenLoaded(id: string, doc: Y.Doc): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -509,11 +567,15 @@ export class VaultSession {
     })
   }
 
-  /** A note's markdown, once it has loaded. For moving one to another vault (SPEC §4.3). */
+  /**
+   * A note's markdown, as the server holds it. For moving one to another vault (SPEC §4.3),
+   * which deletes the original after copying this — so it throws rather than hand back an
+   * offline copy, or the empty doc of a note that has not loaded.
+   */
   async noteText(id: string): Promise<string> {
     const { doc, release } = this.acquire(id)
     try {
-      await this.whenLoaded(id, doc)
+      await this.mustSync(id)
       return doc.getText('content').toString()
     } finally {
       release()
@@ -524,12 +586,14 @@ export class VaultSession {
    * Follow a note that is only being read — an `![[embed]]` of it. `onText` gets its markdown
    * once it has loaded, then again on every change, whoever makes it. Returns what stops it.
    */
-  watchNote(id: string, onText: (text: string) => void): () => void {
+  watchNote(id: string, onText: (text: string) => void, opts: { synced?: boolean } = {}): () => void {
     const { doc, release } = this.acquire(id)
     const text = doc.getText('content')
     const send = () => onText(text.toString())
     let state: 'loading' | 'watching' | 'stopped' = 'loading'
-    void this.whenLoaded(id, doc).then(() => {
+    // `synced`: the first text is the server's, not the offline copy, unless it never answers.
+    const loaded = opts.synced ? this.whenSynced(id, SYNC_WAIT_MS) : this.whenLoaded(id, doc)
+    void loaded.then(() => {
       if (state !== 'loading') return
       state = 'watching'
       send()
@@ -581,6 +645,7 @@ export class VaultSession {
       const stored = JSON.parse(text) as { path: string; hash: string }
       return stored.path
     }
+    name = safeVaultPath(name).replaceAll('/', '-')
     let path = `attachments/${name}`
     if (this.attachmentsMap.get(path) && this.attachmentsMap.get(path) !== hash) {
       const dot = name.lastIndexOf('.')

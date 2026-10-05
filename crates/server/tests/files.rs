@@ -5,6 +5,10 @@ use lemmate_core::{Store, VaultId};
 use lemmate_server::{ServerOptions, build_state, router};
 use serde_json::Value;
 
+#[path = "../../core/tests/common/mod.rs"]
+mod common;
+use common::{keyed, remember};
+
 async fn serve() -> String {
     let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -22,16 +26,19 @@ async fn request(
     tokio::task::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
         let mut r = match method {
-            "GET" => agent.get(&url).call().unwrap(),
+            "GET" => keyed(agent.get(&url), &url).call().unwrap(),
             "PUT" => {
-                let mut req = agent.put(&url);
+                let mut req = keyed(agent.put(&url), &url);
                 for (k, v) in &headers {
                     req = req.header(*k, v);
                 }
                 req.send(&body[..]).unwrap()
             }
-            "POST" => agent.post(&url).header("content-type", "application/json").send(&body[..]).unwrap(),
-            "DELETE" => agent.delete(&url).call().unwrap(),
+            "POST" => keyed(agent.post(&url), &url)
+                .header("content-type", "application/json")
+                .send(&body[..])
+                .unwrap(),
+            "DELETE" => keyed(agent.delete(&url), &url).call().unwrap(),
             _ => unreachable!(),
         };
         let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -173,8 +180,9 @@ async fn a_desktop_follows_deletes_and_moves_of_kept_files() {
         web_dir: None,
         vault_root: Some(tmp.path().join("root")),
         config_path: None,
+        allow_remote: false,
     };
-    let handle = lemmate_core::client::start_many(vec![sync], local).await.unwrap();
+    let handle = remember(lemmate_core::client::start_many(vec![sync], local).await.unwrap());
     let relay = format!("http://{}/api/v1/vaults/{}", handle.addr, handle.vault_id);
     let server = format!("http://{addr}/api/v1/vaults/{}", handle.vault_id);
     let dir = tmp.path().join("root/notes");

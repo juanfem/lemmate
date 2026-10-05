@@ -26,7 +26,15 @@ test('defaults, the vault root, and nested formats', () => {
 })
 
 test('a path is read back to its day, and only a path the settings would write', () => {
-  const formats = ['YYYY-MM-DD', 'DD.MM.YYYY', 'YYYY/MM/YYYY-MM-DD dddd', 'dddd, MMMM Do YYYY', 'ddd D MMM YY [notes]']
+  const formats = [
+    'YYYY-MM-DD',
+    'DD.MM.YYYY',
+    'YYYY/MM/YYYY-MM-DD dddd',
+    'dddd, MMMM Do YYYY',
+    'ddd D MMM YY [notes]',
+    'YYYY-MM-DD HH.mm A',
+    'YYYY-MM-DD [X]X',
+  ]
   for (const format of formats) {
     const s = { ...none, folder: 'Journal', format }
     let d = { year: 2025, month: 12, day: 28 }

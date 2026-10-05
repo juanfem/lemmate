@@ -24,3 +24,31 @@ export function notePath(text: string): string {
   const t = text.trim().replace(/^\/+/u, '')
   return t.endsWith('.md') || t.endsWith('.qmd') ? t : `${t}.md`
 }
+
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu
+
+/**
+ * A vault path every replica can hold. The server refuses a vault-doc update that brings in a
+ * hidden, absolute or climbing path — and refuses the *whole* frame, so one such entry would
+ * leave this client's vault doc refused on every reconnect — and a desktop replica writes no
+ * file for a name Windows could not hold (`projection::check_path`). So a path is made safe
+ * here, where it enters the vault doc, rather than refused later: separators normalised, empty,
+ * `.` and `..` segments dropped, leading dots and trailing dots or spaces trimmed, the
+ * characters Windows forbids turned into `-`, and a reserved device name given a `_`.
+ */
+export function safeVaultPath(path: string): string {
+  const segs = path
+    .replace(/\\/gu, '/')
+    .split('/')
+    .map((seg) =>
+      seg
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0000-\u001f\u007f]/gu, '')
+        .replace(/[<>:"|?*]/gu, '-')
+        .replace(/^\.+/u, '')
+        .replace(/[. ]+$/u, ''),
+    )
+    .filter((seg) => seg !== '')
+    .map((seg) => (RESERVED.test(seg.split('.')[0].trimEnd()) ? `_${seg}` : seg))
+  return segs.join('/') || 'Untitled.md'
+}

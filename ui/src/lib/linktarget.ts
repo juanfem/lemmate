@@ -51,3 +51,27 @@ export function openWebLink(href: string) {
   const target = linkTarget('', href)
   if (target?.kind === 'web') window.open(target.url, '_blank', 'noopener,noreferrer')
 }
+
+/** The one same-origin address a note's image may load: an attachment, by vault and hash. */
+const ATTACHMENT_PATH = /^\/api\/v1\/vaults\/[^/]+\/attachments\/[^/]+$/u
+
+/**
+ * Whether the browser may fetch `url` for an image in a note, and as what. A note's author
+ * picks the address and a reader's browser fetches it with the reader's cookies, so an image
+ * pointed at the app's own API is a request made in the reader's name — a GET with an effect
+ * (opening a daily note creates it), or an expensive one, run by anyone who opens the note.
+ * Of our own origin only attachments load; other sites' images and `data:image/…` do as before.
+ * Undefined: show nothing.
+ */
+export function imageSrc(url: string, origin: string = globalThis.location?.origin ?? 'http://localhost'): string | undefined {
+  let u: URL
+  try {
+    u = new URL(url.trim(), `${origin}/`)
+  } catch {
+    return undefined
+  }
+  if (u.protocol === 'data:') return /^data:image\//iu.test(u.href) ? u.href : undefined
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined
+  if (u.origin !== origin) return u.href
+  return ATTACHMENT_PATH.test(u.pathname) ? u.href : undefined
+}

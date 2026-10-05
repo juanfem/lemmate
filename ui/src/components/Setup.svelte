@@ -68,12 +68,16 @@
           token: sync ? token.trim() || null : null,
         }),
       })
-      if (!r.ok) throw new Error(`${r.status}`)
-      // The desktop shell now writes the config, signs in, starts the relay and navigates
-      // this window; if that takes long, keep showing the busy state.
+      // The answer waits for the desktop shell to sign in, write the config and start the relay;
+      // a failure comes back as `{ error }` and the form can be sent again.
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { error?: string } | null
+        throw new Error(body?.error ?? `HTTP ${r.status}`)
+      }
+      // The shell navigates this window to the relay; keep showing the busy state until it does.
       onDone()
     } catch (err) {
-      error = `Setup failed (${String(err)}). Check the values and try again.`
+      error = `Setup failed: ${err instanceof Error ? err.message : String(err)}. Check the values and try again.`
       busy = false
     }
   }

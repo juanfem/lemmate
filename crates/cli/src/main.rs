@@ -72,6 +72,10 @@ enum Cmd {
         /// Access token (default: the one saved by `lemmate login` for this server).
         #[arg(long, env = "LEMMATE_TOKEN")]
         token: Option<String>,
+        /// Let --serve listen on an address other than loopback. Every request still needs the
+        /// key in the printed address.
+        #[arg(long, requires = "serve")]
+        allow_remote: bool,
     },
     /// Serve a folder of vaults on this machine, with no server (SPEC §3.2).
     ///
@@ -87,6 +91,10 @@ enum Cmd {
         /// Built web client to serve at / (ui/dist).
         #[arg(long, env = "LEMMATE_WEB_DIR")]
         web_dir: Option<PathBuf>,
+        /// Listen on an address other than loopback (with --bind). Every request still needs
+        /// the key in the printed address.
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Sign in to a server and save the session token for `sync` and the desktop app.
     Login {
@@ -407,6 +415,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Login { server, email, password, token, browser, register, invite, ca_cert } => {
+            warn_cleartext(&server);
             if browser {
                 let device = format!("lemmate CLI on {}", hostname());
                 let email = lemmate_cli::browser::login(&server, &device, ca_cert.as_deref())?;
@@ -517,9 +526,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir, token } => {
+        Cmd::Sync { vault, server, vault_id, once, ca_cert, serve, web_dir, token, allow_remote } => {
             let vault_id = vault_id.map(|s| s.parse::<VaultId>()).transpose().context("--vault-id")?;
             std::fs::create_dir_all(&vault).with_context(|| format!("creating {}", vault.display()))?;
+            warn_cleartext(&server);
             let token = token.or_else(|| credentials::load(&server));
             let opts =
                 SyncOptions { vault_dir: vault, server_url: Some(server), vault_id, once, ca_cert, token };
@@ -528,10 +538,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 Some(bind) => rt.block_on(async {
                     let handle = client::start(
                         opts,
-                        LocalOptions { bind, web_dir, vault_root: None, config_path: None },
+                        LocalOptions { bind, web_dir, vault_root: None, config_path: None, allow_remote },
                     )
                     .await?;
-                    println!("local relay: http://{}/#/v/{}", handle.addr, handle.vault_id);
+                    // The key is the relay's only lock: this address is the way in, once.
+                    println!("local relay: {}", handle.page_url(&format!("#/v/{}", handle.vault_id)));
                     handle.wait().await
                 })?,
                 None => rt.block_on(client::run(opts))?,
@@ -541,7 +552,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Serve { root, bind, web_dir } => {
+        Cmd::Serve { root, bind, web_dir, allow_remote } => {
             std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
             for (from, to) in vaults::rehome(&root) {
                 println!("renamed {} -> {}", from.display(), to.display());
@@ -565,9 +576,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             rt.block_on(async {
                 // No configuration file to write a server into: `serve` is configured by
                 // flags, so the UI does not offer to connect one (SPEC §3.2).
-                let local = LocalOptions { bind, web_dir, vault_root: Some(root.clone()), config_path: None };
+                let local = LocalOptions {
+                    bind,
+                    web_dir,
+                    vault_root: Some(root.clone()),
+                    config_path: None,
+                    allow_remote,
+                };
                 let handle = client::start_many(opts, local).await?;
-                println!("serving {} vault(s) on http://{}/", handle.vaults.len(), handle.addr);
+                println!("serving {} vault(s) on {}", handle.vaults.len(), handle.page_url(""));
                 handle.serve_forever().await
             })?;
             Ok(ExitCode::SUCCESS)
@@ -781,8 +798,7 @@ fn edit_in_editor(initial: &str, hint: &str) -> anyhow::Result<Option<String>> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
-    let file = std::env::temp_dir().join(format!("lemmate-{}-{stem}", std::process::id()));
-    std::fs::write(&file, initial).with_context(|| format!("writing {}", file.display()))?;
+    let (_dir, file) = private_temp_file(&stem, initial)?;
     let mut words = editor.split_whitespace();
     let program = words.next().unwrap_or("vi");
     let status = std::process::Command::new(program)
@@ -790,8 +806,8 @@ fn edit_in_editor(initial: &str, hint: &str) -> anyhow::Result<Option<String>> {
         .arg(&file)
         .status()
         .with_context(|| format!("launching editor {editor:?}"))?;
+    // `_dir` removes the directory and the file in it when it goes out of scope.
     let edited = std::fs::read_to_string(&file);
-    let _ = std::fs::remove_file(&file);
     if !status.success() {
         bail!("editor {editor:?} exited with {status}");
     }
@@ -799,8 +815,41 @@ fn edit_in_editor(initial: &str, hint: &str) -> anyhow::Result<Option<String>> {
     Ok((edited != initial).then_some(edited))
 }
 
+/// A file holding `contents` in a fresh directory only this user can enter (`0700`, random name),
+/// itself `0600` and created anew — so another local user can neither read the note nor plant a
+/// symlink where it is written. The directory goes when the returned guard is dropped.
+fn private_temp_file(stem: &str, contents: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
+    use std::io::Write;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("lemmate-edit-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder.tempdir().context("creating a temp directory")?;
+    let file = dir.path().join(format!("{stem}.md"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&file).with_context(|| format!("creating {}", file.display()))?;
+    f.write_all(contents.as_bytes()).with_context(|| format!("writing {}", file.display()))?;
+    Ok((dir, file))
+}
+
 fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "cli".into())
+    credentials::hostname()
+}
+
+/// Say so on stderr when `server` would carry the token in cleartext (`http://` off this machine).
+fn warn_cleartext(server: &str) {
+    if let Some(warning) = lemmate_core::tls::cleartext_warning(server) {
+        eprintln!("warning: {warning}");
+    }
 }
 
 fn rusqlite_version() -> String {
@@ -830,7 +879,24 @@ fn exe_names(tool: &str, pathext: Option<&str>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::exe_names;
+    use super::{exe_names, private_temp_file};
+
+    #[test]
+    fn notes_are_edited_in_a_private_directory_that_is_cleaned_up() {
+        let (dir, file) = private_temp_file("Projects-plan-md", "secret\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "secret\n");
+        assert!(file.starts_with(dir.path()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(dir.path()), 0o700);
+            assert_eq!(mode(&file), 0o600);
+        }
+        let root = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!root.exists());
+    }
 
     #[test]
     fn windows_commands_carry_their_pathext_suffixes() {

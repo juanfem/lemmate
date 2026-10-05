@@ -30,7 +30,7 @@
   import TrashPane from './components/TrashPane.svelte'
   import AttachmentsPane from './components/AttachmentsPane.svelte'
   import UploadDialog from './components/UploadDialog.svelte'
-  import { fileTab, isFileTab, parseFileTab } from './lib/filetabs.ts'
+  import { fileTab, hasUnsaved, isFileTab, parseFileTab } from './lib/filetabs.ts'
   import { isRenderTab, renderTab, tabNote } from './lib/rendertabs.ts'
   import { appAuthorize, renderReturn } from './lib/next.ts'
   import AuthorizeApp from './components/AuthorizeApp.svelte'
@@ -109,7 +109,10 @@
       .catch(() => {})
   $effect(() => {
     // The editor labels our cursor for others with this name.
-    if (me) (window as unknown as { lemmate?: { userName?: string } }).lemmate = { ...((window as unknown as { lemmate?: object }).lemmate ?? {}), userName: me.display_name }
+    if (!me) return
+    ;(window as unknown as { lemmate?: { userName?: string } }).lemmate = { ...((window as unknown as { lemmate?: object }).lemmate ?? {}), userName: me.display_name }
+    // Editors already open labelled their cursor before the account arrived; they relabel on this.
+    window.dispatchEvent(new Event('lemmate-user'))
   })
   async function signedIn() {
     // Signed in on the way to a render (a page opened in a browser that had no session): go on.
@@ -240,7 +243,9 @@
       const ws = new Workspace()
       workspace = ws
       // Debug/automation handle (used by scripts/cdp.mjs smoke runs).
-      ;(window as unknown as { lemmate?: unknown }).lemmate = { workspace: ws }
+      // Merged into whatever is there: the signed-in name (above) may have landed first, and the
+      // editor's cursor label reads it from here.
+      ;(window as unknown as { lemmate?: object }).lemmate = { ...((window as unknown as { lemmate?: object }).lemmate ?? {}), workspace: ws }
       // A detached window starts empty and opens the note its route names once it is known.
       const restored = detached ? { panes: [blankPane()], focused: 0 } : loadLayout()
       panes = restored.panes
@@ -356,8 +361,19 @@
   async function removeTagHere(tag: string, noteId: string) {
     const s = sessionOf(noteId)
     if (!s) return
-    await s.rewriteNotes([noteId], (text) => removeTagFromText(text, tag))
+    await reportSkipped(await s.rewriteNotes([noteId], (text) => removeTagFromText(text, tag)))
     tagsVersion++
+  }
+
+  /** Say which notes a vault-wide edit had to leave alone because they never loaded. */
+  async function reportSkipped(result: { skipped: string[] }) {
+    if (result.skipped.length === 0) return
+    await ask({
+      kind: 'confirm',
+      title: `${result.skipped.length} ${result.skipped.length === 1 ? 'note was' : 'notes were'} left unchanged`,
+      body: `They have not loaded from the server (offline?), and changing a copy that may be out of date could undo edits made elsewhere. Try again once connected:\n${result.skipped.join('\n')}`,
+      confirmLabel: 'OK',
+    })
   }
 
   /** Every note the vault says carries it — which is what "rename a tag" can only mean. */
@@ -378,10 +394,11 @@
     })
     const next = typed === null ? '' : cleanTag(typed)
     if (!next || next === tag) return
-    const changed = await s.rewriteNotes(ids, (text) => renameTagInText(text, tag, next))
+    const result = await s.rewriteNotes(ids, (text) => renameTagInText(text, tag, next))
     tagsVersion++
     if (tagFilter === tag) tagFilter = next
-    if (changed === 0) await ask({ kind: 'confirm', title: `Nothing carried #${tag}.`, confirmLabel: 'OK' })
+    if (result.skipped.length) await reportSkipped(result)
+    else if (result.changed === 0) await ask({ kind: 'confirm', title: `Nothing carried #${tag}.`, confirmLabel: 'OK' })
   }
 
   async function deleteTag(tag: string, vault: string) {
@@ -396,7 +413,7 @@
       danger: true,
     })
     if (ok === null) return
-    await s.rewriteNotes(ids, (text) => removeTagFromText(text, tag))
+    await reportSkipped(await s.rewriteNotes(ids, (text) => removeTagFromText(text, tag)))
     tagsVersion++
     if (tagFilter === tag) tagFilter = null
   }
@@ -687,6 +704,16 @@
   /** Close a tab wherever it is open; the pane goes away with its last tab. */
   function close(id: string, force = false) {
     if (!force && pinned.includes(id)) return
+    if (!force && hasUnsaved(id)) {
+      void ask({
+        kind: 'confirm',
+        title: `Close “${parseFileTab(id)?.path ?? id}” without saving?`,
+        body: 'Its changes have not been saved and will be lost.',
+        confirmLabel: 'Close without saving',
+        danger: true,
+      }).then((ok) => ok !== null && close(id, true))
+      return
+    }
     const p = panes.find((x) => x === focused && x.tabs.includes(id)) ?? panes.find((x) => x.tabs.includes(id))
     if (!p) return
     const i = p.tabs.indexOf(id)
@@ -1016,7 +1043,9 @@
     if (!s) return
     const current = s.pathOf(id) ?? ''
     const next = (await ask({ kind: 'prompt', title: 'Rename / move note', initial: current, placeholder: 'folder/note.md' }))?.trim()
-    if (next && next !== current) s.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
+    if (!next || next === current) return
+    const warning = await s.renameNote(id, next.endsWith('.md') || next.endsWith('.qmd') ? next : `${next}.md`)
+    if (warning) await ask({ kind: 'confirm', title: 'Links not updated', body: warning, confirmLabel: 'OK' })
   }
   function deleteActive() {
     if (active) void trashNotes(sessionOf(active)?.id ?? '', [active])
@@ -1063,7 +1092,7 @@
       if (ok === null) return
     }
     const openBefore = moves.filter((m) => panes.some((p) => p.tabs.includes(m.id))).map((m) => m.id)
-    const { moved, failed } = await ws.moveNotes(moves, drag.vault, toVault)
+    const { moved, failed, warnings } = await ws.moveNotes(moves, drag.vault, toVault)
     if (drag.vault !== toVault) {
       // The originals are gone and their ids with them; reopen the copies in their place.
       for (const id of openBefore) close(id, true)
@@ -1080,6 +1109,7 @@
         confirmLabel: 'OK',
       })
     }
+    if (warnings.length) await ask({ kind: 'confirm', title: 'Links not updated', body: warnings.join('\n'), confirmLabel: 'OK' })
     tagsVersion++
   }
 
@@ -1098,9 +1128,12 @@
     if (!s) return
     const next = (await ask({ kind: 'prompt', title: 'Rename / move folder', initial: folder }))?.trim().replace(/^\/+|\/+$/gu, '')
     if (!next || next === folder) return
+    const warnings: string[] = []
     for (const n of s.notes.filter((n) => n.path.startsWith(`${folder}/`))) {
-      await s.renameNote(n.id, `${next}/${n.path.slice(folder.length + 1)}`)
+      const warning = await s.renameNote(n.id, `${next}/${n.path.slice(folder.length + 1)}`)
+      if (warning) warnings.push(`${n.path}: ${warning}`)
     }
+    if (warnings.length) await ask({ kind: 'confirm', title: 'Links not updated', body: warnings.join('\n'), confirmLabel: 'OK' })
   }
   async function deleteFolder(vault: string, folder: string) {
     const s = workspace?.get(vault)

@@ -43,6 +43,11 @@ const PENDING_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_PENDING: usize = 10_000;
 /// Clock skew tolerated on `exp`.
 const SKEW_MS: i64 = 60_000;
+/// The cookie that ties a sign-in's `state` to the browser that started it (login CSRF: without
+/// it, a callback URL from the attacker's own sign-in would sign a victim into the attacker's
+/// account). It holds the state's hash, and only the callback's path ever sees it.
+const STATE_COOKIE: &str = "lemmate_oidc";
+const STATE_COOKIE_PATH: &str = "/api/v1/auth/oidc";
 
 #[derive(Debug, Clone)]
 pub struct OidcConfig {
@@ -225,8 +230,30 @@ async fn start(State(state): State<Arc<AppState>>, Query(p): Query<StartParams>)
         .append_pair("code_challenge_method", "S256");
     let invite = p.invite.map(|i| lemmate_core::credentials::invite_token(&i)).filter(|t| !t.is_empty());
     let next = p.next.as_deref().and_then(local_path);
+    let cookie = state_cookie(&state, &auth::token_hash(&csrf), PENDING_TTL.as_secs());
     oidc.remember(csrf, Pending { nonce, verifier, invite, next, created: Instant::now() });
-    Redirect::to(url.as_str()).into_response()
+    let mut resp = Redirect::to(url.as_str()).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+fn state_cookie(state: &AppState, value: &str, max_age: u64) -> String {
+    let secure = matches!(state.options.auth, AuthMode::Enabled { secure_cookies: true, .. });
+    format!(
+        "{STATE_COOKIE}={value}; Path={STATE_COOKIE_PATH}; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// The state hash the browser was given at `start`, if it sent it back.
+fn state_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies
+        .split(';')
+        .map(str::trim)
+        .find_map(|c| c.strip_prefix(&format!("{STATE_COOKIE}=")).map(str::to_owned))
 }
 
 #[derive(Deserialize)]
@@ -249,7 +276,11 @@ fn fail(msg: &str) -> Response {
     Redirect::to(&format!("/?{}", to.query().unwrap_or_default())).into_response()
 }
 
-async fn callback(State(state): State<Arc<AppState>>, Query(p): Query<CallbackParams>) -> Response {
+async fn callback(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<CallbackParams>,
+) -> Response {
     let Some(oidc) = state.oidc.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -259,6 +290,10 @@ async fn callback(State(state): State<Arc<AppState>>, Query(p): Query<CallbackPa
     let (Some(code), Some(csrf)) = (p.code, p.state) else {
         return fail("the identity provider sent no code");
     };
+    // Checked before the state is redeemed: a forged callback must not use up the real one.
+    if state_from_cookie(&headers).is_none_or(|h| h != auth::token_hash(&csrf)) {
+        return fail("this sign-in was not started in this browser; try again");
+    }
     let Some(pending) = oidc.redeem(&csrf) else {
         return fail("that sign-in expired or was already used; try again");
     };
@@ -297,6 +332,9 @@ async fn callback(State(state): State<Arc<AppState>>, Query(p): Query<CallbackPa
     let mut resp = Redirect::to(pending.next.as_deref().unwrap_or("/")).into_response();
     if let Ok(v) = HeaderValue::from_str(&auth::session_cookie(&state, &token)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&state_cookie(&state, "", 0)) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
     }
     resp
 }

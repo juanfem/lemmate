@@ -87,10 +87,136 @@ pub fn parse_options() -> ParseOptions {
 ///
 /// 2: table cells are indexed like paragraphs.
 /// 3: links inside raw HTML blocks, and `src="…"` attributes, are links.
-pub const INDEX_VERSION: u32 = 3;
+/// 4: autolinked URLs hold no tags; tags are NFC; over-deep nesting is tamed ([`tame`]).
+pub const INDEX_VERSION: u32 = 4;
+
+/// Container markers (`>`, list bullets and numbers) a line may open before the rest is text.
+pub const MAX_CONTAINERS: usize = 32;
+/// Columns of whitespace (a tab counts 4) a line's container prefix may hold.
+pub const MAX_INDENT: usize = 128;
+/// Emphasis delimiters (`*`, `~`, and `_` not inside a word) a block may hold.
+pub const MAX_EMPHASIS: usize = 500;
+/// How deep `[` may nest within a block — and how many `]` closing nothing it may hold, each of
+/// which sends the parser looking back through the whole block for a `[`.
+pub const MAX_BRACKETS: usize = 32;
+
+/// The source with pathological nesting defused, before either parser sees it. Each level of
+/// nesting is a level of recursion — in the parsers' trees and in whatever walks them — and the
+/// parsers' work grows with the square of the depth, so a note of ten thousand `>` or `*` would
+/// overflow the stack or take minutes. No real note comes near these limits; past them, markers
+/// are escaped with `\` and read as text. A *block* here is a run of non-blank lines.
+///
+/// `ui/src/markdown/index.ts` has the same function, so both indexers still read the same text.
+pub fn tame(source: &str) -> std::borrow::Cow<'_, str> {
+    let mut out: Vec<u8> = Vec::with_capacity(source.len());
+    let mut changed = false;
+    let (mut emphasis, mut brackets, mut stray) = (0usize, 0usize, 0usize);
+    for line in source.split_inclusive('\n') {
+        let b = line.as_bytes();
+        if b.iter().all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n')) {
+            (emphasis, brackets, stray) = (0, 0, 0);
+            out.extend_from_slice(b);
+            continue;
+        }
+        let (mut i, mut ws, mut markers) = (0, 0, 0);
+        loop {
+            let start = i;
+            let mut cols = 0;
+            while i < b.len() && matches!(b[i], b' ' | b'\t') {
+                cols += if b[i] == b'\t' { 4 } else { 1 };
+                i += 1;
+            }
+            if ws + cols > MAX_INDENT {
+                // At least one space stays, or the marker before it would stop being one.
+                let keep = MAX_INDENT.saturating_sub(ws).max(1);
+                out.resize(out.len() + keep, b' ');
+                ws += keep;
+                changed = true;
+            } else {
+                out.extend_from_slice(&b[start..i]);
+                ws += cols;
+            }
+            let m = container_marker(b, i);
+            if m == 0 {
+                break;
+            }
+            out.extend_from_slice(&b[i..i + m - 1]);
+            if markers == MAX_CONTAINERS {
+                out.push(b'\\');
+                changed = true;
+            }
+            out.push(b[i + m - 1]);
+            i += m;
+            if markers == MAX_CONTAINERS {
+                break;
+            }
+            markers += 1;
+        }
+        while i < b.len() {
+            let c = b[i];
+            if c == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
+                out.extend_from_slice(&b[i..i + 2]);
+                i += 2;
+                continue;
+            }
+            let escape = match c {
+                b'*' | b'~' => counted(&mut emphasis, MAX_EMPHASIS),
+                b'_' if !(i > 0
+                    && b[i - 1].is_ascii_alphanumeric()
+                    && b.get(i + 1).is_some_and(u8::is_ascii_alphanumeric)) =>
+                {
+                    counted(&mut emphasis, MAX_EMPHASIS)
+                }
+                b'[' => counted(&mut brackets, MAX_BRACKETS),
+                b']' if brackets == 0 => counted(&mut stray, MAX_BRACKETS),
+                b']' => {
+                    brackets -= 1;
+                    false
+                }
+                _ => false,
+            };
+            if escape {
+                out.push(b'\\');
+                changed = true;
+            }
+            out.push(c);
+            i += 1;
+        }
+    }
+    if !changed {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    // Only ASCII was inserted, between whole characters.
+    std::borrow::Cow::Owned(String::from_utf8(out).expect("still UTF-8"))
+}
+
+/// Count one more against `limit`; whether this one is past it (and so to be escaped).
+fn counted(n: &mut usize, limit: usize) -> bool {
+    if *n >= limit {
+        return true;
+    }
+    *n += 1;
+    false
+}
+
+/// The length of the container marker at `i` — `>`, `-`/`+`/`*` before a space, or up to nine
+/// digits and `.`/`)` before one — or 0. Its last byte is the punctuation an escape goes before.
+fn container_marker(b: &[u8], i: usize) -> usize {
+    let spaced = |at: usize| matches!(b.get(at), None | Some(b' ' | b'\t' | b'\r' | b'\n'));
+    match b.get(i) {
+        Some(b'>') => 1,
+        Some(b'-' | b'+' | b'*') if spaced(i + 1) => 1,
+        Some(c) if c.is_ascii_digit() => {
+            let n = b[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if n <= 9 && matches!(b.get(i + n), Some(b'.' | b')')) && spaced(i + n + 1) { n + 1 } else { 0 }
+        }
+        _ => 0,
+    }
+}
 
 pub fn index(source: &str) -> Result<NoteIndex> {
-    let tree = markdown::to_mdast(source, &parse_options()).map_err(|e| Error::Markdown(e.to_string()))?;
+    let source = tame(source);
+    let tree = markdown::to_mdast(&source, &parse_options()).map_err(|e| Error::Markdown(e.to_string()))?;
     let mut ix = NoteIndex::default();
     let mut plain = String::new();
     walk(&tree, &mut ix, &mut plain);
@@ -110,51 +236,55 @@ pub fn index(source: &str) -> Result<NoteIndex> {
     Ok(ix)
 }
 
-fn walk(node: &Node, ix: &mut NoteIndex, plain: &mut String) {
-    match node {
-        Node::Yaml(y) => {
-            // Malformed YAML: keep indexing the body, record an empty front matter.
-            ix.front_matter = Some(serde_yaml_ng::from_str::<FrontMatter>(&y.value).unwrap_or_default());
+/// Pre-order over the tree, with an explicit stack: however deep a note nests, this does not
+/// recurse.
+fn walk(root: &Node, ix: &mut NoteIndex, plain: &mut String) {
+    // Each node, and whether its parent holds blocks (so a raw HTML child is read for links).
+    let mut stack: Vec<(&Node, bool)> = vec![(root, false)];
+    while let Some((node, in_blocks)) = stack.pop() {
+        if in_blocks && let Node::Html(h) = node {
+            html_block_links(&h.value, ix);
         }
-        Node::Heading(h) => {
-            let text = inline_text(&h.children);
-            scan_inline(&text, ix);
-            plain.push_str(&text);
-            plain.push('\n');
-            collect_links(&h.children, ix);
-            ix.headings.push(Heading { depth: h.depth, text });
-        }
-        // A table cell holds inline content just as a paragraph does, and the same links and tags.
-        Node::Paragraph(_) | Node::TableCell(_) => {
-            let children = node.children().map_or(&[][..], Vec::as_slice);
-            let text = inline_text(children);
-            scan_inline(&text, ix);
-            plain.push_str(&text);
-            plain.push('\n');
-            collect_links(children, ix);
-        }
-        Node::Math(_) | Node::InlineMath(_) => ix.has_math = true,
-        Node::ListItem(li) if li.checked.is_some() => ix.has_tasks = true,
-        Node::Code(c) => {
-            if let Some(lang) = &c.lang {
-                let lang = lang.trim_matches(|ch| ch == '{' || ch == '}').to_owned();
-                if !lang.is_empty() && !ix.code_langs.contains(&lang) {
-                    ix.code_langs.push(lang);
+        match node {
+            Node::Yaml(y) => {
+                // Malformed YAML: keep indexing the body, record an empty front matter.
+                ix.front_matter = Some(serde_yaml_ng::from_str::<FrontMatter>(&y.value).unwrap_or_default());
+            }
+            Node::Heading(h) => {
+                let (text, scan) = inline_text(&h.children);
+                scan_inline(&scan, ix);
+                plain.push_str(&text);
+                plain.push('\n');
+                collect_links(&h.children, ix);
+                ix.headings.push(Heading { depth: h.depth, text });
+            }
+            // A table cell holds inline content just as a paragraph does, and the same links and tags.
+            Node::Paragraph(_) | Node::TableCell(_) => {
+                let children = node.children().map_or(&[][..], Vec::as_slice);
+                let (text, scan) = inline_text(children);
+                scan_inline(&scan, ix);
+                plain.push_str(&text);
+                plain.push('\n');
+                collect_links(children, ix);
+            }
+            Node::Math(_) | Node::InlineMath(_) => ix.has_math = true,
+            Node::ListItem(li) if li.checked.is_some() => ix.has_tasks = true,
+            Node::Code(c) => {
+                if let Some(lang) = &c.lang {
+                    let lang = lang.trim_matches(|ch| ch == '{' || ch == '}').to_owned();
+                    if !lang.is_empty() && !ix.code_langs.contains(&lang) {
+                        ix.code_langs.push(lang);
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
-    }
-    if let Some(children) = node.children() {
-        let holds_blocks = matches!(
-            node,
-            Node::Root(_) | Node::Blockquote(_) | Node::ListItem(_) | Node::FootnoteDefinition(_)
-        );
-        for c in children {
-            if holds_blocks && let Node::Html(h) = c {
-                html_block_links(&h.value, ix);
-            }
-            walk(c, ix, plain);
+        if let Some(children) = node.children() {
+            let holds_blocks = matches!(
+                node,
+                Node::Root(_) | Node::Blockquote(_) | Node::ListItem(_) | Node::FootnoteDefinition(_)
+            );
+            stack.extend(children.iter().rev().map(|c| (c, holds_blocks)));
         }
     }
 }
@@ -182,7 +312,8 @@ fn html_block_links(html: &str, ix: &mut NoteIndex) {
 }
 
 fn collect_links(nodes: &[Node], ix: &mut NoteIndex) {
-    for n in nodes {
+    let mut stack: Vec<&Node> = nodes.iter().rev().collect();
+    while let Some(n) = stack.pop() {
         match n {
             Node::Link(l) => ix.links.push(l.url.clone()),
             Node::Image(i) => ix.links.push(i.url.clone()),
@@ -190,7 +321,7 @@ fn collect_links(nodes: &[Node], ix: &mut NoteIndex) {
             _ => {}
         }
         if let Some(c) = n.children() {
-            collect_links(c, ix);
+            stack.extend(c.iter().rev());
         }
     }
 }
@@ -238,22 +369,43 @@ fn src_attributes(html: &str) -> Vec<String> {
     out
 }
 
-/// Concatenated text of inline children, skipping code and math (no tags/links live there).
-fn inline_text(nodes: &[Node]) -> String {
-    let mut s = String::new();
-    for n in nodes {
+/// Concatenated text of inline children, skipping code and math (no tags/links live there):
+/// the text itself, and the same with every autolinked URL blanked out — what is scanned for
+/// tags and wikilinks, so that `https://example.com/#anchor` does not tag the note `anchor`.
+fn inline_text(nodes: &[Node]) -> (String, String) {
+    let (mut s, mut scan) = (String::new(), String::new());
+    let mut stack: Vec<(&Node, bool)> = nodes.iter().rev().map(|n| (n, false)).collect();
+    while let Some((n, url)) = stack.pop() {
         match n {
-            Node::Text(t) => s.push_str(&t.value),
-            Node::InlineCode(_) | Node::InlineMath(_) => s.push(' '),
-            Node::Break(_) => s.push('\n'),
+            Node::Text(t) => {
+                s.push_str(&t.value);
+                scan.push_str(if url { " " } else { &t.value });
+            }
+            Node::InlineCode(_) | Node::InlineMath(_) => {
+                s.push(' ');
+                scan.push(' ');
+            }
+            Node::Break(_) => {
+                s.push('\n');
+                scan.push('\n');
+            }
             _ => {
+                let url = url || matches!(n, Node::Link(l) if is_autolink(&l.url, &l.children));
                 if let Some(c) = n.children() {
-                    s.push_str(&inline_text(c));
+                    stack.extend(c.iter().rev().map(|c| (c, url)));
                 }
             }
         }
     }
-    s
+    (s, scan)
+}
+
+/// Whether a link is its own URL written out — `<https://…>`, `<a@b.c>`, or a bare URL or `www.`
+/// address GFM links by itself — rather than text someone wrote for it.
+fn is_autolink(url: &str, children: &[Node]) -> bool {
+    let [Node::Text(t)] = children else { return false };
+    let text = t.value.as_str();
+    url == text || ["http://", "mailto:"].iter().any(|p| url.strip_prefix(p) == Some(text))
 }
 
 /// Find `#tags` and `[[wikilinks]]` in already-parsed inline text.
@@ -274,17 +426,23 @@ fn scan_inline(text: &str, ix: &mut NoteIndex) {
             }
         }
         // Tag: '#' at start or after a non-alphanumeric, followed by a body containing a letter.
+        // The body is read composed (NFC), so `#áb` typed as `a` + a combining accent is `áb`.
         if bytes[i] == b'#' {
             let boundary = i == 0 || !text[..i].chars().next_back().is_some_and(char::is_alphanumeric);
             if boundary {
-                let body: String = text[i + 1..]
+                let word = &text[i + 1..];
+                let word = &word[..word
+                    .find(|c: char| {
+                        c.is_ascii() && !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/'))
+                    })
+                    .unwrap_or(word.len())];
+                let composed = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(word);
+                let body: String = composed
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/'))
                     .collect();
                 if body.chars().any(|c| c.is_alphabetic()) && !body.starts_with('/') {
                     push_tag(&mut ix.tags, &body);
-                    i += 1 + body.len();
-                    continue;
                 }
             }
         }
@@ -420,6 +578,80 @@ mod tests {
     fn numeric_and_heading_hashes_are_not_tags() {
         let ix = index("# Not a tag\n\nissue #123 and #1a is a tag\n").unwrap();
         assert_eq!(ix.tags, vec!["1a"]);
+    }
+
+    /// Notes nested ten thousand deep — in quotes, emphasis, brackets, lists — index on a 2 MiB
+    /// stack (a thread's default) and in bounded time, rather than aborting the process.
+    #[test]
+    fn deep_nesting_neither_overflows_nor_hangs() {
+        let cases: Vec<(&str, String)> = vec![
+            ("quotes", format!("{} x #end\n", ">".repeat(10_000))),
+            ("emphasis", format!("{}x{} #end\n", "*".repeat(10_000), "*".repeat(10_000))),
+            ("spaced emphasis", format!("{}x{} #end\n", "*a ".repeat(10_000), " a*".repeat(10_000))),
+            ("strikethrough", format!("{}x{} #end\n", "~~a ".repeat(5_000), " a~~".repeat(5_000))),
+            ("brackets", format!("{}x{} #end\n", "[".repeat(10_000), "]".repeat(10_000))),
+            ("images", format!("{}x{} #end\n", "![".repeat(10_000), "](u)".repeat(10_000))),
+            ("list markers", format!("{}x #end\n", "- ".repeat(10_000))),
+            (
+                "indented lists",
+                (0..300).map(|i| format!("{}- x\n", "  ".repeat(i))).collect::<String>() + "\n#end\n",
+            ),
+            (
+                "quote lines",
+                (0..300).map(|i| format!("{}x\n", "> ".repeat(i))).collect::<String>() + "\n#end\n",
+            ),
+        ];
+        for (name, src) in cases {
+            let started = std::time::Instant::now();
+            let ix = std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || index(&src).unwrap())
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| panic!("{name}: the indexer crashed"));
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{name}: {:?}",
+                started.elapsed()
+            );
+            assert!(ix.tags.contains(&"end".to_owned()), "{name}: {:?}", ix.tags);
+        }
+    }
+
+    #[test]
+    fn taming_leaves_ordinary_notes_alone() {
+        let note = "---\ntitle: T\n---\n> > quoted *em* _em_ snake_case [[link]] [a](b)\n\n- a\n  - b\n";
+        assert!(matches!(tame(note), std::borrow::Cow::Borrowed(_)));
+        let deep = format!("{}x\n", ">".repeat(MAX_CONTAINERS + 5));
+        assert_eq!(tame(&deep), format!("{}\\>{}x\n", ">".repeat(MAX_CONTAINERS), ">".repeat(4)));
+        // Already-escaped markers are not escaped twice, and a blank line starts a fresh count.
+        let stars = format!("{}\\*\n\n*a*\n", "*".repeat(MAX_EMPHASIS + 1));
+        assert_eq!(tame(&stars), format!("{}\\*\\*\n\n*a*\n", "*".repeat(MAX_EMPHASIS)));
+        let indented = format!("{}- x\n", " ".repeat(MAX_INDENT + 50));
+        assert_eq!(tame(&indented), format!("{}- x\n", " ".repeat(MAX_INDENT)));
+    }
+
+    #[test]
+    fn urls_hold_no_tags() {
+        let ix = index(
+            "https://example.com/#anchor <https://a.b/#c> www.x.org/#w <me@x.org> \
+             [label #kept](https://y.z/#gone) #real\n",
+        )
+        .unwrap();
+        assert_eq!(ix.tags, vec!["kept", "real"]);
+        assert_eq!(ix.links[0], "https://example.com/#anchor");
+    }
+
+    #[test]
+    fn tags_are_composed() {
+        assert_eq!(index("#cafe\u{301} and #a\u{301}b\n").unwrap().tags, vec!["caf\u{e9}", "\u{e1}b"]);
+    }
+
+    #[test]
+    fn scalar_titles_and_ids_are_text() {
+        let ix = index("---\ntitle: 2024\nid: 0123\n---\n# H\n").unwrap();
+        assert_eq!(ix.title.as_deref(), Some("2024"));
+        assert_eq!(ix.front_matter.unwrap().id.as_deref(), Some("0123"));
     }
 
     /// Conformance corpus shared with the JS parser: `corpus/<name>.md` ↔ `corpus/<name>.json`.

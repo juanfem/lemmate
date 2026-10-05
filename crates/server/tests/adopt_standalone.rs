@@ -18,6 +18,10 @@ use lemmate_server::{AuthMode, ServerOptions, build_state, router};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message as TMsg;
 
+#[path = "../../core/tests/common/mod.rs"]
+mod common;
+use common::{keyed, remember};
+
 async fn server(attachments: &Path) -> SocketAddr {
     let opts = ServerOptions { attachments_dir: attachments.to_path_buf(), ..Default::default() };
     let state = build_state(Store::open_in_memory().unwrap(), opts);
@@ -51,12 +55,13 @@ async fn relay_as(
         web_dir: None,
         vault_root: None,
         config_path: None,
+        allow_remote: false,
     };
-    start(opts, local).await.unwrap()
+    remember(start(opts, local).await.unwrap())
 }
 
 async fn get(url: String) -> (u16, Value) {
-    tokio::task::spawn_blocking(move || match ureq::get(&url).call() {
+    tokio::task::spawn_blocking(move || match keyed(ureq::get(&url), &url).call() {
         Ok(mut r) => {
             let status = r.status().as_u16();
             let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -71,7 +76,10 @@ async fn get(url: String) -> (u16, Value) {
 
 async fn post(url: String, body: Value) -> (u16, Value) {
     tokio::task::spawn_blocking(move || {
-        match ureq::post(&url).header("content-type", "application/json").send(body.to_string().as_bytes()) {
+        match keyed(ureq::post(&url), &url)
+            .header("content-type", "application/json")
+            .send(body.to_string().as_bytes())
+        {
             Ok(mut r) => {
                 let status = r.status().as_u16();
                 let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -112,7 +120,8 @@ async fn a_standalone_vault_is_adopted_by_a_server_with_its_attachments() {
     let stored = tokio::task::spawn_blocking({
         let (url, bytes) = (attachment_url.clone(), bytes.clone());
         move || {
-            let mut r = ureq::put(&url).header("x-filename", "diagram.png").send(&bytes[..]).unwrap();
+            let mut r =
+                keyed(ureq::put(&url), &url).header("x-filename", "diagram.png").send(&bytes[..]).unwrap();
             serde_json::from_str::<Value>(&r.body_mut().read_to_string().unwrap()).unwrap()
         }
     })
@@ -157,7 +166,7 @@ async fn a_standalone_vault_is_adopted_by_a_server_with_its_attachments() {
     .await;
     let served = tokio::task::spawn_blocking({
         let url = format!("{remote}/api/v1/vaults/{vault}/attachments/{hash}");
-        move || ureq::get(&url).call().unwrap().body_mut().read_to_vec().unwrap()
+        move || keyed(ureq::get(&url), &url).call().unwrap().body_mut().read_to_vec().unwrap()
     })
     .await
     .unwrap();
@@ -206,7 +215,9 @@ async fn a_vault_the_server_refuses_says_so_in_the_window() {
 
     // A window opening after the refusal — the ordinary case, since the engine connects while
     // the page is still loading — still hears about it.
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", handle.addr)).await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws?key={}", handle.addr, handle.key))
+        .await
+        .unwrap();
     let doc = DocId::Vault(vault).to_string();
     let sv = VaultDoc::new().state_vector();
     let hello = Frame::new(&doc, &Message::Sync(SyncMessage::SyncStep1(sv))).encode();

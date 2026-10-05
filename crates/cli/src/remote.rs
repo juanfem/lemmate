@@ -165,6 +165,10 @@ impl Remote {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             bail!("--server must be an http:// or https:// URL (got {server:?})");
         }
+        // Warned, not refused; stderr, so `lemmate mcp`'s stdout stays protocol-only.
+        if let Some(warning) = tls::cleartext_warning(&base) {
+            eprintln!("warning: {warning}");
+        }
         let agent = tls::http_agent(ca_cert).map_err(|e| anyhow!("{e}"))?;
         let token = token.filter(|t| !t.is_empty()).or_else(|| credentials::load(&base));
         Ok(Self { agent, base, token })
@@ -288,9 +292,11 @@ pub trait NotesApi {
     fn tags(&self, vault: &str) -> Result<Vec<TagCount>>;
     fn tagged(&self, vault: &str, tag: &str) -> Result<Vec<NoteSummary>>;
 
-    /// Look a note up by ULID or by vault-relative path (with or without the `.md`).
-    /// `Ok(None)` means "no such note", which is not an error for `write_note`.
-    fn lookup_note(&self, vault: &str, path_or_id: &str) -> Result<Option<NoteSummary>> {
+    /// Look a note up by ULID or by its exact vault-relative path (with or without the `.md`),
+    /// nothing fuzzier. This is the lookup for writes: `write_note("plan")` meant to create
+    /// `plan.md` must not land on `Projects/plan.md`, nor `todo.md` on `TODO.md`.
+    /// `Ok(None)` means "no such note".
+    fn lookup_exact(&self, vault: &str, path_or_id: &str) -> Result<Option<NoteSummary>> {
         let key = path_or_id.trim();
         if key.is_empty() {
             bail!("empty note path or id");
@@ -303,17 +309,47 @@ pub trait NotesApi {
             };
         }
         let wanted = normalize_path(key);
+        Ok(self.notes(vault)?.into_iter().find(|n| n.path == wanted))
+    }
+
+    /// Look a note up for reading: by ULID or exact path first, then case-insensitively, then — for
+    /// a bare file name — anywhere in the tree, the way the quick switcher does. A fuzzy key that
+    /// fits several notes is an error naming them, never a guess. `Ok(None)` means "no such note".
+    fn lookup_note(&self, vault: &str, path_or_id: &str) -> Result<Option<NoteSummary>> {
+        let key = path_or_id.trim();
+        if key.is_empty() {
+            bail!("empty note path or id");
+        }
+        if key.parse::<NoteId>().is_ok() {
+            return self.lookup_exact(vault, key);
+        }
+        let wanted = normalize_path(key);
         let mut notes = self.notes(vault)?;
         notes.sort_by(|a, b| a.path.cmp(&b.path));
-        let exact = notes.iter().find(|n| n.path == wanted);
-        let ci = || notes.iter().find(|n| n.path.eq_ignore_ascii_case(&wanted));
-        // A bare file name matches anywhere in the tree, the way the quick switcher does.
-        let leaf = || {
-            (!wanted.contains('/'))
-                .then(|| notes.iter().find(|n| n.path.rsplit('/').next() == Some(wanted.as_str())))
-                .flatten()
-        };
-        Ok(exact.or_else(ci).or_else(leaf).cloned())
+        if let Some(exact) = notes.iter().find(|n| n.path == wanted) {
+            return Ok(Some(exact.clone()));
+        }
+        let leaf = |p: &str| p.rsplit('/').next().unwrap_or(p).to_owned();
+        let passes: [&dyn Fn(&NoteSummary) -> bool; 3] = [
+            &|n| n.path.eq_ignore_ascii_case(&wanted),
+            &|n| !wanted.contains('/') && leaf(&n.path) == wanted,
+            &|n| !wanted.contains('/') && leaf(&n.path).eq_ignore_ascii_case(&wanted),
+        ];
+        for pass in passes {
+            let hits: Vec<&NoteSummary> = notes.iter().filter(|n| pass(n)).collect();
+            match hits.as_slice() {
+                [] => continue,
+                [one] => return Ok(Some((*one).clone())),
+                many => {
+                    let list = many.iter().map(|n| format!("  {} ({})", n.path, n.id)).collect::<Vec<_>>();
+                    bail!(
+                        "{key:?} matches several notes; name one by its full path or id:\n{}",
+                        list.join("\n")
+                    )
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Like [`NotesApi::lookup_note`], but "no such note" is an error.

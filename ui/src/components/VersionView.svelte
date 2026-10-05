@@ -3,7 +3,7 @@
   import * as Y from 'yjs'
   import { Awareness } from 'y-protocols/awareness'
   import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
-  import { StateField } from '@codemirror/state'
+  import { EditorState, StateEffect, StateField } from '@codemirror/state'
   import { createEditor } from '../lib/editor/setup.ts'
   import { openWebLink } from '../lib/linktarget.ts'
   import { changedLines } from '../lib/diff.ts'
@@ -28,9 +28,11 @@
   let view: EditorView | undefined
   let doc: Y.Doc | undefined
 
-  /** Lines this version has that the note no longer does. Static: the document never changes. */
-  function marks(text: string): DecorationSet {
-    const changed = changedLines(text, current)
+  /** Lines this version has that the note no longer does. The version never changes; the note
+   *  it is compared with may, so the marks are replaced through this effect when it does. */
+  const setMarks = StateEffect.define<DecorationSet>()
+  function marks(text: string, now: string): DecorationSet {
+    const changed = changedLines(text, now)
     if (changed.size === 0) return Decoration.none
     const lines = text.split('\n')
     const ranges = []
@@ -46,7 +48,7 @@
     doc = new Y.Doc()
     const text = doc.getText('content')
     text.insert(0, content)
-    const deco = marks(content)
+    const deco = marks(content, current)
     view = createEditor(host, text, new Awareness(doc), {
       mode: 'reading',
       embedUrl,
@@ -54,8 +56,21 @@
       openLink: () => {
         /* a link in an old version points at the note as it is now, not as it was */
       },
-      extra: [StateField.define<DecorationSet>({ create: () => deco, update: (d) => d, provide: (f) => EditorView.decorations.from(f) })],
+      extra: [
+        StateField.define<DecorationSet>({
+          create: () => deco,
+          update: (d, tr) => tr.effects.find((e) => e.is(setMarks))?.value ?? d,
+          provide: (f) => EditorView.decorations.from(f),
+        }),
+        // A throwaway document: a click on a task box must not tick it in here.
+        EditorState.readOnly.of(true),
+      ],
     })
+  })
+
+  $effect(() => {
+    const now = current
+    if (view) view.dispatch({ effects: setMarks.of(marks(content, now)) })
   })
 
   onDestroy(() => {

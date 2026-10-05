@@ -20,6 +20,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import Icon from './Icon.svelte'
+  import { trapFocus } from '../lib/focustrap.ts'
   import { api, type SearchHit } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
   import { notePath } from '../lib/notename.ts'
@@ -198,7 +199,7 @@
 </script>
 
 <div class="backdrop" onmousedown={onClose} role="presentation">
-  <div class="dialog" onmousedown={(e) => e.stopPropagation()} role="dialog" aria-label="Search and commands" tabindex="-1">
+  <div class="dialog" use:trapFocus onmousedown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Search and commands" tabindex="-1">
     <div class="field">
       <span class="icon"><Icon name="search" size={15} /></span>
       <input bind:this={input} bind:value={query} onkeydown={onKey} placeholder="Search notes, folders, text and commands…" aria-label="Search notes, folders, text and commands" />

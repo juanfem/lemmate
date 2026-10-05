@@ -71,6 +71,18 @@
   let host: HTMLDivElement
   let view: EditorView | undefined
   let release: (() => void) | undefined
+  /** Set once the component is gone: an upload finishing afterwards has nowhere to land. */
+  let destroyed = false
+  /** What `onMount` hooked up outside the view, for `onDestroy` to undo. */
+  const cleanups: (() => void)[] = []
+  /** A line of its own above the note: something that was asked for and could not be done. */
+  let notice = $state('')
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  function tell(text: string) {
+    notice = text
+    clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => (notice = ''), 6000)
+  }
 
   // The page's own furniture: the folder trail above the first line, the tags and backlinks
   // below the last one. Both are nodes we own and CodeMirror merely hosts (lib/editor/page.ts),
@@ -176,7 +188,14 @@
   function openLink(target: string) {
     const hit = session.resolveLink(target)
     if (hit) onOpen(hit.id)
-    else {
+    else if (!session.canCreate) {
+      // Following a link to nowhere creates the note — a write, which a reader may not make.
+      tell(
+        session.noteOnly
+          ? `“${target}” is not part of what was shared with you.`
+          : `“${target}” does not exist yet, and you can read this vault but not add to it.`,
+      )
+    } else {
       const path = target.endsWith('.md') ? target : `${target}.md`
       onOpen(session.createNote(path, `# ${displayName(path)}\n\n`))
     }
@@ -200,9 +219,26 @@
   }
   const openUrl = (href: string) => followUrl(session.pathOf(noteId) ?? '', href)
 
+  /**
+   * Where uploads in flight will be referenced. Uploading takes a while, and the note goes on
+   * changing meanwhile — under the user's hands or anyone else's — so each spot is carried
+   * through every change (`headingWatcher` maps them) rather than trusted as an old offset.
+   */
+  const landing = new Set<{ pos: number }>()
+
   /** Paste/drop files: upload, then reference them at the cursor (images as embeds). */
-  async function insertFiles(files: FileList | File[], at: number) {
+  async function insertFiles(files: FileList | File[], pos: number) {
     if (!view) return
+    const spot = { pos }
+    landing.add(spot)
+    try {
+      await uploadAndInsert(files, spot)
+    } finally {
+      landing.delete(spot)
+    }
+  }
+
+  async function uploadAndInsert(files: FileList | File[], spot: { pos: number }) {
     const refs: string[] = []
     for (const file of Array.from(files)) {
       try {
@@ -213,10 +249,12 @@
         refs.push(`<!-- upload failed for ${file.name}: ${String(e)} -->`)
       }
     }
-    if (!refs.length) return
+    const v = view
+    if (!refs.length || destroyed || !v) return
+    const at = Math.max(0, Math.min(spot.pos, v.state.doc.length))
     // Not glued to the word before it, which would read as part of that word.
-    const insert = (/\S/u.test(view.state.sliceDoc(at - 1, at)) ? ' ' : '') + refs.join('\n')
-    view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length } })
+    const insert = (/\S/u.test(v.state.sliceDoc(at - 1, at)) ? ' ' : '') + refs.join('\n')
+    v.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length } })
   }
 
   /**
@@ -280,6 +318,7 @@
     })
   }
   const headingWatcher = EditorView.updateListener.of((u) => {
+    if (u.docChanged) for (const spot of landing) spot.pos = u.changes.mapPos(spot.pos)
     if (u.docChanged) reportHeadings(u.view)
     // A link or a front-matter path may have changed which files the note uses.
     if (u.docChanged && onOpenFile) session.filesChanged()
@@ -389,9 +428,15 @@
   onMount(() => {
     const acquired = session.acquire(noteId)
     release = acquired.release
-    const me = localStorage.getItem('lemmate.user') ?? (window as unknown as { lemmate?: { userName?: string } }).lemmate?.userName ?? 'me'
-    const hue = [...me].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)
-    acquired.awareness.setLocalStateField('user', { name: me, color: `hsl(${hue} 70% 45%)`, colorLight: `hsl(${hue} 70% 45% / 0.25)` })
+    const label = () => {
+      const me = localStorage.getItem('lemmate.user') ?? (window as unknown as { lemmate?: { userName?: string } }).lemmate?.userName ?? 'me'
+      const hue = [...me].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)
+      acquired.awareness.setLocalStateField('user', { name: me, color: `hsl(${hue} 70% 45%)`, colorLight: `hsl(${hue} 70% 45% / 0.25)` })
+    }
+    label()
+    // The account is fetched as the app starts, often after a restored tab has mounted.
+    window.addEventListener('lemmate-user', label)
+    cleanups.push(() => window.removeEventListener('lemmate-user', label))
     const presence = () => {
       const names: string[] = []
       acquired.awareness.getStates().forEach((st, clientId) => {
@@ -402,6 +447,7 @@
       onPresence?.(names)
     }
     acquired.awareness.on('change', presence)
+    cleanups.push(() => acquired.awareness.off('change', presence))
     presence()
     view = createEditor(host, acquired.doc.getText('content'), acquired.awareness, {
       openLink,
@@ -436,6 +482,7 @@
         v.dispatch({ selection: { anchor: pos } })
       }
       ytext.observe(once)
+      cleanups.push(() => ytext.unobserve(once))
     }
     jumpTo = (pos: number) => {
       if (!view) return
@@ -462,8 +509,13 @@
   }
 
   onDestroy(() => {
+    destroyed = true
     cancelAnimationFrame(hereFrame)
+    clearTimeout(headingTimer)
+    clearTimeout(noticeTimer)
+    for (const undo of cleanups.splice(0)) undo()
     view?.destroy()
+    view = undefined
     release?.()
   })
 </script>
@@ -495,6 +547,7 @@
       <button onpointerdown={keepFocus} onclick={pickFiles} title="Insert image or file" aria-label="Insert image or file"><Icon name="attach" size={16} /></button>
     </div>
   {/if}
+  {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   <div class="editor" bind:this={host}></div>
 </div>
 
@@ -517,6 +570,13 @@
   }
   .picker {
     display: none;
+  }
+  .notice {
+    margin: 0;
+    padding: 0.35rem 0.8rem;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
   }
   @media (pointer: coarse) {
     .touchbar {

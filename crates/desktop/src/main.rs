@@ -88,6 +88,18 @@ impl Relay {
         self.0.lock().is_ok_and(|guard| guard.as_ref().is_some_and(|h| same_origin(h.addr, url)))
     }
 
+    /// `url` carrying the relay's key, for a window or a browser that has no cookie for it yet
+    /// (`local::Guard`): the relay trades the key for one and drops it from the address.
+    fn keyed(&self, url: &Url) -> Url {
+        let mut url = url.clone();
+        if let Ok(guard) = self.0.lock()
+            && let Some(h) = guard.as_ref()
+        {
+            with_key(&mut url, &h.key);
+        }
+        url
+    }
+
     fn abort(&self) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(handle) = guard.take()
@@ -99,46 +111,143 @@ impl Relay {
 
 fn main() -> ExitCode {
     env_path::widen();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    let log_file = init_logging();
 
     let cli = config::Cli::parse();
     if let Some(ctx) = config::Config::needs_setup(&cli) {
-        return match run_setup(ctx) {
+        return match run_setup(ctx, log_file.clone()) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e:#}");
-                ExitCode::FAILURE
-            }
+            Err(e) => fatal(&e, log_file.as_deref(), false),
         };
     }
     let cfg = match config::Config::resolve(cli) {
         Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("{e:#}");
-            return ExitCode::FAILURE;
-        }
+        // Nothing has built a Tauri app yet, so one can be built to say what is wrong.
+        Err(e) => return fatal(&e, log_file.as_deref(), true),
     };
 
-    match run(cfg) {
+    match run(cfg, log_file.clone()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e:#}");
-            ExitCode::FAILURE
-        }
+        Err(e) => fatal(&e, log_file.as_deref(), false),
     }
 }
 
-fn run(cfg: config::Config) -> anyhow::Result<()> {
+/// Log to stderr and to a file (see [`lemmate_core::paths::log_dir`]): an app started from a
+/// launcher has no terminal, and without the file its errors went nowhere. The previous run's
+/// log is kept beside it as `desktop.log.old` once it grows past a few megabytes. Returns the
+/// file's path when it could be opened.
+fn init_logging() -> Option<PathBuf> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    const KEEP: u64 = 4 * 1024 * 1024;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn,lemmate_desktop=info".into());
+    let path = lemmate_core::paths::log_dir().map(|d| d.join("desktop.log"));
+    let file = path.as_ref().and_then(|p| {
+        lemmate_core::paths::create_private_dir(p.parent()?).ok()?;
+        if std::fs::metadata(p).is_ok_and(|m| m.len() > KEEP) {
+            let _ = std::fs::rename(p, p.with_extension("log.old"));
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+    });
+    let to_file = file.is_some();
+    let file_layer =
+        file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(Mutex::new(f)));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file_layer)
+        .init();
+    path.filter(|_| to_file)
+}
+
+/// A start-up failure: logged, printed, and — since a GUI app has nowhere visible to print to —
+/// shown in a window of its own when `can_show` (no Tauri app has been built in this process yet;
+/// the event loop cannot be made twice). Failures once the app runs are shown in its window by
+/// [`show_error`] instead.
+fn fatal(e: &anyhow::Error, log_file: Option<&Path>, can_show: bool) -> ExitCode {
+    tracing::error!(error = %format!("{e:#}"), "lemmate-desktop cannot start");
+    eprintln!("error: {e:#}");
+    if can_show {
+        let message = error_message(e, log_file);
+        let shown = tauri::Builder::default()
+            .setup(move |app| {
+                show_error(app.handle(), &message);
+                Ok(())
+            })
+            .build(tauri::generate_context!());
+        match shown {
+            Ok(app) => app.run(|_, _| {}),
+            Err(err) => tracing::error!(error = %err, "could not open a window to show the error in"),
+        }
+    }
+    ExitCode::FAILURE
+}
+
+fn error_message(e: &anyhow::Error, log_file: Option<&Path>) -> String {
+    let mut message = format!("{e:#}");
+    if let Some(log) = log_file {
+        message.push_str(&format!("\n\nThe log is in {}", log.display()));
+    }
+    message
+}
+
+/// Show `message` in the main window — the one already open, or a new one — as a plain page,
+/// so a failure the user cannot see in a terminal is still in front of them.
+fn show_error(app: &tauri::AppHandle, message: &str) {
+    let url: Url = match error_page_url(message).parse() {
+        Ok(u) => u,
+        Err(e) => return tracing::error!(error = %e, "could not build the error page"),
+    };
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+        let _ = window.navigate(url);
+        return;
+    }
+    let built = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+        .title("Lemmate — cannot start")
+        .inner_size(720.0, 420.0)
+        .build();
+    if let Err(e) = built {
+        tracing::error!(error = %e, "could not open a window to show the error in");
+    }
+}
+
+/// A `data:` URL of a page that says `message`, escaped for HTML and percent-encoded for the URL.
+fn error_page_url(message: &str) -> String {
+    let escaped =
+        message.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>Lemmate cannot start</title>\
+         <body style=\"font:15px system-ui,sans-serif;margin:2rem;color:#222;background:#fafafa\">\
+         <h2 style=\"margin-top:0\">Lemmate could not start</h2>\
+         <pre style=\"white-space:pre-wrap;font:13px ui-monospace,monospace\">{escaped}</pre>"
+    );
+    let mut url = String::from("data:text/html;charset=utf-8,");
+    for b in html.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => url.push(b as char),
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
+}
+
+fn run(cfg: config::Config, log_file: Option<PathBuf>) -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         .setup(move |app| {
             app.manage(ServerOrigin(Mutex::new(None)));
             ServerOrigin::set(app.handle(), &cfg);
-            let relay = start_relay(app, &cfg)?;
-            app.manage(relay);
+            match start_relay(app, &cfg) {
+                Ok(relay) => {
+                    app.manage(relay);
+                }
+                // Said in a window rather than by an app that never appears.
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "could not start the relay");
+                    app.manage(Relay(Mutex::new(None)));
+                    show_error(app.handle(), &error_message(&e, log_file.as_deref()));
+                }
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -156,71 +265,15 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
 
 /// First run: serve the UI in setup mode, wait for the form, write the config, sign in if
 /// asked, then start the real relay and point the same window at it.
-fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
+fn run_setup(ctx: config::SetupContext, log_file: Option<PathBuf>) -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         .setup(move |app| {
-            let web_dir = resolve_web_dir(app, ctx.web_dir.as_deref())?;
-            let (addr, rx, setup_task) = tauri::async_runtime::block_on(lemmate_core::local::serve_setup(
-                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                Some(web_dir.clone()),
-                ctx.config_path.clone(),
-                ctx.suggested_root_dir.clone(),
-            ))
-            .context("starting the setup server")?;
-            let url: tauri::Url = format!("http://{addr}/").parse()?;
-            tracing::info!(%url, "opening setup window");
-            relay_window(app, WINDOW_LABEL.into(), url)
-                .title("Lemmate — setup")
-                .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
-                .build()
-                .context("creating the setup window")?;
             app.manage(Relay(Mutex::new(None)));
             app.manage(ServerOrigin(Mutex::new(None)));
-
-            let handle = app.handle().clone();
-            let config_path = ctx.config_path.clone();
-            tauri::async_runtime::spawn(async move {
-                let Ok(req) = rx.await else { return };
-                let result: anyhow::Result<()> = async {
-                    // Standalone setups name no server, so there is nothing to sign in to.
-                    if let Some(server) = req.server_url.as_deref().filter(|s| !s.is_empty()) {
-                        let ca = req.ca_cert.as_deref().filter(|c| !c.is_empty()).map(Path::new);
-                        sign_in(
-                            server,
-                            req.email.as_deref(),
-                            req.password.as_deref(),
-                            req.token.as_deref(),
-                            req.register,
-                            req.invite.as_deref(),
-                            ca,
-                        )?;
-                    }
-                    config::Config::write_setup(&config_path, &req)?;
-                    let cfg = config::Config::resolve(config::Cli::parse())
-                        .context("re-reading the new configuration")?;
-                    let mut relay = start_relay_for(&cfg, web_dir).await?;
-                    watch_for_connect(handle.clone(), &mut relay, cfg.config_path.clone());
-                    watch_for_sign_out(handle.clone(), &mut relay, &cfg);
-                    ServerOrigin::set(&handle, &cfg);
-                    let url: tauri::Url = window_url(&relay).parse()?;
-                    if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
-                        w.navigate(url).context("navigating to the relay")?;
-                        let _ = w.set_title("Lemmate");
-                    }
-                    if let Some(state) = handle.try_state::<Relay>()
-                        && let Ok(mut guard) = state.0.lock()
-                    {
-                        *guard = Some(relay);
-                    }
-                    setup_task.abort();
-                    Ok(())
-                }
-                .await;
-                if let Err(e) = result {
-                    tracing::error!(error = %format!("{e:#}"), "setup failed");
-                    eprintln!("setup failed: {e:#}");
-                }
-            });
+            if let Err(e) = open_setup(app, ctx) {
+                tracing::error!(error = %format!("{e:#}"), "could not open the setup screen");
+                show_error(app.handle(), &error_message(&e, log_file.as_deref()));
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -233,6 +286,93 @@ fn run_setup(ctx: config::SetupContext) -> anyhow::Result<()> {
         }
     });
     Ok(())
+}
+
+/// The setup window, and the task that answers its form.
+fn open_setup(app: &mut tauri::App, ctx: config::SetupContext) -> anyhow::Result<()> {
+    let web_dir = resolve_web_dir(app, ctx.web_dir.as_deref())?;
+    let (addr, mut rx, setup_task) = tauri::async_runtime::block_on(lemmate_core::local::serve_setup(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        Some(web_dir.clone()),
+        ctx.config_path.clone(),
+        ctx.suggested_root_dir.clone(),
+    ))
+    .context("starting the setup server")?;
+    let url: tauri::Url = format!("http://{addr}/").parse()?;
+    tracing::info!(%url, "opening setup window");
+    relay_window(app, WINDOW_LABEL.into(), url)
+        .title("Lemmate — setup")
+        .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+        .build()
+        .context("creating the setup window")?;
+
+    let handle = app.handle().clone();
+    let config_path = ctx.config_path.clone();
+    tauri::async_runtime::spawn(async move {
+        // Each submission of the form, until one works: the page hears how each went
+        // (the HTTP answer waits for `reply`) and may try again after a failure.
+        while let Some(ask) = rx.recv().await {
+            let result = finish_setup(&handle, &config_path, &ask.request, web_dir.clone()).await;
+            match result {
+                Ok(relay) => {
+                    let _ = ask.reply.send(Ok(()));
+                    if let Some(state) = handle.try_state::<Relay>()
+                        && let Ok(mut guard) = state.0.lock()
+                    {
+                        *guard = Some(relay);
+                    }
+                    setup_task.abort();
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "setup failed");
+                    let _ = ask.reply.send(Err(format!("{e:#}")));
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// One attempt at the setup the form asked for: sign in, write the configuration, start the
+/// relay and point the window at it. The file is written only once signing in has worked, and
+/// merged rather than replaced, so a failed attempt never stands in the way of the next one.
+async fn finish_setup(
+    handle: &tauri::AppHandle,
+    config_path: &Path,
+    req: &lemmate_core::local::SetupRequest,
+    web_dir: PathBuf,
+) -> anyhow::Result<LocalHandle> {
+    // Standalone setups name no server, so there is nothing to sign in to.
+    if let Some(server) = req.server_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let ca = req.ca_cert.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(PathBuf::from);
+        let (server, req2) = (server.to_owned(), req.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            sign_in(
+                &server,
+                req2.email.as_deref(),
+                req2.password.as_deref(),
+                req2.token.as_deref(),
+                req2.register,
+                req2.invite.as_deref(),
+                ca.as_deref(),
+            )
+        })
+        .await
+        .context("signing in did not finish")??;
+    }
+    config::Config::write_setup(config_path, req)?;
+    let cfg = config::Config::resolve(config::Cli::parse()).context("re-reading the new configuration")?;
+    let mut relay = start_relay_for(&cfg, web_dir).await?;
+    let url: tauri::Url = window_url(&relay).parse()?;
+    if let Some(w) = handle.get_webview_window(WINDOW_LABEL) {
+        w.navigate(url).context("navigating to the relay")?;
+        let _ = w.set_title("Lemmate");
+    }
+    watch_for_connect(handle.clone(), &mut relay, cfg.config_path.clone());
+    watch_for_sign_out(handle.clone(), &mut relay, &cfg);
+    ServerOrigin::set(handle, &cfg);
+    Ok(relay)
 }
 
 /// Start the local relay and open the window on it.
@@ -308,13 +448,20 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
                             let _ = window.close();
                         }
                     }
-                    Some(ShellRequest::Open { url, position }) => open_note_window(&handle, url, position),
+                    Some(ShellRequest::Open { url, position }) => {
+                        let url = handle.try_state::<Relay>().map_or(url.clone(), |r| r.keyed(&url));
+                        open_note_window(&handle, url, position)
+                    }
                     // Only a page this relay serves, or of the server it syncs with: the page may
                     // send the browser there, and nowhere else, whatever a script in it tried.
+                    // The browser has no cookie for the relay: a page of ours goes with the key.
                     Some(ShellRequest::External(url))
-                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url))
-                            || ServerOrigin::allows(&handle, &url) =>
+                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url)) =>
                     {
+                        let url = handle.try_state::<Relay>().map_or(url.clone(), |r| r.keyed(&url));
+                        open_in_browser(&url)
+                    }
+                    Some(ShellRequest::External(url)) if ServerOrigin::allows(&handle, &url) => {
                         open_in_browser(&url)
                     }
                     _ => tracing::debug!(window = me, "ignored a shell request"),
@@ -331,6 +478,7 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
                 return NewWindowResponse::Deny;
             }
             let (handle, position) = (opener.clone(), features.position().map(|p| (p.x, p.y)));
+            let url = opener.try_state::<Relay>().map_or(url.clone(), |r| r.keyed(&url));
             tauri::async_runtime::spawn(async move { open_note_window(&handle, url, position) });
             NewWindowResponse::Deny
         })
@@ -526,16 +674,27 @@ fn same_origin(addr: SocketAddr, url: &Url) -> bool {
 }
 
 /// Where to point the window: at the workspace, or — when this shell holds exactly one vault —
-/// straight at it, which is what a single-vault configuration means to ask for.
+/// straight at it, which is what a single-vault configuration means to ask for. With the relay's
+/// key, which the relay turns into the window's cookie (`local::Guard`).
 fn window_url(handle: &LocalHandle) -> String {
     match handle.vaults.len() {
-        1 => format!("http://{}/#/v/{}", handle.addr, handle.vault_id),
-        _ => format!("http://{}/", handle.addr),
+        1 => handle.page_url(&format!("#/v/{}", handle.vault_id)),
+        _ => handle.page_url(""),
+    }
+}
+
+/// Add `key=<key>` to a relay URL's query, keeping its route (the fragment) as it is.
+fn with_key(url: &mut Url, key: &str) {
+    if !url.query_pairs().any(|(k, _)| k == "key") {
+        url.query_pairs_mut().append_pair("key", key);
     }
 }
 
 /// Work out which vaults to open, then start one engine per vault behind one relay.
 async fn start_relay_for(cfg: &config::Config, web_dir: PathBuf) -> anyhow::Result<LocalHandle> {
+    if let Some(warning) = cfg.server_url.as_deref().and_then(lemmate_core::tls::cleartext_warning) {
+        tracing::warn!("{warning}");
+    }
     let token =
         cfg.token.clone().or_else(|| cfg.server_url.as_deref().and_then(lemmate_core::credentials::load));
     let sync = |vault_dir: PathBuf, vault_id| SyncOptions {
@@ -557,7 +716,8 @@ async fn start_relay_for(cfg: &config::Config, web_dir: PathBuf) -> anyhow::Resu
             }
             // Best-effort: with no answer from the server — or no server at all — whatever is
             // already on disk opens. A vault that only exists there yet arrives on the next
-            // launch.
+            // launch. The question is bounded by the agent's timeouts (`lemmate_core::tls`), so an
+            // unreachable server costs seconds of start-up, not a window that never appears.
             let remote = match &cfg.server_url {
                 None => Vec::new(),
                 Some(url) => match vaults::remote_ids(url, token.as_deref(), cfg.ca_cert.as_deref()) {
@@ -665,6 +825,9 @@ fn sign_in(
     invite: Option<&str>,
     ca: Option<&Path>,
 ) -> anyhow::Result<()> {
+    if let Some(warning) = lemmate_core::tls::cleartext_warning(server) {
+        tracing::warn!("{warning}");
+    }
     if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
         lemmate_core::credentials::login_with_token(server, token, ca)
             .context("checking the access token")?;
@@ -673,9 +836,7 @@ fn sign_in(
     if let (Some(email), Some(password)) = (email, password)
         && !email.is_empty()
     {
-        let device = std::fs::read_to_string("/etc/hostname")
-            .map(|s| s.trim().to_owned())
-            .unwrap_or_else(|_| "desktop".into());
+        let device = format!("Lemmate desktop on {}", lemmate_core::credentials::hostname());
         lemmate_core::credentials::login(server, email, password, register, invite, ca, &device)
             .context("signing in")?;
     }
@@ -726,6 +887,7 @@ async fn start_on_stable_port(
         web_dir: Some(web_dir.clone()),
         vault_root: vault_root.clone(),
         config_path: config_path.clone(),
+        allow_remote: false,
     };
     match client::start_many(sync.clone(), opts(port)).await {
         Ok(handle) => Ok(handle),
@@ -771,6 +933,38 @@ fn resolve_web_dir(app: &tauri::App, override_dir: Option<&Path>) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_error_page_shows_the_message_escaped() {
+        let url = error_page_url("parsing /home/<me>/desktop.toml: expected `=` & \"more\"");
+        assert!(url.starts_with("data:text/html;charset=utf-8,"));
+        let parsed = Url::parse(&url).expect("a valid URL");
+        assert_eq!(parsed.scheme(), "data");
+        let raw = url.split_once(',').unwrap().1.as_bytes();
+        let (mut bytes, mut i) = (Vec::new(), 0);
+        while i < raw.len() {
+            if raw[i] == b'%' {
+                bytes.push(u8::from_str_radix(std::str::from_utf8(&raw[i + 1..i + 3]).unwrap(), 16).unwrap());
+                i += 3;
+            } else {
+                bytes.push(raw[i]);
+                i += 1;
+            }
+        }
+        let decoded = String::from_utf8(bytes).unwrap();
+        assert!(decoded.contains("/home/&lt;me&gt;/desktop.toml"), "{decoded}");
+        assert!(decoded.contains("&amp; &quot;more&quot;"), "{decoded}");
+        assert!(!decoded.contains("<me>"));
+    }
+
+    #[test]
+    fn a_relay_url_gains_its_key_and_keeps_its_route() {
+        let mut url = Url::parse("http://127.0.0.1:4242/#/w/01J/01K").unwrap();
+        with_key(&mut url, "abc");
+        assert_eq!(url.as_str(), "http://127.0.0.1:4242/?key=abc#/w/01J/01K");
+        with_key(&mut url, "abc");
+        assert_eq!(url.query(), Some("key=abc"), "not twice");
+    }
 
     #[test]
     fn only_the_relays_own_pages_get_a_window() {

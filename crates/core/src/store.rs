@@ -877,7 +877,10 @@ impl Store {
         let Some(row) = self.trashed_row(id)? else { return Ok(None) };
         let taken = self.note_by_path(row.vault_id, &row.path)?.is_some();
         let path = if taken {
-            format!("{} (restored).md", row.path.trim_end_matches(".md"))
+            // Keep the real extension: `x.qmd` comes back as `x (restored).qmd`, not `.qmd.md`.
+            let ext = [".md", ".qmd"].into_iter().find(|e| row.path.ends_with(e)).unwrap_or("");
+            let stem = &row.path[..row.path.len() - ext.len()];
+            format!("{stem} (restored){}", if ext.is_empty() { ".md" } else { ext })
         } else {
             row.path.clone()
         };
@@ -916,9 +919,33 @@ impl Store {
             self.conn.execute("DELETE FROM note_links WHERE note_id = ?1", params![id])?;
             self.conn.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![id])?;
             self.conn.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
+            // A share of a note that no longer exists must not outlive it: the id could be
+            // claimed again, and the share would come back with it.
+            self.conn.execute("DELETE FROM note_shares WHERE note_id = ?1", params![id])?;
             self.conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
         }
         Ok(ids.len())
+    }
+
+    /// The vault a note's row names, whether or not the note is in the trash. Authorization
+    /// asks this rather than [`Store::note_by_id`]: a trashed note still belongs to its vault.
+    pub fn note_vault_of(&self, id: NoteId) -> Result<Option<VaultId>> {
+        let v: Option<String> = self
+            .conn
+            .query_row("SELECT vault_id FROM notes WHERE id = ?1", params![id.to_string()], |r| r.get(0))
+            .optional()?;
+        v.map(|s| s.parse()).transpose()
+    }
+
+    /// Whether a doc has anything in its journal: a doc with history is not a new one.
+    pub fn has_history(&self, doc_id: DocId) -> Result<bool> {
+        let id = doc_id.to_string();
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM doc_updates WHERE doc_id = ?1)
+                 OR EXISTS (SELECT 1 FROM doc_snapshots WHERE doc_id = ?1)",
+            params![id],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn note_by_path(&self, vault_id: VaultId, path: &str) -> Result<Option<NoteRow>> {

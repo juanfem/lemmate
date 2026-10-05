@@ -20,7 +20,22 @@ interface Entry {
   onUpdate: (update: Uint8Array, origin: unknown) => void
   onAwareness: (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => void
   synced: boolean
+  /** How many frames carrying our changes have gone out (or would have, offline). */
+  sent: number
+  /**
+   * The SyncStep1s we have sent and not had answered, each with `sent` as it was then. The
+   * server takes a connection's frames in order, so the answer to one comes after it has
+   * applied everything we sent before it: when that is everything we have sent at all, the
+   * server holds all of our changes.
+   */
+  probes: number[]
+  probeTimer: ReturnType<typeof setTimeout> | null
+  /** The server refused this doc on this connection; nothing we send is being kept. */
+  denied: boolean
 }
+
+/** How long a burst of edits settles before asking the server whether it has them. */
+const PROBE_DELAY_MS = 400
 
 export class SyncClient {
   private ws: WebSocket | null = null
@@ -30,6 +45,12 @@ export class SyncClient {
   status: SyncStatus = 'connecting'
   onStatus: (s: SyncStatus) => void = () => {}
   onSynced: (docId: string) => void = () => {}
+  /**
+   * The server has applied every change of ours to `docId` sent so far — not merely sent us its
+   * own state, which is all `onSynced` means. Fires after each confirmed burst of edits, and once
+   * after every (re)connect, whether or not there was anything to confirm.
+   */
+  onAcked: (docId: string) => void = () => {}
   /** The server refused a read or write on a doc (SPEC §11.2). */
   onDenied: (docId: string, reason: string) => void = () => {}
   private url: string
@@ -84,14 +105,23 @@ export class SyncClient {
       doc,
       awareness,
       synced: false,
+      sent: 0,
+      probes: [],
+      probeTimer: null,
+      denied: false,
       onUpdate: (update, origin) => {
         if (origin === this) return
         const enc = encoding.createEncoder()
         encoding.writeVarUint(enc, MSG_SYNC)
         syncProtocol.writeUpdate(enc, update)
         this.send(docId, encoding.toUint8Array(enc))
+        // Counted even offline: then it travels in the next handshake's SyncStep2 instead.
+        entry.sent++
+        this.scheduleProbe(docId, entry)
       },
-      onAwareness: ({ added, updated, removed }) => {
+      onAwareness: ({ added, updated, removed }, origin) => {
+        // What came from the server goes no further: it already went everywhere it should.
+        if (origin === this) return
         const changed = added.concat(updated, removed)
         const enc = encoding.createEncoder()
         encoding.writeVarUint(enc, MSG_AWARENESS)
@@ -109,9 +139,13 @@ export class SyncClient {
   close(docId: string) {
     const e = this.docs.get(docId)
     if (!e) return
+    // Tell the others our cursor is gone while the handler that sends it is still attached:
+    // `removeAwarenessStates` emits synchronously, and `send` hands the frame to the socket's
+    // buffer at once, so it goes out even if the socket is closed right after.
+    awarenessProtocol.removeAwarenessStates(e.awareness, [e.doc.clientID], 'close')
     e.doc.off('update', e.onUpdate)
     e.awareness.off('update', e.onAwareness)
-    awarenessProtocol.removeAwarenessStates(e.awareness, [e.doc.clientID], 'close')
+    if (e.probeTimer) clearTimeout(e.probeTimer)
     e.awareness.destroy() // stops its keep-alive timer
     this.docs.delete(docId)
   }
@@ -127,13 +161,32 @@ export class SyncClient {
   }
 
   private handshake(docId: string, entry: Entry) {
+    // Answers to SyncStep1s sent on a connection that is gone will never come.
+    entry.probes = []
+    entry.denied = false
+    this.probe(docId, entry)
+    // Push our awareness state right away so cursors show up on the other side.
+    const local = entry.awareness.getLocalState()
+    if (local) entry.onAwareness({ added: [], updated: [entry.doc.clientID], removed: [] }, 'handshake')
+  }
+
+  /** Send a SyncStep1: the start of a handshake, or a question whether the server has caught up. */
+  private probe(docId: string, entry: Entry) {
+    if (this.ws?.readyState !== WebSocket.OPEN) return
     const enc = encoding.createEncoder()
     encoding.writeVarUint(enc, MSG_SYNC)
     syncProtocol.writeSyncStep1(enc, entry.doc)
+    entry.probes.push(entry.sent)
     this.send(docId, encoding.toUint8Array(enc))
-    // Push our awareness state right away so cursors show up on the other side.
-    const local = entry.awareness.getLocalState()
-    if (local) entry.onAwareness({ added: [], updated: [entry.doc.clientID], removed: [] }, this)
+  }
+
+  private scheduleProbe(docId: string, entry: Entry) {
+    if (entry.probeTimer) return
+    entry.probeTimer = setTimeout(() => {
+      entry.probeTimer = null
+      // Before the handshake is answered there is nothing to ask: its answer will do.
+      if (entry.synced && this.docs.get(docId) === entry) this.probe(docId, entry)
+    }, PROBE_DELAY_MS)
   }
 
   private send(docId: string, payload: Uint8Array) {
@@ -152,15 +205,25 @@ export class SyncClient {
     const decoder = decoding.createDecoder(frame.payload)
     switch (decoding.readVarUint(decoder)) {
       case MSG_SYNC: {
+        // The server answers each SyncStep1 of ours with its SyncStep2 (what we lack) and then
+        // a SyncStep1 of its own. Only the handshake's needs a reply: the SyncStep2 that carries
+        // what we hold and the server does not — anything made offline. Later ones answer a
+        // probe, and what we have made since went out as updates already.
+        const peek = decoding.clone(decoder)
+        if (decoding.readVarUint(peek) === syncProtocol.messageYjsSyncStep1 && entry.synced) {
+          this.answered(frame.docId, entry)
+          break
+        }
         const enc = encoding.createEncoder()
         encoding.writeVarUint(enc, MSG_SYNC)
         const kind = syncProtocol.readSyncMessage(decoder, enc, entry.doc, this)
         if (encoding.length(enc) > 1) this.send(frame.docId, encoding.toUint8Array(enc))
-        // The server answers our SyncStep1 with SyncStep2 (its state) then its own SyncStep1;
-        // after we have replied to that, both sides hold the same state.
-        if (kind === syncProtocol.messageYjsSyncStep1 && !entry.synced) {
+        if (kind === syncProtocol.messageYjsSyncStep1) {
+          // We hold the server's state now (its SyncStep2 came first); it is about to hold ours.
+          entry.sent++
           entry.synced = true
           this.onSynced(frame.docId)
+          this.answered(frame.docId, entry)
         }
         break
       }
@@ -170,11 +233,28 @@ export class SyncClient {
       case MSG_AUTH: {
         // yrs: varint 0 = denied + reason string, 1 = granted
         const kind = decoding.readVarUint(decoder)
-        if (kind === 0) this.onDenied(frame.docId, decoding.readVarString(decoder))
+        if (kind === 0) {
+          entry.denied = true
+          this.onDenied(frame.docId, decoding.readVarString(decoder))
+        }
         break
       }
       default:
         break
+    }
+  }
+
+  /** A SyncStep1 of ours has been answered: acknowledge, or ask again for what came since. */
+  private answered(docId: string, entry: Entry) {
+    const upTo = entry.probes.shift()
+    if (upTo === undefined) return
+    if (upTo === entry.sent) {
+      if (!entry.denied) this.onAcked(docId)
+    } else if (entry.probes.length === 0) {
+      // Sent more since that question was asked (the handshake's own SyncStep2, at least).
+      if (entry.probeTimer) clearTimeout(entry.probeTimer)
+      entry.probeTimer = null
+      this.probe(docId, entry)
     }
   }
 }

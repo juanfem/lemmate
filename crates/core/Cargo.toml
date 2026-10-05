@@ -13,6 +13,8 @@ blake3 = "1"
 dirs = "6"
 futures-util = "0.3"
 getrandom = "0.3"
+# Already in the tree (url → idna); NFC for tags (markdown.rs).
+icu_normalizer = "2"
 keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 markdown = "1"
 mime_guess = "2"
@@ -37,6 +39,10 @@ url = "2"
 webpki-roots = "1"
 yrs = { version = "0.27", features = ["sync"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+# Killing a timed-out pandoc/quarto together with what it started (`pandoc::run_bounded`).
+libc = "0.2"
 
 [features]
 # Keep saved tokens in the OS keychain (credentials.rs). The CLI and the desktop app turn it on;

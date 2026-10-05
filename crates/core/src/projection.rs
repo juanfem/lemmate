@@ -14,34 +14,44 @@ pub const NOTE_EXTENSIONS: &[&str] = &["md", "qmd"];
 #[derive(Debug, Clone)]
 pub struct Projection {
     root: PathBuf,
+    /// `root` with every symlink resolved, when that differs: macOS FSEvents reports
+    /// `/private/var/…` for a vault under `/var/…`, and a path that does not start with the root
+    /// we know would be dropped as foreign.
+    canonical: Option<PathBuf>,
 }
 
 impl Projection {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let canonical = root.canonicalize().ok().filter(|c| *c != root);
+        Self { root, canonical }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// `abs` relative to the vault root, under either spelling of the root.
+    pub fn relative<'a>(&self, abs: &'a Path) -> Option<&'a Path> {
+        abs.strip_prefix(&self.root)
+            .ok()
+            .or_else(|| self.canonical.as_ref().and_then(|c| abs.strip_prefix(c).ok()))
+    }
+
     pub fn sidecar_dir(&self) -> PathBuf {
         self.root.join(SIDECAR_DIR)
     }
 
-    /// Absolute path for a vault-relative note path; rejects `..` and absolute inputs.
+    /// Absolute path for a vault-relative path, which must pass [`check_path`]. Every path that
+    /// reaches the disk goes through here, and most of them came from another replica.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
-        let p = Path::new(rel);
-        if p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-        {
-            return Err(Error::PathEscape(rel.to_owned()));
-        }
-        Ok(self.root.join(p))
+        check_path(rel).map_err(|why| Error::PathEscape(format!("{rel}: {why}")))?;
+        Ok(self.root.join(rel))
     }
 
     /// Is this path something the projection ignores (sidecar, hidden dirs, temp files)?
     pub fn is_ignored(&self, path: &Path) -> bool {
-        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        let rel = self.relative(path).unwrap_or(path);
         rel.components().any(|c| match c {
             Component::Normal(s) => {
                 let s = s.to_string_lossy();
@@ -126,14 +136,16 @@ impl Projection {
 
     fn walk_files_into(&self, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
+            let entry = entry?;
+            let path = entry.path();
             if self.is_ignored(&path) {
                 continue;
             }
-            if path.is_dir() {
+            // A symlinked folder is not descended into: it can loop, or lead out of the vault.
+            if entry.file_type()?.is_dir() {
                 self.walk_files_into(&path, out)?;
             } else if path.is_file() && !Self::is_note_path(&path) {
-                let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+                let rel = self.relative(&path).unwrap_or(&path);
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
@@ -158,19 +170,74 @@ impl Projection {
 
     fn walk_into(&self, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
+            let entry = entry?;
+            let path = entry.path();
             if self.is_ignored(&path) {
                 continue;
             }
-            if path.is_dir() {
+            // As in `walk_files_into`: a symlinked folder is not followed.
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
                 self.walk_into(&path, out)?;
+            } else if kind.is_symlink() && path.is_dir() {
+                continue;
             } else if Self::is_note_path(&path) {
-                let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+                let rel = self.relative(&path).unwrap_or(&path);
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
         Ok(())
     }
+}
+
+/// Why a vault-relative path may not be written, or `Ok` when it may.
+///
+/// Paths arrive from other replicas, so this is the line between "a note" and "a file anywhere
+/// this process can write": nothing absolute or climbing out (`..`), nothing hidden — which
+/// covers the sidecar (`.lemmate/`), `.git/` and every other dot-directory a tool would trust —
+/// and nothing that a Windows or macOS replica of the same vault could not hold: the characters
+/// Windows forbids, its reserved device names (`CON`, `aux.md`, `COM1.txt`, …), and names ending
+/// in a dot or a space. Those are refused on *every* platform, so all replicas agree on which
+/// notes have a file; a note refused here stays in the vault doc and keeps syncing, it simply
+/// has no file on this disk.
+pub fn check_path(rel: &str) -> std::result::Result<(), &'static str> {
+    if rel.is_empty() {
+        return Err("empty path");
+    }
+    if rel.contains('\\') {
+        return Err("backslash in path");
+    }
+    if rel.starts_with('/')
+        || Path::new(rel).components().any(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+    {
+        return Err("absolute path");
+    }
+    for seg in rel.split('/') {
+        match seg {
+            "" => return Err("empty path segment"),
+            "." | ".." => return Err("relative path segment"),
+            _ => {}
+        }
+        if seg.starts_with('.') {
+            return Err("hidden path segment");
+        }
+        if seg.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')) {
+            return Err("character not allowed in a file name");
+        }
+        if seg.ends_with('.') || seg.ends_with(' ') {
+            return Err("file name ends in a dot or a space");
+        }
+        let stem = seg.split('.').next().unwrap_or(seg).trim_end().to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0');
+        if reserved {
+            return Err("reserved file name");
+        }
+    }
+    Ok(())
 }
 
 /// Apply an external edit to a doc. `last_projected` is the text this device last wrote to or
@@ -208,6 +275,22 @@ pub fn ingest_external_edit(doc: &NoteDoc, last_projected: &str, on_disk: &str) 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_folders_are_not_walked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, outside) = (dir.path().join("vault"), dir.path().join("outside"));
+        let p = Projection::new(&root);
+        p.write("a.md", "a").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.md"), "s").unwrap();
+        fs::write(outside.join("secret.bin"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+        assert_eq!(p.walk_notes().unwrap(), vec!["a.md"]);
+        assert!(p.walk_files().unwrap().is_empty());
+    }
+
     #[test]
     fn write_read_walk_and_ignore() {
         let dir = tempfile::tempdir().unwrap();
@@ -222,8 +305,84 @@ mod tests {
         assert!(p.is_ignored(&p.sidecar_dir().join("local.db")));
         assert!(p.resolve("../escape.md").is_err());
         assert!(p.resolve("/abs.md").is_err());
+        assert!(p.resolve("Daily/2026-08-29.md").is_ok());
         p.remove("Daily/2026-08-29.md").unwrap();
         p.remove("Daily/2026-08-29.md").unwrap(); // idempotent
+    }
+
+    /// Everything another replica can name, against what may be written here (SPEC §6.3).
+    #[test]
+    fn hostile_and_unportable_paths_are_refused() {
+        for bad in [
+            "",
+            "/abs.md",
+            "../up.md",
+            "a/../../up.md",
+            "a/./b.md",
+            "a//b.md",
+            "a/",
+            ".lemmate/local.db",
+            ".lemmate/evil.md",
+            ".git/config",
+            "notes/.git/hooks/pre-commit",
+            ".hidden.md",
+            "a\\b.md",
+            "nul\0byte.md",
+            "tab\there.md",
+            "What?.md",
+            "a:b.md",
+            "star*.md",
+            "pipe|.md",
+            "<x>.md",
+            "quote\".md",
+            "CON",
+            "con.md",
+            "dir/Aux.txt",
+            "COM1.md",
+            "lpt9.tar.gz",
+            "NUL .md",
+            "trailing.",
+            "trailing space ",
+            "dir./x.md",
+        ] {
+            assert!(check_path(bad).is_err(), "{bad:?} must be refused");
+        }
+        for good in [
+            "a.md",
+            "Daily/2026-08-29.md",
+            "v1..2.md",
+            "a.b.c.md",
+            "COM0.md",
+            "COM10.md",
+            "console.md",
+            "Lpt.md",
+            "Ünïcödé/naïve café.md",
+            "with space/x y.md",
+            "_quarto.yml",
+        ] {
+            assert!(check_path(good).is_ok(), "{good:?} must be allowed: {:?}", check_path(good));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = Projection::new(dir.path());
+        assert!(p.write(".lemmate/evil.md", "x").is_err());
+        assert!(p.write_bytes(".git/config", b"x").is_err());
+        assert!(!dir.path().join(".git").exists() && !dir.path().join(".lemmate").exists());
+    }
+
+    /// FSEvents names the canonical path; the vault may have been opened through a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn events_under_the_canonical_root_are_relative_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let p = Projection::new(&link);
+        let canon = real.canonicalize().unwrap().join("n.md");
+        assert_eq!(p.relative(&canon), Some(Path::new("n.md")));
+        assert_eq!(p.relative(&link.join("n.md")), Some(Path::new("n.md")));
+        assert!(!p.is_ignored(&canon));
     }
 
     #[test]

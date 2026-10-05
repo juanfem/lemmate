@@ -49,8 +49,10 @@ pub struct Cli {
 }
 
 /// The shape of `desktop.toml`. Every key is optional here; the flags may supply it instead.
+///
+/// Unknown keys are not an error — a file written by a newer version must still open — but they
+/// are logged, since a misspelt key is otherwise silently ignored (see [`parse_file`]).
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FileConfig {
     root_dir: Option<PathBuf>,
     vault_dir: Option<PathBuf>,
@@ -59,6 +61,35 @@ struct FileConfig {
     ca_cert: Option<PathBuf>,
     token: Option<String>,
     web_dir: Option<PathBuf>,
+}
+
+const KNOWN_KEYS: [&str; 7] =
+    ["root_dir", "vault_dir", "server_url", "vault_id", "ca_cert", "token", "web_dir"];
+
+/// Parse `desktop.toml`, warning about keys this version does not know.
+fn parse_file(path: &Path, text: &str) -> anyhow::Result<FileConfig> {
+    let table: toml::Table = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+    for key in table.keys().filter(|k| !KNOWN_KEYS.contains(&k.as_str())) {
+        tracing::warn!(file = %path.display(), key, "ignoring an unknown key in the configuration file");
+    }
+    toml::Value::Table(table).try_into::<FileConfig>().with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Read a TOML file as a table to edit: `None` when it does not exist yet, an error when it
+/// cannot be read or parsed — which must stop the edit, never turn into an empty file.
+fn read_table(path: &Path) -> anyhow::Result<Option<toml::Table>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text.parse().with_context(|| format!("parsing {}", path.display()))?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Replace the file atomically and privately: it may hold a token (see
+/// [`lemmate_core::paths::write_private`]).
+fn write_table(path: &Path, table: &toml::Table) -> anyhow::Result<()> {
+    lemmate_core::paths::write_private(path, toml::to_string(table)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Where this shell keeps its notes.
@@ -144,15 +175,19 @@ impl Config {
     /// `Some` when neither the flags nor the config file name a folder for the notes, i.e. the
     /// app should open in setup mode instead of failing. A server is not part of the question:
     /// a configuration with a folder and no server is a standalone app, not a half-written one.
+    ///
+    /// A file that exists but cannot be read or parsed is *not* a reason for setup — that would
+    /// write over it. It is `None` here, and [`Config::resolve`] reports what is wrong with it.
     pub fn needs_setup(cli: &Cli) -> Option<SetupContext> {
         if cli.root_dir.is_some() || cli.vault_dir.is_some() || cli.server_url.is_some() {
             return None;
         }
         let path = cli.config.clone().or_else(default_config_path)?;
-        let file = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| toml::from_str::<FileConfig>(&t).ok())
-            .unwrap_or_default();
+        let file = match std::fs::read_to_string(&path) {
+            Ok(text) => parse_file(&path, &text).ok()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileConfig::default(),
+            Err(_) => return None,
+        };
         if file.root_dir.is_some() || file.vault_dir.is_some() {
             return None;
         }
@@ -164,12 +199,15 @@ impl Config {
         })
     }
 
-    /// Write the file the setup screen produced; `resolve` reads it back on the next start.
+    /// Write what the setup screen produced; `resolve` reads it back on the next start. Merged
+    /// into a file that is already there (one naming only a server, or web assets), so nothing
+    /// in it is lost — and a file that cannot be parsed is an error, never overwritten.
     pub fn write_setup(
         path: &std::path::Path,
         req: &lemmate_core::local::SetupRequest,
     ) -> anyhow::Result<()> {
-        let mut table = toml::Table::new();
+        let mut table = read_table(path)?.unwrap_or_default();
+        table.remove("vault_dir");
         table.insert("root_dir".into(), toml::Value::String(req.root_dir.clone()));
         // No server key at all when the app is standalone, so the file says what it means.
         if let Some(u) = req.server_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
@@ -178,12 +216,7 @@ impl Config {
         if let Some(c) = req.ca_cert.as_deref().filter(|c| !c.trim().is_empty()) {
             table.insert("ca_cert".into(), toml::Value::String(c.trim().to_owned()));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, toml::to_string(&table)?)
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_table(path, &table)
     }
 
     /// Record a server in the configuration file, leaving every other key as it was.
@@ -193,31 +226,20 @@ impl Config {
     /// function's business. A file that does not exist yet is created with just these keys —
     /// the rest of the configuration is then coming from flags, which survive the restart.
     pub fn set_server(path: &Path, server_url: &str, ca_cert: Option<&str>) -> anyhow::Result<()> {
-        let mut table = match std::fs::read_to_string(path) {
-            Ok(text) => text.parse::<toml::Table>().with_context(|| format!("parsing {}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        let mut table = read_table(path)?.unwrap_or_default();
         table.insert("server_url".into(), toml::Value::String(server_url.to_owned()));
         if let Some(c) = ca_cert {
             table.insert("ca_cert".into(), toml::Value::String(c.to_owned()));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, toml::to_string(&table)?)
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_table(path, &table)
     }
 
     /// Drop a `token` written into the file by hand, so a sign-out is not undone by the next
     /// start reading it back. Everything else stays; a file with no token is left untouched.
     pub fn clear_token(path: &Path) -> anyhow::Result<()> {
-        let Ok(text) = std::fs::read_to_string(path) else { return Ok(()) };
-        let mut table = text.parse::<toml::Table>().with_context(|| format!("parsing {}", path.display()))?;
+        let Some(mut table) = read_table(path)? else { return Ok(()) };
         if table.remove("token").is_some() {
-            std::fs::write(path, toml::to_string(&table)?)
-                .with_context(|| format!("writing {}", path.display()))?;
+            write_table(path, &table)?;
         }
         Ok(())
     }
@@ -229,7 +251,7 @@ impl Config {
         let file = match &path {
             Some(p) if p.is_file() => {
                 let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-                toml::from_str::<FileConfig>(&text).with_context(|| format!("parsing {}", p.display()))?
+                parse_file(p, &text)?
             }
             Some(p) if cli.config.is_some() => {
                 bail!("configuration file {} does not exist", p.display())
@@ -419,5 +441,70 @@ mod tests {
         // A folder and no server is a standalone app, not an unfinished setup.
         let p = write(tmp.path(), "root_dir = \"/n/all\"\n");
         assert!(Config::needs_setup(&cli(&["--config", p.to_str().unwrap()])).is_none());
+    }
+
+    /// A file that does not parse is reported, and never mistaken for "not set up yet" — the
+    /// setup screen would write over it.
+    #[test]
+    fn a_broken_file_is_an_error_and_never_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = "root_dir = \"/n/all\"\nserver_url = [oops\n";
+        let p = write(tmp.path(), body);
+        let flags = cli(&["--config", p.to_str().unwrap()]);
+        assert!(Config::needs_setup(&flags).is_none(), "a broken file is not a first run");
+        let e = format!("{:#}", Config::resolve(flags).unwrap_err());
+        assert!(e.contains("parsing") && e.contains("desktop.toml"), "{e}");
+        let req = lemmate_core::local::SetupRequest {
+            root_dir: "/elsewhere".into(),
+            server_url: None,
+            ca_cert: None,
+            email: None,
+            password: None,
+            register: false,
+            invite: None,
+            token: None,
+        };
+        assert!(Config::write_setup(&p, &req).is_err());
+        assert!(Config::set_server(&p, "https://s", None).is_err());
+        assert!(Config::clear_token(&p).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), body, "the file is as the user left it");
+    }
+
+    /// A file written by a newer version, with keys this one does not know, still opens.
+    #[test]
+    fn unknown_keys_are_ignored_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(tmp.path(), "root_dir = \"/n/all\"\ntheme = \"dark\"\n");
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()));
+        assert!(Config::needs_setup(&cli(&["--config", p.to_str().unwrap()])).is_none());
+    }
+
+    /// Setup merges into a file that names only a server, and the file is its owner's alone.
+    #[test]
+    fn setup_keeps_what_the_file_already_says_and_writes_it_privately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(tmp.path(), "web_dir = \"/w\"\ntoken = \"lmt_x\"\n");
+        assert!(Config::needs_setup(&cli(&["--config", p.to_str().unwrap()])).is_some());
+        let req = lemmate_core::local::SetupRequest {
+            root_dir: "/n/all".into(),
+            server_url: Some("https://s".into()),
+            ca_cert: None,
+            email: None,
+            password: None,
+            register: false,
+            invite: None,
+            token: None,
+        };
+        Config::write_setup(&p, &req).unwrap();
+        let cfg = Config::resolve(cli(&["--config", p.to_str().unwrap()])).unwrap();
+        assert_eq!(cfg.layout, Layout::Root("/n/all".into()));
+        assert_eq!(cfg.web_dir, Some("/w".into()));
+        assert_eq!(cfg.token.as_deref(), Some("lmt_x"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 }

@@ -33,8 +33,26 @@ async function up(port: number): Promise<boolean> {
     return false
   }
 }
+// The relay answers only with its per-launch key, which it prints in the address it hands out.
+let relayKey = ''
+function keyed(url: string, init: RequestInit = {}): RequestInit {
+  if (!relayKey || !url.includes(`:${RELAY_PORT}/`)) return init
+  return { ...init, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${relayKey}` } }
+}
 async function json<T>(url: string): Promise<T> {
-  return (await (await fetch(url)).json()) as T
+  return (await (await fetch(url, keyed(url))).json()) as T
+}
+/** The key from the address `lemmate sync --serve` prints. */
+function keyFrom(child: ChildProcess): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let out = ''
+    child.stdout!.on('data', (chunk: Buffer) => {
+      out += chunk.toString()
+      const m = out.match(/[?&]key=([0-9a-f]+)/)
+      if (m) resolve(m[1]!)
+    })
+    child.once('exit', () => reject(new Error(`relay exited before printing its address: ${out}`)))
+  })
 }
 
 test('relay serves a UI offline and forwards to the server', { skip: !SERVER || !CLI }, async () => {
@@ -47,15 +65,17 @@ test('relay serves a UI offline and forwards to the server', { skip: !SERVER || 
   try {
     await waitFor(() => up(SERVER_PORT), 10_000, 'server')
     relay = spawn(CLI!, ['sync', '--vault', vaultDir, '--server', `http://127.0.0.1:${SERVER_PORT}`, '--serve', `127.0.0.1:${RELAY_PORT}`], {
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'ignore'],
     })
+    relayKey = await keyFrom(relay)
     await waitFor(() => up(RELAY_PORT), 10_000, 'relay')
+    assert.equal((await fetch(`http://127.0.0.1:${RELAY_PORT}/api/v1/vaults`)).status, 401, 'no key, no answer')
     const [vault] = await json<{ id: string; notes: number }[]>(`http://127.0.0.1:${RELAY_PORT}/api/v1/vaults`)
     assert.ok(vault, 'relay lists its vault')
     const vaultId = vault!.id
 
     // A UI client on the relay creates a note.
-    const client = new SyncClient(`ws://127.0.0.1:${RELAY_PORT}/ws`)
+    const client = new SyncClient(`ws://127.0.0.1:${RELAY_PORT}/ws?key=${relayKey}`)
     clients.push(client)
     const vdoc = new Y.Doc()
     client.open(`vault:${vaultId}`, vdoc)
@@ -78,11 +98,12 @@ test('relay serves a UI offline and forwards to the server', { skip: !SERVER || 
     const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])
     const { blake3Hex } = await import('../src/lib/blake3.ts')
     const hash = await blake3Hex(png)
-    const put = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/v1/vaults/${vaultId}/attachments/${hash}`, {
+    const putUrl = `http://127.0.0.1:${RELAY_PORT}/api/v1/vaults/${vaultId}/attachments/${hash}`
+    const put = await fetch(putUrl, keyed(putUrl, {
       method: 'PUT',
       headers: { 'content-type': 'image/png', 'x-filename': 'shot.png' },
       body: png,
-    })
+    }))
     assert.equal(put.status, 200)
     const stored = (await put.json()) as { path: string; hash: string }
     assert.equal(stored.path, 'attachments/shot.png')
@@ -97,7 +118,7 @@ test('relay serves a UI offline and forwards to the server', { skip: !SERVER || 
     note.getText('content').insert(note.getText('content').length, 'offline edit\n')
     await waitFor(() => readFileSync(join(vaultDir, 'Relay.md'), 'utf8').includes('offline edit'), 10_000, 'offline projection')
     // A second UI client on the relay sees the change without any server.
-    const other = new SyncClient(`ws://127.0.0.1:${RELAY_PORT}/ws`)
+    const other = new SyncClient(`ws://127.0.0.1:${RELAY_PORT}/ws?key=${relayKey}`)
     clients.push(other)
     const note2 = new Y.Doc()
     other.open(noteId, note2)

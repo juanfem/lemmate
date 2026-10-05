@@ -57,7 +57,7 @@ pub fn file_path(raw: &str) -> Option<String> {
     let path = crate::import::upload_path(raw)?;
     let name = path.rsplit('/').next()?;
     let lower = name.to_ascii_lowercase();
-    if path.split('/').any(|seg| seg.starts_with('.'))
+    if crate::projection::check_path(&path).is_err()
         || lower.ends_with(".md")
         || lower.ends_with(".qmd")
         || lower.ends_with(".tmp")

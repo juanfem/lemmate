@@ -43,7 +43,7 @@ pub struct ImportReport {
     pub callouts: usize,
     /// `![[image]]` embeds rewritten to `![](image)`.
     pub embeds: usize,
-    /// Files left alone because the destination already had them.
+    /// Files left alone because the destination already had them, and symlinks (not followed).
     pub skipped: usize,
     /// Bookmarks read from `.obsidian/bookmarks.json`.
     pub bookmarks: usize,
@@ -119,7 +119,13 @@ pub fn import_obsidian(src: &Path, dest: &Path, opts: &ImportOptions) -> Result<
 fn import_dir(src: &Path, dest: &Path, opts: &ImportOptions, report: &mut ImportReport) -> Result<()> {
     let mut entries: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(src)? {
-        entries.push(entry?.path());
+        let entry = entry?;
+        // Symlinks are not followed: one can lead out of the vault being imported, or loop.
+        if entry.file_type()?.is_symlink() {
+            report.skipped += 1;
+            continue;
+        }
+        entries.push(entry.path());
     }
     entries.sort();
     for path in entries {
@@ -241,15 +247,27 @@ pub fn convert_note(text: &str) -> Converted {
             let indent = &line[..line.len() - line.trim_start().len()];
             out.push(format!("{indent}{}", head.open()));
             i += 1;
+            // Code fenced inside the callout is copied as it is, like code outside one.
+            let mut inner_fence: Option<(char, usize)> = None;
             while i < lines.len() {
                 let body = lines[i];
-                match strip_quote(body) {
-                    Some(inner) => {
-                        out.push(rewrite_embeds(inner, &mut embeds));
-                        i += 1;
+                let Some(inner) = strip_quote(body) else { break };
+                match inner_fence {
+                    Some((ch, n)) => {
+                        if closes_fence(inner, ch, n) {
+                            inner_fence = None;
+                        }
+                        out.push(inner.to_owned());
                     }
-                    None => break,
+                    None => match fence_marker(inner) {
+                        Some(open) => {
+                            inner_fence = Some(open);
+                            out.push(inner.to_owned());
+                        }
+                        None => out.push(rewrite_embeds(inner, &mut embeds)),
+                    },
                 }
+                i += 1;
             }
             out.push(format!("{indent}:::"));
             callouts += 1;
@@ -277,7 +295,10 @@ impl CalloutHead {
     fn open(&self) -> String {
         let mut s = format!("::: {{.callout-{}", self.kind);
         if !self.title.is_empty() {
-            s.push_str(&format!(" title=\"{}\"", self.title.replace('"', "\\\"")));
+            // Pandoc reads `\\` and `\"` as escapes in a quoted attribute value, so a title ending
+            // in a backslash must not swallow the closing quote.
+            let title = self.title.replace('\\', "\\\\").replace('"', "\\\"");
+            s.push_str(&format!(" title=\"{title}\""));
         }
         if self.collapsed {
             s.push_str(" collapse=\"true\"");
@@ -341,7 +362,7 @@ pub(crate) fn closes_fence(line: &str, ch: char, opened: usize) -> bool {
 }
 
 /// Rewrite `![[image.png]]` / `![[image.png|300]]` to `![](image.png)`; leave every other
-/// `![[…]]` embed for tier-3 transclusion.
+/// `![[…]]` embed for tier-3 transclusion, and inline code spans as they are.
 fn rewrite_embeds(line: &str, count: &mut usize) -> String {
     if !line.contains("![[") {
         return line.to_owned();
@@ -349,6 +370,19 @@ fn rewrite_embeds(line: &str, count: &mut usize) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(at) = rest.find("![[") {
+        if let Some(tick) = rest[..at].find('`') {
+            // A code span opens first: copy it whole (or the rest of the line, if unclosed).
+            let run = rest[tick..].chars().take_while(|&c| c == '`').count();
+            let closer = "`".repeat(run);
+            let Some(end) = rest[tick + run..].find(&closer) else {
+                out.push_str(rest);
+                return out;
+            };
+            let span = tick + run + end + run;
+            out.push_str(&rest[..span]);
+            rest = &rest[span..];
+            continue;
+        }
         out.push_str(&rest[..at]);
         let inner_start = &rest[at + 3..];
         let Some(end) = inner_start.find("]]") else {
@@ -495,7 +529,8 @@ pub struct UploadReport {
     pub attachments: usize,
     pub callouts: usize,
     pub embeds: usize,
-    /// Files left alone: a path the vault already had, or an attachment over the size limit.
+    /// Files left alone: a path the vault already had, an attachment over the size limit, or a
+    /// path that cannot be a vault path ([`upload_rejected`]).
     pub skipped: usize,
     pub bookmarks: usize,
     /// Whether daily-note settings were stored (in the vault doc, for every replica).
@@ -504,7 +539,9 @@ pub struct UploadReport {
 
 /// Normalise a browser-supplied relative path: backslashes become `/`, leading slashes and `.`
 /// segments go, and anything that could escape the vault (`..`, an absolute Windows path, an
-/// empty result) is rejected.
+/// empty result) is rejected. So is any `:` — Obsidian itself refuses one in a file name, and a
+/// vault folder on Windows could not hold it — and such a file counts as skipped, not as ignored
+/// ([`upload_rejected`]).
 pub fn upload_path(rel: &str) -> Option<String> {
     let rel = rel.replace('\\', "/");
     if rel.contains(':') {
@@ -519,6 +556,13 @@ pub fn upload_path(rel: &str) -> Option<String> {
         }
     }
     if out.is_empty() { None } else { Some(out.join("/")) }
+}
+
+/// Whether [`import_upload`] passes over `rel` because its path is unusable (as opposed to a
+/// file deliberately not imported, like Obsidian's workspace state): the caller counts it in
+/// [`UploadReport::skipped`], so an import never loses a file without saying so.
+pub fn upload_rejected(rel: &str) -> bool {
+    upload_path(rel).is_none()
 }
 
 /// Classify and convert one uploaded file (SPEC §11.4). `None` means "not imported": Obsidian's
@@ -561,6 +605,55 @@ pub fn parse_daily_notes(raw: &str) -> Option<DailySettings> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embeds_in_inline_code_are_left_alone() {
+        let out = convert_note("Write `![[pic.png]]` for ![[pic.png]], or ``a ` ![[b.png]]``.\n");
+        assert_eq!(out.text, "Write `![[pic.png]]` for ![](pic.png), or ``a ` ![[b.png]]``.\n");
+        assert_eq!(out.embeds, 1);
+        assert_eq!(convert("unclosed `![[a.png]]\n"), "unclosed `![[a.png]]\n");
+    }
+
+    #[test]
+    fn code_fenced_in_a_callout_is_left_alone() {
+        let out = convert("> [!note] N\n> ```\n> ![[a.png]]\n> ```\n> ![[b.png]]\n");
+        assert_eq!(out, "::: {.callout-note title=\"N\"}\n```\n![[a.png]]\n```\n![](b.png)\n:::\n");
+    }
+
+    #[test]
+    fn callout_titles_are_escaped_for_pandoc() {
+        assert_eq!(
+            convert("> [!note] C:\\dir\\\n> x\n"),
+            "::: {.callout-note title=\"C:\\\\dir\\\\\"}\nx\n:::\n"
+        );
+        assert_eq!(
+            convert("> [!note] say \"hi\"\n> x\n"),
+            "::: {.callout-note title=\"say \\\"hi\\\"\"}\nx\n:::\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_followed_on_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dest, outside) = (tmp.path().join("src"), tmp.path().join("dest"), tmp.path().join("out"));
+        write(&src.join("a.md"), "# A\n");
+        write(&outside.join("secret.md"), "# secret\n");
+        std::os::unix::fs::symlink(&outside, src.join("linked")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), src.join("s.md")).unwrap();
+        std::os::unix::fs::symlink(&src, src.join("loop")).unwrap();
+        let report = import_obsidian(&src, &dest, &ImportOptions::default()).unwrap();
+        assert_eq!(report.notes, 1);
+        assert_eq!(report.skipped, 3);
+        assert!(!dest.join("linked").exists() && !dest.join("s.md").exists() && !dest.join("loop").exists());
+    }
+
+    #[test]
+    fn unusable_upload_paths_are_counted_not_ignored() {
+        assert!(upload_rejected("Notes/a: b.md") && upload_rejected("../x.md"));
+        assert!(!upload_rejected(".obsidian/workspace.json"), "ignored on purpose, not rejected");
+        assert!(!upload_rejected("Notes/a.md"));
+    }
 
     #[test]
     fn upload_paths_are_normalised_and_escapes_rejected() {

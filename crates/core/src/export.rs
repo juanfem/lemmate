@@ -59,7 +59,9 @@ pub fn export_zip(vault: &Path, out: &Path) -> Result<ExportReport> {
 
     let mut report = ExportReport::default();
     for rel in &paths {
-        let abs = proj.resolve(rel)?;
+        // A name no other replica could hold (`projection::check_path`) never synced, and
+        // is left out here too rather than failing the whole archive.
+        let Ok(abs) = proj.resolve(rel) else { continue };
         let mut src = fs::File::open(&abs)?;
         zip.start_file(rel, options).map_err(zip_err)?;
         report.bytes += io::copy(&mut src, &mut zip)?;

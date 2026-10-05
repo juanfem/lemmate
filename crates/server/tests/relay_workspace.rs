@@ -16,6 +16,10 @@ use serde_json::Value;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as TMsg;
 
+#[path = "../../core/tests/common/mod.rs"]
+mod common;
+use common::{keyed, remember};
+
 async fn server() -> (SocketAddr, std::sync::Arc<lemmate_server::AppState>) {
     let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -44,8 +48,9 @@ async fn relay(server: SocketAddr, dirs: &[&Path], root: Option<&Path>) -> Local
         web_dir: None,
         vault_root: root.map(Path::to_path_buf),
         config_path: None,
+        allow_remote: false,
     };
-    start_many(opts, local).await.unwrap()
+    remember(start_many(opts, local).await.unwrap())
 }
 
 /// Frames the way a local UI sends them.
@@ -59,7 +64,7 @@ async fn send(
 }
 
 async fn get(url: String) -> (u16, Value) {
-    tokio::task::spawn_blocking(move || match ureq::get(&url).call() {
+    tokio::task::spawn_blocking(move || match keyed(ureq::get(&url), &url).call() {
         Ok(mut r) => {
             let status = r.status().as_u16();
             let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -74,7 +79,10 @@ async fn get(url: String) -> (u16, Value) {
 
 async fn post(url: String, body: Value) -> (u16, Value) {
     tokio::task::spawn_blocking(move || {
-        match ureq::post(&url).header("content-type", "application/json").send(body.to_string().as_bytes()) {
+        match keyed(ureq::post(&url), &url)
+            .header("content-type", "application/json")
+            .send(body.to_string().as_bytes())
+        {
             Ok(mut r) => {
                 let status = r.status().as_u16();
                 let text = r.body_mut().read_to_string().unwrap_or_default();
@@ -175,7 +183,7 @@ async fn a_note_created_over_the_socket_reaches_the_vault_that_claims_it() {
     let handle = relay(srv, &[&one, &two], None).await;
     let (a, b) = (handle.vaults[0], handle.vaults[1]);
 
-    let (mut ws, _) = connect_async(format!("ws://{}/ws", handle.addr)).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://{}/ws?key={}", handle.addr, handle.key)).await.unwrap();
     // Text first, addressed only by note id: neither vault has heard of it.
     let id = NoteId::new();
     let note = NoteDoc::new();
@@ -210,7 +218,7 @@ async fn a_vault_the_ui_creates_gets_a_folder_and_an_engine() {
     std::fs::create_dir_all(&first).unwrap();
     let handle = relay(srv, &[&first], Some(root.path())).await;
 
-    let (mut ws, _) = connect_async(format!("ws://{}/ws", handle.addr)).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://{}/ws?key={}", handle.addr, handle.key)).await.unwrap();
     let fresh = VaultId::new();
     let id = NoteId::new();
     let vault = VaultDoc::new();

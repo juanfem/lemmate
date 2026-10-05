@@ -2,11 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::auth::{self, AuthMode, AuthUser};
 use axum::body::Bytes;
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
@@ -20,7 +21,7 @@ use lemmate_core::store::{AttachmentRow, Role, Saved, now_ms};
 use lemmate_core::sync::{Frame, Message, SyncMessage};
 use lemmate_core::{DocId, NoteDoc, NoteId, RetentionPolicy, Store, VaultDoc, VaultId, history, markdown};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use yrs::StateVector;
@@ -87,6 +88,12 @@ pub async fn purge_orphans(
     // Notes trashed longer than the grace period go for good (SPEC §9).
     let grace_days = (grace.as_secs() / 86_400) as u32;
     report.purged_notes = store.purge_trash(grace_days)?;
+    if report.purged_notes > 0 {
+        // A purged note's room would still answer with its text, for an id that is now free.
+        drop(store);
+        state.evict_idle_rooms(Duration::ZERO).await;
+        store = state.store.lock().await;
+    }
     let vaults: Vec<VaultId> = store
         .doc_ids()?
         .into_iter()
@@ -122,13 +129,46 @@ pub async fn purge_orphans(
     Ok(report)
 }
 
+/// Body limit for everything but uploads: JSON, mostly, and a note's whole text at the most.
+pub const JSON_BODY_LIMIT: usize = 4 * 1024 * 1024;
+/// The largest WebSocket message (and frame: a browser sends a message as one frame) accepted.
+/// The biggest legitimate one is a first sync of a large vault doc or note — text and paths,
+/// never attachment bytes, which go over HTTP.
+pub const WS_MAX_MESSAGE: usize = 32 * 1024 * 1024;
+/// A room nobody has touched for this long is dropped; its doc is in the store already.
+pub const ROOM_IDLE: Duration = Duration::from_secs(10 * 60);
+/// How often `get_room` looks for idle rooms.
+const ROOM_SWEEP_EVERY: Duration = Duration::from_secs(60);
+/// How long a provisional claim on a new note (`vault_of_note`) holds, and how many are kept.
+const CLAIM_TTL: Duration = Duration::from_secs(60 * 60);
+const MAX_CLAIMS: usize = 100_000;
+/// pandoc / Quarto runs at once; the rest wait their turn, up to `RENDER_WAIT`.
+const RENDER_SLOTS: usize = 2;
+const RENDER_WAIT: Duration = Duration::from_secs(120);
+/// How often an open socket checks its credential and subscriptions even when nothing says
+/// they changed — a session that simply expired.
+const WS_RECHECK: Duration = Duration::from_secs(5 * 60);
+
 pub struct AppState {
     pub store: Mutex<Store>,
     pub options: ServerOptions,
     pub attachments: AttachmentStore,
     /// Note docs seen before their vault entry exists, bound to the vault the creating
-    /// connection was working in (a UI writes the note text before the vault map entry).
-    pub note_vault_claims: Mutex<HashMap<NoteId, VaultId>>,
+    /// connection was working in (a UI writes the note text before the vault map entry), and
+    /// when. Only a note with no history can be claimed; a claim lapses after `CLAIM_TTL`, and
+    /// goes as soon as a vault doc names the note.
+    note_vault_claims: Mutex<HashMap<NoteId, (VaultId, Instant)>>,
+    /// Bumped whenever who may read what changes — members, shares, tokens, sessions, a note
+    /// moving vaults — so every open socket checks its credential and subscriptions again.
+    auth_epoch: watch::Sender<u64>,
+    /// Held across "is this path free?" and creating the note there, so two requests for the
+    /// same day's note do not make two.
+    create_lock: Mutex<()>,
+    /// pandoc and Quarto runs (`RENDER_SLOTS`).
+    render_slots: Semaphore,
+    /// Failed password sign-ins (`auth::login`).
+    pub(crate) login_throttle: auth::LoginThrottle,
+    last_room_sweep: std::sync::Mutex<Instant>,
     /// Per vault, the files no note used when they were last looked for among the notes'
     /// references (`claim_waiting_files`). Each is looked for once per process: a note that
     /// names one later is indexed then anyway.
@@ -147,6 +187,8 @@ pub struct AppState {
 struct Room {
     id: DocId,
     doc: Mutex<RoomDoc>,
+    /// `now_ms()` when it was last handed out (`get_room`).
+    last_used: AtomicI64,
 }
 
 /// A note doc or the vault doc, behind one CRDT interface.
@@ -199,6 +241,11 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         options,
         attachments,
         note_vault_claims: Mutex::new(HashMap::new()),
+        auth_epoch: watch::channel(0).0,
+        create_lock: Mutex::new(()),
+        render_slots: Semaphore::new(RENDER_SLOTS),
+        login_throttle: Default::default(),
+        last_room_sweep: std::sync::Mutex::new(Instant::now()),
         waiting_files: std::sync::Mutex::new(HashMap::new()),
         renders: lemmate_core::quarto::RenderCache::new(),
         rooms: Mutex::new(HashMap::new()),
@@ -207,6 +254,30 @@ pub fn build_state(store: Store, options: ServerOptions) -> Arc<AppState> {
         oidc,
         app_grants: Default::default(),
     })
+}
+
+impl AppState {
+    /// Tell every open socket that access may have changed (see `auth_epoch`).
+    pub fn auth_changed(&self) {
+        self.auth_epoch.send_modify(|e| *e = e.wrapping_add(1));
+    }
+
+    /// Rooms held in memory right now.
+    pub async fn room_count(&self) -> usize {
+        self.rooms.lock().await.len()
+    }
+
+    /// Drop every room unused for `idle` that nobody is holding. Safe at any time: an update is
+    /// in the store before it is fanned out, so a dropped room loads again exactly as it was,
+    /// and subscriptions are by doc id, not by room. Returns how many went.
+    pub async fn evict_idle_rooms(&self, idle: Duration) -> usize {
+        let cutoff = now_ms() - idle.as_millis() as i64;
+        let mut rooms = self.rooms.lock().await;
+        let before = rooms.len();
+        // Under the map's lock a count of one means no handler holds it, and none can take it.
+        rooms.retain(|_, r| Arc::strong_count(r) > 1 || r.last_used.load(Ordering::Relaxed) > cutoff);
+        before - rooms.len()
+    }
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -220,7 +291,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults", get(list_vaults))
         .route("/api/v1/vaults/{vault}", axum::routing::delete(delete_vault))
         .route("/api/v1/vaults/{vault}/notes", get(list_notes).post(create_note))
-        .route("/api/v1/vaults/{vault}/import", axum::routing::post(import_vault))
+        .route(
+            "/api/v1/vaults/{vault}/import",
+            axum::routing::post(import_vault).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize)),
+        )
         .route(
             "/api/v1/vaults/{vault}/notes/{id}",
             get(get_note).put(put_note).patch(patch_note).delete(delete_note),
@@ -238,10 +312,28 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/tagged", get(tagged))
         .route("/api/v1/vaults/{vault}/search", get(search_vault))
         .route("/api/v1/search", get(search))
-        .route("/api/v1/vaults/{vault}/attachments/{hash}", get(get_attachment).put(put_attachment))
-        .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
+        // Uploads may be as large as an attachment; everything else is small (`JSON_BODY_LIMIT`).
+        .route(
+            "/api/v1/vaults/{vault}/attachments/{hash}",
+            get(get_attachment)
+                .put(put_attachment)
+                .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize)),
+        )
+        .route(
+            "/api/v1/vaults/{vault}/files",
+            get(list_files)
+                .put(put_file)
+                .delete(delete_file)
+                .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize)),
+        )
         .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
-        .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES as usize));
+        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
+        // Nothing this server sends is to be sniffed into another type than it says.
+        .layer(axum::middleware::map_response(|mut r: axum::response::Response| async move {
+            r.headers_mut()
+                .insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+            r
+        }));
     let router = match web_dir {
         // Single-page app: unknown paths fall back to index.html so `#/v/<id>` links work.
         Some(dir) => router.fallback_service(lemmate_core::web::client(&dir)),
@@ -255,23 +347,32 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     user: AuthUser,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user))
+    // Kept so the socket can ask later whether its credential still stands (`recheck_socket`).
+    let token = auth::token_from_headers(&headers).unwrap_or_default();
+    ws.max_message_size(WS_MAX_MESSAGE)
+        .max_frame_size(WS_MAX_MESSAGE)
+        .on_upgrade(move |socket| handle_socket(socket, state, user, token))
 }
 
 /// Per-connection authorization state.
 struct Conn {
     id: u64,
     user: AuthUser,
+    /// The session or access token the socket was opened with.
+    token: String,
     /// The vault this connection last gained access to; new note docs are bound to it.
     vault: Option<VaultId>,
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, user: AuthUser) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, user: AuthUser, token: String) {
     let conn_id = state.next_conn.fetch_add(1, Ordering::Relaxed);
-    let mut conn = Conn { id: conn_id, user, vault: None };
+    let mut conn = Conn { id: conn_id, user, token, vault: None };
     let mut rx = state.bus.subscribe();
+    let mut auth_rx = state.auth_epoch.subscribe();
+    let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + WS_RECHECK, WS_RECHECK);
     let mut subscribed: HashSet<String> = HashSet::new();
     info!(conn_id, user = %conn.user.email, "ws connected");
 
@@ -297,25 +398,132 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, user: AuthUs
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => warn!(conn_id, n, "ws client lagged; dropped frames"),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    // Updates this client needed are gone, so its docs may be behind for good.
+                    // Closing makes it reconnect, and a reconnect handshakes every doc again.
+                    warn!(conn_id, n, "ws client lagged; closing so it resyncs");
+                    let _ = socket.send(close(axum::extract::ws::close_code::NORMAL, "lagged; resync")).await;
+                    break;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            Ok(()) = auth_rx.changed() => {
+                if !recheck_socket(&state, &mut socket, &mut conn, &mut subscribed).await {
+                    break;
+                }
+            }
+            _ = recheck.tick() => {
+                if !recheck_socket(&state, &mut socket, &mut conn, &mut subscribed).await {
+                    break;
+                }
+            }
         }
     }
     info!(conn_id, "ws disconnected");
 }
 
-/// Which vault a note doc belongs to: its row, a provisional claim, or the connection's vault.
-async fn vault_of_note(state: &AppState, id: NoteId, conn_vault: Option<VaultId>) -> Option<VaultId> {
-    if let Ok(Some(row)) = state.store.lock().await.note_by_id(id) {
-        return Some(row.vault_id);
+fn close(code: u16, reason: &'static str) -> WsMessage {
+    WsMessage::Close(Some(CloseFrame { code, reason: reason.into() }))
+}
+
+/// The frame that tells a client it may not have a doc (the client shows it, and stops).
+fn denied(doc_id: &str, reason: &str) -> Vec<u8> {
+    Frame::new(doc_id, &Message::Auth(Some(reason.into()))).encode()
+}
+
+/// Ask again whether this socket's credential stands and which of its docs it may still read:
+/// a revoked token, a session signed out or expired, a member removed, a share taken back. A
+/// doc it lost is dropped from its subscriptions and the client told so; a credential that is
+/// gone closes the socket (returns false).
+async fn recheck_socket(
+    state: &AppState,
+    socket: &mut WebSocket,
+    conn: &mut Conn,
+    subscribed: &mut HashSet<String>,
+) -> bool {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return true;
     }
+    let Some(user) = auth::authenticate_token(state, &conn.token).await else {
+        info!(conn_id = conn.id, "ws credential no longer valid; closing");
+        let _ = socket.send(close(axum::extract::ws::close_code::POLICY, "signed out")).await;
+        return false;
+    };
+    conn.user = user;
+    let mut lost = Vec::new();
+    for doc in subscribed.iter() {
+        let readable = match doc.parse::<DocId>() {
+            Ok(id) => doc_role(state, conn, id, false).await.is_some(),
+            Err(_) => false,
+        };
+        if !readable {
+            lost.push(doc.clone());
+        }
+    }
+    for doc in lost {
+        subscribed.remove(&doc);
+        info!(conn_id = conn.id, %doc, user = %conn.user.email, "access withdrawn");
+        if socket.send(WsMessage::Binary(denied(&doc, "permission denied").into())).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// The role this connection holds on a doc. With `claim`, a vault nobody owns, or a note nobody
+/// has written yet, is taken by this connection (that is a first sync); without, it only asks.
+async fn doc_role(state: &AppState, conn: &Conn, doc_id: DocId, claim: bool) -> Option<Role> {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return Some(Role::Owner);
+    }
+    match doc_id {
+        DocId::Vault(v) => auth::role_or_claim(state, &conn.user, v, claim).await,
+        DocId::Note(id) => {
+            let v = vault_of_note(state, id, conn.vault, claim).await?;
+            auth::note_role(state, &conn.user, v, id).await
+        }
+    }
+}
+
+/// Which vault a note doc belongs to: its row (in the trash or not), a provisional claim, or —
+/// for a note with no history at all — the connection's vault, which `claim` records.
+///
+/// A doc with history but no row and no live claim is not new: a note purged from the trash, one
+/// left behind by a deleted vault, a claim that lapsed. Nobody gets to adopt it by syncing it.
+async fn vault_of_note(
+    state: &AppState,
+    id: NoteId,
+    conn_vault: Option<VaultId>,
+    claim: bool,
+) -> Option<VaultId> {
+    let history = {
+        let store = state.store.lock().await;
+        if let Some(home) = store.note_vault_of(id).ok()? {
+            return Some(home);
+        }
+        store.has_history(DocId::Note(id)).ok()?
+    };
     let mut claims = state.note_vault_claims.lock().await;
-    if let Some(v) = claims.get(&id) {
+    if let Some((v, at)) = claims.get(&id)
+        && at.elapsed() < CLAIM_TTL
+    {
         return Some(*v);
     }
+    if history {
+        return None;
+    }
     let v = conn_vault?;
-    claims.insert(id, v);
+    if claim {
+        if claims.len() >= MAX_CLAIMS {
+            claims.retain(|_, (_, at)| at.elapsed() < CLAIM_TTL);
+            if claims.len() >= MAX_CLAIMS
+                && let Some(oldest) = claims.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k)
+            {
+                claims.remove(&oldest);
+            }
+        }
+        claims.insert(id, (v, Instant::now()));
+    }
     Some(v)
 }
 
@@ -352,27 +560,18 @@ async fn handle_frame(
     // is claimed by the first authenticated user who touches it.
     let is_write =
         matches!(msg, Message::Sync(SyncMessage::SyncStep2(_)) | Message::Sync(SyncMessage::Update(_)));
-    let allowed = if matches!(state.options.auth, AuthMode::Disabled) {
-        true
-    } else {
-        let vault = match doc_id {
-            DocId::Vault(v) => Some(v),
-            DocId::Note(id) => vault_of_note(state, id, conn.vault).await,
-        };
-        let role = match (vault, doc_id) {
-            (Some(v), DocId::Vault(_)) => auth::role_or_claim(state, &conn.user, v, true).await,
-            (Some(v), DocId::Note(id)) => auth::note_role(state, &conn.user, v, id).await,
-            (None, _) => None,
-        };
-        match role {
-            Some(r) if is_write => r >= Role::Editor,
-            Some(_) => true,
-            None => false,
-        }
+    let role = doc_role(state, conn, doc_id, true).await;
+    let allowed = match role {
+        Some(r) if is_write => r >= Role::Editor,
+        Some(_) => true,
+        None => false,
     };
     if !allowed {
         warn!(conn_id, doc = %frame.doc_id, user = %conn.user.email, write = is_write, "denied");
-        return vec![Frame::new(&frame.doc_id, &Message::Auth(Some("permission denied".into()))).encode()];
+        if role.is_none() {
+            subscribed.remove(&frame.doc_id);
+        }
+        return vec![denied(&frame.doc_id, "permission denied")];
     }
     if let DocId::Vault(v) = doc_id {
         conn.vault = Some(v);
@@ -399,8 +598,19 @@ async fn handle_frame(
         }
         Message::Sync(SyncMessage::SyncStep2(update)) | Message::Sync(SyncMessage::Update(update)) => {
             subscribed.insert(frame.doc_id.clone());
-            {
+            let touched = {
                 let doc = room.doc.lock().await;
+                // What an update would put into a vault doc is looked at before it goes in.
+                let touched = match &*doc {
+                    RoomDoc::Vault(v) => match vet_vault_update(v, &update) {
+                        Ok(t) => Some(t),
+                        Err(bad) => {
+                            warn!(conn_id, path = %bad, "refused a vault update with an unsafe path");
+                            return vec![denied(&frame.doc_id, &format!("refused: unsafe path {bad:?}"))];
+                        }
+                    },
+                    RoomDoc::Note(_) => None,
+                };
                 match doc.apply_update(&update) {
                     Err(e) => {
                         warn!(conn_id, %e, "rejected update");
@@ -411,7 +621,8 @@ async fn handle_frame(
                     Ok(false) => return Vec::new(),
                     Ok(true) => {}
                 }
-            }
+                touched
+            };
             {
                 let doc = room.doc.lock().await;
                 let mut store = state.store.lock().await;
@@ -426,7 +637,8 @@ async fn handle_frame(
                     Err(e) => warn!(conn_id, %e, "maintenance"),
                 }
             }
-            if let Err(e) = derive_metadata(state, &room).await {
+            let author = Author { user: &conn.user, touched: touched.unwrap_or_default() };
+            if let Err(e) = derive_metadata(state, &room, Some(&author)).await {
                 warn!(conn_id, %e, "indexing");
             }
             let out = Frame::new(&frame.doc_id, &Message::Sync(SyncMessage::Update(update))).encode();
@@ -446,10 +658,71 @@ async fn handle_frame(
     }
 }
 
+/// Whether a vault-relative path is one every replica can write inside the vault's folder:
+/// relative, no `.`/`..` or other hidden segment (`.lemmate`, `.git`), no empty segment, no
+/// backslash, drive letter, NUL or other control character. The REST routes and the vault-doc
+/// updates clients send are held to the same rule.
+pub fn safe_vault_path(p: &str) -> bool {
+    let drive = p.as_bytes().get(1) == Some(&b':') && p.as_bytes()[0].is_ascii_alphabetic();
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !drive
+        && !p.contains('\\')
+        && !p.chars().any(char::is_control)
+        && p.split('/').all(|seg| !seg.is_empty() && !seg.starts_with('.'))
+}
+
+/// Look at what an update would do to a vault doc before it is applied. Every path it brings in
+/// — a note's, an attachment's, a kept file's — must pass [`safe_vault_path`], or the whole
+/// update is refused (`Err` names the first bad path): a client projects these paths onto its
+/// disk. Paths the doc already holds are not judged again. `Ok` carries the notes whose entry
+/// the update sets or changes.
+fn vet_vault_update(current: &VaultDoc, update: &[u8]) -> Result<HashSet<NoteId>, String> {
+    let full = current.encode_full();
+    // An update that does not decode is refused when it is applied; nothing to judge here.
+    let Ok(next) = VaultDoc::from_updates([full.as_slice(), update]) else {
+        return Ok(HashSet::new());
+    };
+    let before: HashMap<NoteId, String> = current.entries().into_iter().collect();
+    let mut known: HashSet<String> = before.values().cloned().collect();
+    known.extend(current.attachment_entries().into_iter().map(|(p, _)| p));
+    known.extend(current.kept_files());
+    let mut touched = HashSet::new();
+    for (id, path) in next.entries() {
+        if before.get(&id) != Some(&path) {
+            touched.insert(id);
+            if !known.contains(&path) && !safe_vault_path(&path) {
+                return Err(path);
+            }
+        }
+    }
+    for path in next.attachment_entries().into_iter().map(|(p, _)| p).chain(next.kept_files()) {
+        if !known.contains(&path) && !safe_vault_path(&path) {
+            return Err(path);
+        }
+    }
+    Ok(touched)
+}
+
 async fn get_room(state: &Arc<AppState>, id: DocId) -> lemmate_core::Result<Arc<Room>> {
+    let sweep = {
+        let mut last = state.last_room_sweep.lock().unwrap_or_else(|e| e.into_inner());
+        let due = last.elapsed() >= ROOM_SWEEP_EVERY;
+        if due {
+            *last = Instant::now();
+        }
+        due
+    };
+    if sweep {
+        let n = state.evict_idle_rooms(ROOM_IDLE).await;
+        if n > 0 {
+            tracing::debug!(rooms = n, "dropped idle rooms");
+        }
+    }
     let key = id.to_string();
     let mut rooms = state.rooms.lock().await;
     if let Some(r) = rooms.get(&key) {
+        r.last_used.store(now_ms(), Ordering::Relaxed);
         return Ok(r.clone());
     }
     let store = state.store.lock().await;
@@ -458,17 +731,42 @@ async fn get_room(state: &Arc<AppState>, id: DocId) -> lemmate_core::Result<Arc<
         DocId::Vault(v) => RoomDoc::Vault(store.load_vault_doc(v)?),
     };
     drop(store);
-    let room = Arc::new(Room { id, doc: Mutex::new(doc) });
+    let room = Arc::new(Room { id, doc: Mutex::new(doc), last_used: AtomicI64::new(now_ms()) });
     rooms.insert(key, room.clone());
     Ok(room)
+}
+
+/// Who a change synced by a client came from, for [`derive_metadata`]: the user, and the notes
+/// whose vault-doc entry the change set (`vet_vault_update`).
+struct Author<'a> {
+    user: &'a AuthUser,
+    touched: HashSet<NoteId>,
+}
+
+/// Whether a vault doc may take a note whose row is in another vault, `home` — a merge does
+/// exactly that (SPEC §3.2). Only for a note the change itself put there, and only by someone
+/// who may edit the vault it leaves: otherwise anyone could pull another vault's note into one
+/// of their own by naming its id. A change the server made itself (`author` none) is trusted.
+fn may_take(state: &AppState, store: &Store, author: Option<&Author>, id: NoteId, home: VaultId) -> bool {
+    if matches!(state.options.auth, AuthMode::Disabled) {
+        return true;
+    }
+    let Some(a) = author else { return true };
+    a.touched.contains(&id) && auth::vault_role(store, a.user, home).is_some_and(|r| r >= Role::Editor)
 }
 
 /// Keep the relational tables (notes, tags, links, FTS) in step with the CRDT truth so the REST
 /// and search endpoints reflect what clients synced (SPEC §4.2: metadata is derived, never a
 /// second source of truth).
-async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Result<()> {
+async fn derive_metadata(
+    state: &Arc<AppState>,
+    room: &Room,
+    author: Option<&Author<'_>>,
+) -> lemmate_core::Result<()> {
     let doc = room.doc.lock().await;
     let mut store = state.store.lock().await;
+    let mut placed = Vec::new();
+    let mut moved = false;
     match (&*doc, room.id) {
         (RoomDoc::Vault(v), DocId::Vault(vault_id)) => {
             let entries = v.entries();
@@ -482,11 +780,21 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
             let attachment_paths: Vec<String> = files.keys().cloned().collect();
             let read = blob_reader(state, vault_id, &files);
             for (id, path) in entries {
+                if let Some(home) = store.note_vault_of(id)?
+                    && home != vault_id
+                {
+                    if !may_take(state, &store, author, id, home) {
+                        warn!(note = %id, from = %home, into = %vault_id, "a vault doc names another vault's note; left where it is");
+                        continue;
+                    }
+                    moved = true;
+                }
                 let existing = store.note_by_id(id)?;
                 let title = existing.as_ref().and_then(|r| r.title.clone()).or_else(|| {
                     std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
                 });
                 store.upsert_note(id, vault_id, &path, title.as_deref())?;
+                placed.push(id);
                 // Content may have arrived before the entry did (a browser creates the text
                 // first): index it now that the row exists.
                 if existing.is_none() {
@@ -511,6 +819,19 @@ async fn derive_metadata(state: &Arc<AppState>, room: &Room) -> lemmate_core::Re
             }
         }
         _ => {}
+    }
+    drop(store);
+    drop(doc);
+    // A note with a row needs no claim any more.
+    if !placed.is_empty() {
+        let mut claims = state.note_vault_claims.lock().await;
+        for id in placed {
+            claims.remove(&id);
+        }
+    }
+    // A note that changed vaults changed who may read it.
+    if moved {
+        state.auth_changed();
     }
     Ok(())
 }
@@ -623,7 +944,7 @@ async fn commit_change(state: &Arc<AppState>, room: &Arc<Room>, update: Vec<u8>)
         store.append_update(room.id, &update, Some("api")).map_err(internal)?;
         let _ = store.maintain(room.id, &state.options.policy, now_ms(), || doc.encode_full());
     }
-    derive_metadata(state, room).await.map_err(internal)?;
+    derive_metadata(state, room, None).await.map_err(internal)?;
     let doc_id = room.id.to_string();
     let frame = Frame::new(&doc_id, &Message::Sync(SyncMessage::Update(update))).encode();
     let _ = state.bus.send(Outbound { from: 0, doc_id: doc_id.into(), bytes: Arc::new(frame) });
@@ -640,7 +961,7 @@ async fn vault_room(state: &Arc<AppState>, vault: VaultId) -> Result<Arc<Room>, 
 
 fn normalize_path(path: &str) -> Result<String, StatusCode> {
     let p = path.trim().trim_start_matches('/');
-    if p.is_empty() || p.contains("..") || p.contains('\\') {
+    if !safe_vault_path(p) {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(if p.ends_with(".md") || p.ends_with(".qmd") { p.to_owned() } else { format!("{p}.md") })
@@ -663,6 +984,9 @@ async fn create_note(
     auth::require(&state, &user, vault, Role::Editor).await?;
     let path = normalize_path(&body.path)?;
     let vroom = vault_room(&state, vault).await?;
+    // Held from the check to the entry being written, so two requests cannot both find the
+    // path free (two clicks on today's daily note).
+    let _creating = state.create_lock.lock().await;
     {
         let doc = vroom.doc.lock().await;
         if let RoomDoc::Vault(v) = &*doc
@@ -691,7 +1015,7 @@ async fn create_note_in(
         lemmate_core::frontmatter::normalize(content, &id.to_string()).unwrap_or_else(|| content.to_owned());
     // Content first, then the entry, so nobody sees an empty note (same order as the UI).
     let nroom = note_room(state, id).await?;
-    state.note_vault_claims.lock().await.insert(id, vault);
+    state.note_vault_claims.lock().await.insert(id, (vault, Instant::now()));
     let update = match &*nroom.doc.lock().await {
         RoomDoc::Note(d) => d.set_text(&text),
         RoomDoc::Vault(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -729,10 +1053,14 @@ async fn import_vault(
         let rel = field.file_name().or_else(|| field.name()).unwrap_or_default().to_owned();
         let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
         let Some(upload) = import::import_upload(&rel, bytes.to_vec()) else {
+            if import::upload_rejected(&rel) {
+                out.skipped += 1;
+            }
             continue;
         };
         match upload {
             Upload::Note { path, text, callouts, embeds } => {
+                let _creating = state.create_lock.lock().await;
                 let taken = match &*vroom.doc.lock().await {
                     RoomDoc::Vault(v) => v.entries().iter().any(|(_, p)| *p == path),
                     RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -897,23 +1225,40 @@ async fn daily_note(
         RoomDoc::Vault(v) => v.daily().path_for(day),
         RoomDoc::Note(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let existing = state.store.lock().await.note_by_path(vault_id, &path).map_err(internal)?;
-    if let Some(row) = existing {
-        let room = note_room(&state, row.id).await?;
-        let content = match &*room.doc.lock().await {
-            RoomDoc::Note(d) => d.text(),
-            RoomDoc::Vault(_) => String::new(),
-        };
-        return Ok(Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content }));
+    if let Some(found) = existing_note_at(&state, vault_id, &path).await? {
+        return Ok(found);
     }
-    let (_, Json(body)) = create_note(
-        State(state),
+    let created = create_note(
+        State(state.clone()),
         user,
         Path(vault),
-        Json(NewNote { path, content: format!("# {date}\n\n") }),
+        Json(NewNote { path: path.clone(), content: format!("# {date}\n\n") }),
     )
-    .await?;
-    Ok(Json(body))
+    .await;
+    match created {
+        Ok((_, body)) => Ok(body),
+        // Somebody else made it in the meantime: theirs is the day's note.
+        Err(StatusCode::CONFLICT) => {
+            existing_note_at(&state, vault_id, &path).await?.ok_or(StatusCode::CONFLICT)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn existing_note_at(
+    state: &Arc<AppState>,
+    vault: VaultId,
+    path: &str,
+) -> Result<Option<Json<NoteBody>>, StatusCode> {
+    let Some(row) = state.store.lock().await.note_by_path(vault, path).map_err(internal)? else {
+        return Ok(None);
+    };
+    let room = note_room(state, row.id).await?;
+    let content = match &*room.doc.lock().await {
+        RoomDoc::Note(d) => d.text(),
+        RoomDoc::Vault(_) => String::new(),
+    };
+    Ok(Some(Json(NoteBody { id: row.id.to_string(), path: row.path, title: row.title, content })))
 }
 
 #[derive(Serialize)]
@@ -948,14 +1293,14 @@ async fn restore_note(
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let id: NoteId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     auth::require(&state, &user, vault, Role::Editor).await?;
-    let row = state
-        .store
-        .lock()
-        .await
-        .restore_note(id)
-        .map_err(internal)?
-        .filter(|r| r.vault_id == vault)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let row = {
+        let mut store = state.store.lock().await;
+        // Whose note it is is asked before anything about it changes.
+        if store.note_vault_of(id).map_err(internal)? != Some(vault) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        store.restore_note(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?
+    };
     let vroom = vault_room(&state, vault).await?;
     let update = match &*vroom.doc.lock().await {
         RoomDoc::Vault(v) => v.set_path(id, &row.path),
@@ -976,6 +1321,9 @@ async fn restore_note(
 struct VaultSummary {
     id: String,
     notes: u32,
+    /// The caller's role as this request may use it (a read-only token reads `viewer`), so a
+    /// client can leave out what it could not do anyway.
+    role: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1021,17 +1369,23 @@ async fn list_vaults(
     user: AuthUser,
 ) -> Result<Json<Vec<VaultSummary>>, StatusCode> {
     let store = state.store.lock().await;
-    let rows: Vec<(VaultId, u32)> = match state.options.auth {
-        AuthMode::Disabled => store.vaults().map_err(internal)?,
+    let rows: Vec<(VaultId, Role, u32)> = match state.options.auth {
+        AuthMode::Disabled => {
+            store.vaults().map_err(internal)?.into_iter().map(|(v, n)| (v, Role::Owner, n)).collect()
+        }
         AuthMode::Enabled { .. } => store
             .vaults_of(&user.id)
             .map_err(internal)?
             .into_iter()
             .filter(|(v, _, _)| user.reaches(*v))
-            .map(|(v, _, n)| (v, n))
+            .map(|(v, r, n)| (v, user.cap(r), n))
             .collect(),
     };
-    Ok(Json(rows.into_iter().map(|(id, notes)| VaultSummary { id: id.to_string(), notes }).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, role, notes)| VaultSummary { id: id.to_string(), notes, role: role.as_str() })
+            .collect(),
+    ))
 }
 
 /// Erase a vault: its doc, its metadata, its members and its blobs (SPEC §3.2).
@@ -1052,6 +1406,10 @@ async fn delete_vault(
     // and would write its doc back out on the next update.
     state.rooms.lock().await.remove(&DocId::Vault(vault).to_string());
     let notes = state.store.lock().await.delete_vault(vault).map_err(internal)?;
+    // The note docs it leaves behind have history and no row, so nobody can claim them by
+    // syncing (`vault_of_note`); a provisional claim to this vault must not outlive it either.
+    state.note_vault_claims.lock().await.retain(|_, (v, _)| *v != vault);
+    state.auth_changed();
     state.attachments.remove_vault(vault).map_err(internal)?;
     tracing::info!(%vault, user = %user.email, notes, "vault deleted");
     Ok(StatusCode::NO_CONTENT)
@@ -1111,7 +1469,7 @@ async fn export_note(
     if !lemmate_core::pandoc::pandoc_available(state.options.pandoc.as_deref()) {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
-    let row = state.store.lock().await.note_by_id(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let row = note_in(&state, vault, id).await?;
     let room = note_room(&state, id).await?;
     let text = match &*room.doc.lock().await {
         RoomDoc::Note(d) => d.text(),
@@ -1124,6 +1482,7 @@ async fn export_note(
     let cites = lemmate_core::pandoc::citation_files(&row.path, &text, |p| entries.contains_key(p));
     let blobs = state.attachments.clone();
     let pandoc = state.options.pandoc.clone();
+    let _slot = render_slot(&state).await?;
     let (bytes, mime) = tokio::task::spawn_blocking(move || {
         // Each file at its vault path under a scratch directory, removed afterwards.
         let dir = std::env::temp_dir().join(format!("lemmate-export-{}", NoteId::new()));
@@ -1182,7 +1541,7 @@ async fn render_note(
     if !state.options.quarto_enabled {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
-    let row = state.store.lock().await.note_by_id(id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let row = note_in(&state, vault, id).await?;
     let text = match &*note_room(&state, id).await?.doc.lock().await {
         RoomDoc::Note(d) => d.text(),
         RoomDoc::Vault(_) => return Err(StatusCode::NOT_FOUND),
@@ -1200,6 +1559,7 @@ async fn render_note(
     let bin = state.options.quarto.clone();
     let path = row.path.clone();
     let view = body.view;
+    let _slot = render_slot(&state).await?;
     let rendered = tokio::task::spawn_blocking(move || {
         if !lemmate_core::quarto::quarto_available(bin.as_deref()) {
             return Ok(None);
@@ -1245,9 +1605,61 @@ async fn render_note(
                 lemmate_core::Error::Export(m) => m,
                 other => other.to_string(),
             };
-            Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, without_temp_paths(&msg)).into_response())
         }
     }
+}
+
+/// The live note `id`, provided it is in `vault`.
+async fn note_in(
+    state: &AppState,
+    vault: VaultId,
+    id: NoteId,
+) -> Result<lemmate_core::store::NoteRow, StatusCode> {
+    state
+        .store
+        .lock()
+        .await
+        .note_by_id(id)
+        .map_err(internal)?
+        .filter(|r| r.vault_id == vault)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// A turn at pandoc or Quarto (`RENDER_SLOTS` at once): each run is a process tree that can take
+/// a CPU and a good deal of memory for many seconds. 503 when none frees up in `RENDER_WAIT`.
+async fn render_slot(state: &AppState) -> Result<tokio::sync::SemaphorePermit<'_>, StatusCode> {
+    match tokio::time::timeout(RENDER_WAIT, state.render_slots.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+/// A render's error message without this server's scratch paths: Quarto names the files it was
+/// working on by their full path, which says where (and as whom) the server runs. Each path into
+/// the temp directory is cut back to what follows its working folder — the note's own path.
+fn without_temp_paths(msg: &str) -> String {
+    let tmp = std::env::temp_dir();
+    let mut prefixes = vec![tmp.to_string_lossy().trim_end_matches('/').to_owned()];
+    // macOS hands out /var/… and reports /private/var/…; either can appear.
+    if let Ok(real) = tmp.canonicalize() {
+        prefixes.push(real.to_string_lossy().trim_end_matches('/').to_owned());
+    }
+    prefixes.retain(|p| !p.is_empty());
+    let mut out = msg.to_owned();
+    for prefix in prefixes {
+        let needle = format!("{prefix}/");
+        while let Some(at) = out.find(&needle) {
+            let rest = &out[at + needle.len()..];
+            // Skip the working folder (`notes-export-…`) as well, when there is one.
+            let end = rest
+                .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+                .filter(|&i| rest[i..].starts_with('/'))
+                .map_or(0, |i| i + 1);
+            out.replace_range(at..at + needle.len() + end, "");
+        }
+    }
+    out
 }
 
 /// A render the pane already has, opened as a page of its own without rendering it again
@@ -1557,12 +1969,24 @@ async fn search(
         AuthMode::Disabled => store.search(&p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
         AuthMode::Enabled { .. } => {
             let mut all = Vec::new();
-            for (v, _, _) in
-                store.vaults_of(&user.id).map_err(internal)?.into_iter().filter(|(v, _, _)| user.reaches(*v))
-            {
+            let member_of: HashSet<VaultId> =
+                store.vaults_of(&user.id).map_err(internal)?.into_iter().map(|(v, _, _)| v).collect();
+            for v in member_of.iter().filter(|v| user.reaches(**v)) {
                 all.extend(
-                    store.search_in_vault(v, &p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
+                    store.search_in_vault(*v, &p.q, p.limit.min(100)).map_err(|_| StatusCode::BAD_REQUEST)?,
                 );
+            }
+            // Notes shared with the user directly, from vaults they are not a member of: the
+            // vault is searched and only those notes kept.
+            let mut shared: HashMap<VaultId, HashSet<NoteId>> = HashMap::new();
+            for (n, _) in store.notes_shared_with(&user.id).map_err(internal)? {
+                if !member_of.contains(&n.vault_id) && user.reaches(n.vault_id) {
+                    shared.entry(n.vault_id).or_default().insert(n.id);
+                }
+            }
+            for (v, ids) in shared {
+                let hits = store.search_in_vault(v, &p.q, 1000).map_err(|_| StatusCode::BAD_REQUEST)?;
+                all.extend(hits.into_iter().filter(|h| ids.contains(&h.note_id)));
             }
             all.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
             all.truncate(p.limit.min(100) as usize);
@@ -1622,13 +2046,53 @@ async fn get_attachment(
         .map_err(internal)?
         .map(|r| r.mime)
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_owned()),
-        ],
-        bytes,
-    ))
+    Ok((blob_headers(&mime), bytes))
+}
+
+/// Types a browser may show in place from this origin: they run no script. Everything else —
+/// HTML, SVG, XML, JavaScript, whatever an uploader claimed — is served as a download.
+fn inline_safe(mime: &str) -> bool {
+    let essence = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "image/x-icon"
+            | "image/vnd.microsoft.icon"
+            | "application/pdf"
+            | "text/plain"
+    ) || essence.starts_with("audio/")
+        || essence.starts_with("video/")
+}
+
+/// Headers for a vault file's bytes, which anyone with edit rights chose (SPEC §9). The stored
+/// type is only trusted to be shown in place when it cannot run script (`inline_safe`); the rest
+/// downloads. Either way the response is sandboxed and never sniffed — a PDF only escapes the
+/// sandbox because browsers' PDF viewers refuse to run inside one — and it is cached privately:
+/// it was fetched with somebody's session.
+fn blob_headers(mime: &str) -> HeaderMap {
+    let inline = inline_safe(mime);
+    let pdf = mime.trim().to_ascii_lowercase().starts_with("application/pdf");
+    let mut h = HeaderMap::new();
+    let value = |v: &str| {
+        header::HeaderValue::from_str(v)
+            .unwrap_or(header::HeaderValue::from_static("application/octet-stream"))
+    };
+    h.insert(header::CONTENT_TYPE, value(mime));
+    h.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, max-age=31536000, immutable"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static(if inline { "inline" } else { "attachment" }),
+    );
+    if !pdf {
+        h.insert(header::CONTENT_SECURITY_POLICY, header::HeaderValue::from_static("sandbox"));
+    }
+    h
 }
 
 // ---- Files that are not notes (SPEC §9) ---------------------------------------------------------
@@ -1811,4 +2275,58 @@ async fn move_file(
 fn internal(e: lemmate_core::Error) -> StatusCode {
     warn!(%e, "internal error");
     StatusCode::INTERNAL_SERVER_ERROR
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_paths_stay_inside_the_folder() {
+        for ok in ["a.md", "Projects/Plan.md", "attachments/logo 2.png", "Notes...md", "ü/ß.qmd"] {
+            assert!(safe_vault_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "/abs.md",
+            "../up.md",
+            "a/../b.md",
+            "./a.md",
+            ".lemmate/x.md",
+            "a/.git/config",
+            "a//b.md",
+            "a/",
+            "a\\b.md",
+            "nul\0.md",
+            "line\nbreak.md",
+            "C:/x.md",
+        ] {
+            assert!(!safe_vault_path(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn render_errors_do_not_name_the_servers_temp_dir() {
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.to_string_lossy();
+        let tmp = tmp.trim_end_matches('/');
+        let msg = format!(
+            "ERROR: {tmp}/notes-export-01K6ABCDEFGHJKMNPQRSTVWXYZ/Talks/deck.qmd: bad YAML\nsee {tmp}/x.log"
+        );
+        let clean = without_temp_paths(&msg);
+        assert_eq!(clean, "ERROR: Talks/deck.qmd: bad YAML\nsee x.log");
+        assert!(!clean.contains(tmp));
+    }
+
+    #[test]
+    fn only_inert_types_are_shown_in_place() {
+        for ok in ["image/png", "image/jpeg", "application/pdf", "text/plain; charset=utf-8", "video/mp4"] {
+            assert!(inline_safe(ok), "{ok}");
+        }
+        for bad in
+            ["text/html", "image/svg+xml", "application/xml", "text/javascript", "application/octet-stream"]
+        {
+            assert!(!inline_safe(bad), "{bad}");
+        }
+    }
 }

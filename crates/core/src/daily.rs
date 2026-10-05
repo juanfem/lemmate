@@ -184,10 +184,12 @@ const MONTHS: [&str; 12] = [
 const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /// Moment's tokens, longest first so that `MMMM` wins over `MM`. Anything else is copied
-/// through, and `[…]` escapes literal text.
-const TOKENS: [&str; 26] = [
+/// through, and `[…]` escapes literal text. A day has no time of its own: the time tokens give
+/// its first moment, midnight, and `X`/`x` count from the epoch to midnight UTC.
+const TOKENS: [&str; 40] = [
     "YYYY", "GGGG", "gggg", "MMMM", "DDDD", "dddd", "MMM", "DDD", "ddd", "YY", "GG", "gg", "MM", "DD", "Do",
-    "dd", "WW", "ww", "Q", "M", "D", "d", "E", "e", "W", "w",
+    "dd", "WW", "ww", "HH", "hh", "kk", "mm", "ss", "Q", "M", "D", "d", "E", "e", "W", "w", "H", "h", "k",
+    "m", "s", "A", "a", "X", "x",
 ];
 
 /// Format a date with a Moment.js format string (the subset that makes sense for a date).
@@ -255,6 +257,14 @@ fn token(t: &str, d: Date) -> String {
         "gg" => format!("{:02}", d.locale_week().0.rem_euclid(100)),
         "ww" => format!("{:02}", d.locale_week().1),
         "w" => d.locale_week().1.to_string(),
+        "HH" | "mm" | "ss" => "00".to_owned(),
+        "H" | "m" | "s" => "0".to_owned(),
+        "hh" | "h" => "12".to_owned(),
+        "kk" | "k" => "24".to_owned(),
+        "A" => "AM".to_owned(),
+        "a" => "am".to_owned(),
+        "X" => (d.days() * 86_400).to_string(),
+        "x" => (d.days() * 86_400_000).to_string(),
         _ => t.to_owned(),
     }
 }
