@@ -23,3 +23,13 @@ test('inline HTML and comments are left out of a heading', () => {
   assert.deepEqual(headings('## Closed ##\n'), ['Closed'])
   assert.deepEqual(headings('## a < b and #tag\n'), ['a < b and #tag'])
 })
+
+test('markdown is read, not shown', () => {
+  assert.deepEqual(headings('## **Bold** and _em_ and ~~gone~~\n'), ['Bold and em and gone'])
+  assert.deepEqual(headings('## Run `cargo test`\n'), ['Run cargo test'])
+  assert.deepEqual(headings('## See [the docs](https://x.org "t") and ![alt](a.png)\n'), ['See the docs and alt'])
+  assert.deepEqual(headings('## [[Note#Part|Alias]] vs [[Other]]\n'), ['Alias vs Other'])
+  assert.deepEqual(headings('## a \\*literal\\* star and <https://x.org>\n'), ['a *literal* star and https://x.org'])
+  assert.deepEqual(headings('## Nested **bold _and em_**\n'), ['Nested bold and em'])
+  assert.deepEqual(headings('## $E=mc^2$ #tag\n'), ['$E=mc^2$ #tag'])
+})
