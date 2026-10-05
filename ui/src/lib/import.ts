@@ -16,7 +16,7 @@ export interface Upload<F extends PickedFile = File> {
   file: F
 }
 
-/** Bytes per request: well under the 64 MiB the server accepts, small enough to feel live. */
+/** Bytes per request: well under the 100 MiB the server accepts, small enough to feel live. */
 export const BATCH_BYTES = 16 * 1024 * 1024
 export const BATCH_FILES = 300
 

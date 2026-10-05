@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::ids::VaultId;
 
 /// Upper bound accepted by the server and requested by clients.
-pub const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 
 pub fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()

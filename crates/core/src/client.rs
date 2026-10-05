@@ -544,9 +544,24 @@ enum TransferJob {
 
 #[derive(Debug)]
 enum TransferDone {
-    Uploaded { path: String, hash: String },
-    Downloaded { path: String, hash: String, bytes: Vec<u8> },
-    Failed { path: String, upload: bool, error: String },
+    Uploaded {
+        path: String,
+        hash: String,
+    },
+    Downloaded {
+        path: String,
+        hash: String,
+        bytes: Vec<u8>,
+    },
+    Failed {
+        path: String,
+        upload: bool,
+        error: String,
+    },
+    /// The server refused an upload as too large (413). Sending it again cannot help.
+    TooLarge {
+        path: String,
+    },
 }
 
 /// Runs attachment HTTP transfers off the engine's loop, one at a time, in blocking tasks.
@@ -613,6 +628,7 @@ fn run_transfer(
             }
             match put.send(&bytes[..]) {
                 Ok(_) => TransferDone::Uploaded { path, hash },
+                Err(ureq::Error::StatusCode(413)) => TransferDone::TooLarge { path },
                 Err(e) => TransferDone::Failed { path, upload: true, error: e.to_string() },
             }
         }
@@ -693,6 +709,10 @@ pub struct Engine {
     in_flight: HashSet<String>,
     pending_uploads: HashMap<String, String>,
     upload_retry_after: Option<Instant>,
+    /// Files the server will not take, with the hash that was refused: too big for
+    /// [`MAX_ATTACHMENT_BYTES`], or answered 413 by a server with a lower limit. Left alone
+    /// until the file changes, instead of being re-sent every few seconds forever.
+    too_large: HashMap<String, String>,
     /// Attachment paths touched on disk, awaiting the debounce.
     pending_attachment_fs: HashMap<String, Instant>,
     /// Cache of blake3 hashes of local attachment files; invalidated by watcher events.
@@ -769,6 +789,7 @@ impl Engine {
             in_flight: HashSet::new(),
             pending_uploads: HashMap::new(),
             upload_retry_after: None,
+            too_large: HashMap::new(),
             pending_attachment_fs: HashMap::new(),
             local_hashes: HashMap::new(),
             orphan_check_due: true,
@@ -1589,10 +1610,29 @@ impl Engine {
         if self.out.is_none() || self.upload_retry_after.is_some_and(|t| Instant::now() < t) {
             return Ok(());
         }
-        let Some(tx) = &self.transfers else { return Ok(()) };
-        for (path, _) in self.pending_uploads.drain() {
+        if self.transfers.is_none() {
+            return Ok(());
+        }
+        let pending: Vec<(String, String)> = self.pending_uploads.drain().collect();
+        for (path, hash) in pending {
+            if self.too_large.get(&path) == Some(&hash) {
+                continue;
+            }
+            let size = self.proj.resolve(&path)?.metadata().map(|m| m.len()).unwrap_or(0);
+            if size > MAX_ATTACHMENT_BYTES {
+                warn!(
+                    path = %path,
+                    size,
+                    limit = MAX_ATTACHMENT_BYTES,
+                    "attachment too large to upload; it stays on this machine only"
+                );
+                self.too_large.insert(path, hash);
+                continue;
+            }
             self.in_flight.insert(path.clone());
-            let _ = tx.send(TransferJob::Upload { path });
+            if let Some(tx) = &self.transfers {
+                let _ = tx.send(TransferJob::Upload { path });
+            }
         }
         Ok(())
     }
@@ -1731,6 +1771,16 @@ impl Engine {
                 }
                 if self.once {
                     self.fatal = Some(format!("attachment transfer failed for {path}: {error}"));
+                }
+            }
+            TransferDone::TooLarge { path } => {
+                self.in_flight.remove(&path);
+                warn!(path = %path, "the server refused the attachment as too large; it stays on this machine only");
+                if let Some(h) = self.local_hashes.get(&path).cloned() {
+                    self.too_large.insert(path.clone(), h);
+                }
+                if self.once {
+                    self.fatal = Some(format!("attachment too large for the server: {path}"));
                 }
             }
         }

@@ -425,3 +425,50 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
         h.abort();
     }
 }
+
+/// A file over the server's limit stays on this machine: it is never sent — so not refused and
+/// re-sent every few seconds for as long as the app runs — and the files beside it still go.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attachment_over_the_limit_is_not_sent() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let big = std::sync::Arc::new(AtomicUsize::new(0));
+    let state = build_state(Store::open_in_memory().unwrap(), ServerOptions::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let srv = listener.local_addr().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // Sparse: one byte over the limit on paper, next to nothing on disk.
+    let f = std::fs::File::create(dir.path().join("huge.pdf")).unwrap();
+    f.set_len(lemmate_core::attachments::MAX_ATTACHMENT_BYTES + 1).unwrap();
+    drop(f);
+    let huge_hash =
+        lemmate_core::attachments::hash_bytes(&std::fs::read(dir.path().join("huge.pdf")).unwrap());
+    std::fs::write(dir.path().join("small.png"), "small").unwrap();
+    std::fs::write(dir.path().join("refs.md"), "[paper](huge.pdf) and ![](small.png)\n").unwrap();
+
+    let app = router(state.clone()).layer(axum::middleware::from_fn({
+        let (big, huge_hash) = (big.clone(), huge_hash.clone());
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            if req.uri().path().ends_with(&huge_hash) {
+                big.fetch_add(1, Ordering::SeqCst);
+            }
+            next.run(req)
+        }
+    }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let handle = relay(srv, dir.path()).await;
+    let vault = handle.vault_id;
+
+    let small = lemmate_core::attachments::hash_bytes(b"small");
+    for i in 0..100 {
+        if state.attachments.exists(vault, &small) {
+            break;
+        }
+        assert!(i < 99, "timed out waiting for the small file");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // Long enough for a few retry rounds, had there been any.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert_eq!(big.load(Ordering::SeqCst), 0, "the oversized file never went out");
+    assert!(!state.attachments.exists(vault, &huge_hash));
+    handle.abort();
+}
