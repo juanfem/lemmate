@@ -85,3 +85,52 @@ export function keepRender(vault: string, note: string, r: KeptRender) {
     kept.delete(old)
   }
 }
+
+/**
+ * Rendering again by itself, when asked to: a page or a deck on screen is made again once the
+ * note has been left alone this long. Quarto takes seconds and a process each time, so it waits
+ * for a pause in the writing rather than for every keystroke, and it is off unless turned on.
+ */
+export const AUTO_RENDER_WAIT = 5000
+const AUTO_KEY = 'lemmate.render.auto'
+
+export function readAutoRender(storage: Pick<Storage, 'getItem'> | undefined): boolean {
+  try {
+    return storage?.getItem(AUTO_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function writeAutoRender(storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined, on: boolean) {
+  try {
+    if (on) storage?.setItem(AUTO_KEY, '1')
+    else storage?.removeItem(AUTO_KEY)
+  } catch {
+    /* not remembered, then */
+  }
+}
+
+/**
+ * Whether the pane should start the wait for an automatic render. Only a page or a deck: a PDF
+ * or Word render downloads a file, which nobody wants every few seconds. `tried` is the text the
+ * last render started from, whether it worked or not — a failing note is tried again when it
+ * changes, not in a loop.
+ */
+export function autoRenderDue(s: {
+  auto: boolean
+  visible: boolean
+  busy: boolean
+  made: string
+  text: string | null
+  tried: string | null
+}): boolean {
+  return (
+    s.auto &&
+    s.visible &&
+    !s.busy &&
+    (s.made === 'page' || s.made === 'slides') &&
+    s.text !== null &&
+    s.text !== s.tried
+  )
+}

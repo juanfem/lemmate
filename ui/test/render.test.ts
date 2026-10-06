@@ -1,6 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { beforeBodyEnd, keepPlace, keepRender, keptRender, placeOf, type Place } from '../src/lib/render.ts'
+import {
+  autoRenderDue,
+  beforeBodyEnd,
+  keepPlace,
+  keepRender,
+  keptRender,
+  placeOf,
+  readAutoRender,
+  writeAutoRender,
+  type Place,
+} from '../src/lib/render.ts'
 
 test('the script goes before the last </body>, not one inside a script', () => {
   const deck = '<html><body><script>w.document.write("<html><body></body></html>")</script></body></html>'
@@ -38,4 +48,46 @@ test('a place from the frame is numbers only, and the script starts there', () =
   assert.match(keepPlace(null), /var at=null;/u)
   // Smuggled past the type: still only what `placeOf` lets through.
   assert.match(keepPlace({ y: '</script><b>' } as unknown as Place), /var at=null;/u)
+})
+
+test('an automatic render is due only when on, for a page or deck, and for text not yet tried', () => {
+  const due = { auto: true, visible: true, busy: false, made: 'page', text: 'b', tried: 'a' }
+  assert.equal(autoRenderDue(due), true)
+  assert.equal(autoRenderDue({ ...due, made: 'slides' }), true)
+  assert.equal(autoRenderDue({ ...due, auto: false }), false)
+  assert.equal(autoRenderDue({ ...due, visible: false }), false)
+  assert.equal(autoRenderDue({ ...due, busy: true }), false)
+  assert.equal(autoRenderDue({ ...due, made: 'PDF' }), false)
+  assert.equal(autoRenderDue({ ...due, made: '' }), false)
+  assert.equal(autoRenderDue({ ...due, text: null }), false)
+  // Already rendered from this text, or a render of it failed: wait for the next edit.
+  assert.equal(autoRenderDue({ ...due, tried: 'b' }), false)
+})
+
+test('the automatic-render preference is remembered, and survives storage that throws', () => {
+  const m = new Map<string, string>()
+  const storage = {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, v),
+    removeItem: (k: string) => void m.delete(k),
+  }
+  assert.equal(readAutoRender(storage), false)
+  writeAutoRender(storage, true)
+  assert.equal(readAutoRender(storage), true)
+  writeAutoRender(storage, false)
+  assert.equal(readAutoRender(storage), false)
+  const broken = {
+    getItem: () => {
+      throw new Error('blocked')
+    },
+    setItem: () => {
+      throw new Error('blocked')
+    },
+    removeItem: () => {
+      throw new Error('blocked')
+    },
+  }
+  assert.equal(readAutoRender(broken), false)
+  writeAutoRender(broken, true)
+  assert.equal(readAutoRender(undefined), false)
 })

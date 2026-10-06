@@ -2,7 +2,18 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
-  import { beforeBodyEnd, keepPlace, keepRender, keptRender, placeOf, type Place } from '../lib/render.ts'
+  import {
+    AUTO_RENDER_WAIT,
+    autoRenderDue,
+    beforeBodyEnd,
+    keepPlace,
+    keepRender,
+    keptRender,
+    placeOf,
+    readAutoRender,
+    writeAutoRender,
+    type Place,
+  } from '../lib/render.ts'
   import Icon from './Icon.svelte'
 
   /**
@@ -10,7 +21,8 @@
    * document — its scripts, its styles — so it lives in a sandboxed frame with no access to
    * this origin: it can run the scripts that draw it, and cannot reach the app, its session or
    * its API. A render takes seconds, so it runs when asked; an edit since the last one only
-   * marks it stale.
+   * marks it stale — unless *Auto* is ticked, when a page or deck is rendered again once the
+   * note has been left alone for a few seconds.
    *
    * It renders what the note asks for — the first format its front matter declares — unless
    * the picker says otherwise. A page (HTML, slides) shows here; a file (PDF, Word) downloads,
@@ -38,6 +50,14 @@
   let renderedFrom: string | null = $state(was?.renderedFrom ?? null)
   let stale = $derived(html !== null && text !== null && renderedFrom !== null && text !== renderedFrom)
   let stop: (() => void) | undefined
+  /** The text the last render started from, worked or not: an automatic one waits for another. */
+  let tried: string | null = $state(was?.renderedFrom ?? null)
+  const storage = typeof localStorage === 'undefined' ? undefined : localStorage
+  let auto = $state(readAutoRender(storage))
+  function toggleAuto() {
+    auto = !auto
+    writeAutoRender(storage, auto)
+  }
 
   const CHOICES: { id: RenderFormat | 'auto'; label: string }[] = [
     { id: 'auto', label: 'As the note says' },
@@ -144,6 +164,7 @@
     if (busy) return
     busy = true
     const from = text
+    tried = from
     try {
       const r = await api.render(session.id, noteId, choice, { view: true })
       const type = (r.headers.get('content-type') ?? '').split(';')[0]!.trim()
@@ -190,6 +211,12 @@
     started = true
     void render()
   })
+  // Each edit restarts the wait, so the render comes after a pause in the writing.
+  $effect(() => {
+    if (!autoRenderDue({ auto, visible, busy, made, text, tried }) || full) return
+    const t = setTimeout(() => void render(), AUTO_RENDER_WAIT)
+    return () => clearTimeout(t)
+  })
   onDestroy(() => {
     document.removeEventListener('fullscreenchange', onFullscreenChange)
     window.removeEventListener('keydown', onKey)
@@ -227,6 +254,11 @@
         {:else}
           <a class="icon" href={tabUrl} target="_blank" rel="noopener" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="external" size={15} /></a>
         {/if}
+      {/if}
+      {#if made === 'slides' || made === 'page'}
+        <label class="auto" title="Render again {AUTO_RENDER_WAIT / 1000} seconds after the note stops changing">
+          <input type="checkbox" checked={auto} onchange={toggleAuto} /> Auto
+        </label>
       {/if}
       <button onclick={render} disabled={busy} title="Render the note again">{html === null && !saved ? 'Render' : 'Re-render'}</button>
     </span>
@@ -369,6 +401,16 @@
     .state {
       display: none;
     }
+  }
+  .auto {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    cursor: pointer;
+    user-select: none;
+  }
+  .auto input {
+    margin: 0;
   }
   .bar select {
     font: inherit;
