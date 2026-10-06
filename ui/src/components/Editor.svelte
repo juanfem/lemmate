@@ -470,8 +470,15 @@
     // the content lands, so it opens folded rather than revealed by a cursor stuck at 0.
     const ytext = acquired.doc.getText('content')
     if (ytext.length === 0) {
+      // Removed by whichever comes first, the content or the editor closing — not twice, which
+      // Yjs reports as an error.
+      let observing = true
+      const stop = () => {
+        if (observing) ytext.unobserve(once)
+        observing = false
+      }
       const once = () => {
-        ytext.unobserve(once)
+        stop()
         const v = view
         if (!v || v.state.selection.main.head !== 0) return
         const text = v.state.doc.toString()
@@ -482,7 +489,7 @@
         v.dispatch({ selection: { anchor: pos } })
       }
       ytext.observe(once)
-      cleanups.push(() => ytext.unobserve(once))
+      cleanups.push(stop)
     }
     jumpTo = (pos: number) => {
       if (!view) return
