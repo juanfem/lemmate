@@ -253,8 +253,21 @@ impl Cdp {
         let config = tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(1 << 30))
             .max_frame_size(Some(1 << 30));
-        let (ws, _) = tungstenite::client::client_with_config(url, stream, Some(config))
-            .map_err(|e| Error::Export(format!("DevTools: {e}")))?;
+        // The read timeout applies to the upgrade too, and a busy Chrome can take longer than it
+        // to answer: an interrupted handshake is resumed until the deadline, not given up on.
+        let mut handshake = tungstenite::client::client_with_config(url, stream, Some(config));
+        let ws = loop {
+            match handshake {
+                Ok((ws, _)) => break ws,
+                Err(tungstenite::HandshakeError::Interrupted(mid)) => {
+                    remaining(deadline)?;
+                    handshake = mid.handshake();
+                }
+                Err(tungstenite::HandshakeError::Failure(e)) => {
+                    return Err(Error::Export(format!("DevTools: {e}")));
+                }
+            }
+        };
         Ok(Self { ws, next: 0, deadline, page: None })
     }
 
@@ -434,6 +447,24 @@ mod tests {
         let opts = PrintOptions { timeout: Duration::from_secs(8), ..Default::default() };
         assert!(print_pdf(page.as_bytes(), &opts).is_err());
         assert!(canary.accept().is_err(), "the navigation reached nothing");
+    }
+
+    /// A DevTools endpoint slower to answer the upgrade than the socket's read timeout is waited
+    /// for, as a busy Chrome is.
+    #[test]
+    fn a_slow_devtools_handshake_is_waited_for() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/devtools/browser/x", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(1200));
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let _ = ws.read();
+        });
+        let cdp = Cdp::connect(&url, Instant::now() + Duration::from_secs(10));
+        assert!(cdp.is_ok(), "{:?}", cdp.err());
+        drop(cdp);
+        server.join().unwrap();
     }
 
     #[test]
