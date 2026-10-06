@@ -134,9 +134,89 @@ pub const PRINT_SANDBOX: &str =
 /// without backgrounds unless told otherwise, and on a Quarto page that is the tint of a
 /// callout's header, its icon (a background image) and the shading behind code — what reveal.js
 /// already asks for in a deck, a page has to be told.
-const PRINT_SCRIPT: &str = r#"<style>@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style><script>(function(){var done=false;function go(){if(done)return;done=true;setTimeout(function(){window.print()},250)}
-if(document.querySelector(".reveal")){var t=0;(function hook(){var R=window.Reveal;if(R&&R.on){R.on("pdf-ready",go);if(document.querySelector(".pdf-page"))go();return}if(++t<100)setTimeout(hook,100)})();setTimeout(go,15000);return}
-if(document.readyState==="complete")go();else window.addEventListener("load",go)})()</script>"#;
+///
+/// A deck's print layout is reveal.js's own, and it differs from the slides on screen in three
+/// ways this puts back:
+/// - it clears every slide's padding (`padding: 0 !important`, and `border-box`), so a theme's
+///   spacing is lost — a title set in from a rule beside it lands on the rule. Each slide's is
+///   pinned as the screen has it, before that layout runs;
+/// - Quarto's footer and logo are single `position: fixed` elements, left to the browser to repeat
+///   on every printed page. Each page gets its own copy instead, the slide's own footer where it
+///   has one and none where it says `data-footer="false"`, as Quarto shows them on screen;
+/// - its slide numbers are a bare count, whatever `slide-number` asks for (`c/t` is `1 / 12` on
+///   screen, `1` on paper). They are written the way the screen writes them.
+const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style><script>(function () {
+  var done = false
+  function go() { if (done) return; done = true; setTimeout(function () { window.print() }, 250) }
+  if (!document.querySelector('.reveal')) {
+    if (document.readyState === 'complete') go(); else window.addEventListener('load', go)
+    return
+  }
+  // Where each slide stands, read while the slides are still in their order: the print layout
+  // moves them into pages, and reveal.js's own counting cannot find them there.
+  var at = new Map(), counted = 0, across = 0
+  if (!document.documentElement.classList.contains('reveal-print')) {
+    document.querySelectorAll('.reveal .slides > section').forEach(function (h, hi) {
+      var stack = h.classList.contains('stack')
+      across = hi + 1
+      ;(stack ? h.querySelectorAll(':scope > section') : [h]).forEach(function (s, vi) {
+        var a = s.dataset.visibility === 'uncounted' ? 0 : 1
+        at.set(s, { past: counted, a: a, h: hi, v: vi, vertical: stack })
+        counted += a
+        var cs = getComputedStyle(s)
+        ;['padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'box-sizing'].forEach(function (p) {
+          s.style.setProperty(p, cs.getPropertyValue(p), 'important')
+        })
+      })
+    })
+  }
+  // As reveal.js's `getSlideNumber` writes it on screen.
+  function number(R, s) {
+    var c = R.getConfig(), f = typeof c.slideNumber === 'string' ? c.slideNumber : 'h.v', i = at.get(s), n
+    if (typeof c.slideNumber === 'function' || !i) return null
+    if (!/c/.test(f) && across === 1) f = 'c'
+    if (f === 'c') n = [i.past + i.a]
+    else if (f === 'c/t') n = [i.past + i.a, '/', counted]
+    else {
+      n = [i.h + i.a]
+      if (i.vertical) n.push(f === 'h/v' ? '/' : '.', i.v + 1)
+    }
+    var html = '<span class="slide-number-a">' + n[0] + '</span>'
+    if (n.length === 3) html += ' <span class="slide-number-delimiter">' + n[1] + '</span> <span class="slide-number-b">' + n[2] + '</span>'
+    return html
+  }
+  function finish() {
+    if (done) return
+    var R = window.Reveal
+    var footer = document.querySelector('.reveal > .footer-default') || document.querySelector('.reveal > .footer')
+    var logo = document.querySelector('.reveal > .slide-logo')
+    document.querySelectorAll('.reveal .pdf-page').forEach(function (page) {
+      var s = page.querySelector('section')
+      if (!s) return
+      var f = s.querySelector('.footer') || (s.getAttribute('data-footer') === 'false' ? null : footer)
+      ;[f, logo].forEach(function (el) {
+        if (!el) return
+        var c = el.cloneNode(true)
+        c.classList.remove('footer-default')
+        c.style.position = 'absolute'
+        c.style.display = 'block'
+        page.appendChild(c)
+      })
+      var n = page.querySelector('.slide-number-pdf'), html = n && R && number(R, s)
+      if (html) n.innerHTML = html
+    })
+    if (footer) footer.style.display = 'none'
+    if (logo) logo.style.display = 'none'
+    go()
+  }
+  var t = 0
+  ;(function hook() {
+    var R = window.Reveal
+    if (R && R.on) { R.on('pdf-ready', finish); if (document.querySelector('.pdf-page')) finish(); return }
+    if (++t < 100) setTimeout(hook, 100)
+  })()
+  setTimeout(finish, 15000)
+})()</script>"##;
 
 /// A render opened to be saved as a PDF: the page with the browser's print dialog opening by
 /// itself, where *Save as PDF* is a destination. Its URL carries `?print-pdf`, which is also what
