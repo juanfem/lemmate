@@ -49,6 +49,8 @@ A note is named either by its vault-relative path — `Projects/plan.md`, or jus
 | `lemmate find <query> [--limit N] [--json]` | Full-text search the vault on the server. (The local `lemmate search <dir> <query>` walks a directory instead.) |
 | `lemmate backlinks <note> [--json]` | The notes that link to this one. |
 | `lemmate tags [--json]` | The vault's tags, most used first. |
+| `lemmate files [--used-by NOTE] [--json]` | List the vault's files that are not notes (images, stylesheets, `_quarto.yml`…); `--used-by` keeps those a note depends on. |
+| `lemmate get <path>… [-o FILE \| --dir DIR]` | Download those files: one to stdout or `-o`, any number under `--dir` at their vault paths. |
 | `lemmate mcp` | Serve the Model Context Protocol on stdin/stdout. |
 
 Writes are never blind overwrites: the server diffs the text you send against the current

@@ -176,3 +176,26 @@ fn mcp_tools_work_against_a_real_server() {
         .unwrap();
     assert_eq!(body(r["result"]["contents"][0]["text"].as_str().unwrap()), "# Standup\n\nshipped\n");
 }
+
+#[test]
+fn files_that_are_not_notes_are_listed_and_downloaded() {
+    let (server, _blobs) = start_server();
+    let remote = Remote::from_args(&server, None, None).unwrap();
+    let vault = VaultId::new().to_string();
+    let deck = remote.create(&vault, "talk/deck.qmd", "---\ncss: style.css\n---\n## One\n").unwrap();
+    let put = |path: &str, bytes: &[u8]| {
+        ureq::put(format!("{server}/api/v1/vaults/{vault}/files")).query("path", path).send(bytes).unwrap();
+    };
+    let css = b".reveal .footer { color: red; }\n";
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0, 1, 2, 0xff];
+    put("talk/style.css", css);
+    put("pics/other.png", png);
+
+    let files = remote.files(&vault).unwrap();
+    let style = files.iter().find(|f| f.path == "talk/style.css").expect("listed");
+    assert_eq!(style.used_by, vec![deck.id.clone()], "the deck names it in its front matter");
+    let other = files.iter().find(|f| f.path == "pics/other.png").expect("listed");
+    assert!(other.used_by.is_empty());
+    assert_eq!(remote.file_bytes(&vault, &style.hash).unwrap(), css);
+    assert_eq!(remote.file_bytes(&vault, &other.hash).unwrap(), png, "binary, byte for byte");
+}

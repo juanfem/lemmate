@@ -185,6 +185,32 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List the vault's files that are not notes (images, stylesheets, `_quarto.yml`…).
+    Files {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Only the files this note depends on (path or id): what it links, embeds or names in
+        /// its front matter, and what those stylesheets import.
+        #[arg(long)]
+        used_by: Option<String>,
+        /// Emit JSON (path, hash, size, used_by) instead of paths.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download vault files that are not notes, by their vault paths.
+    Get {
+        #[command(flatten)]
+        remote: RemoteArgs,
+        /// Vault-relative paths, as `lemmate files` prints them.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Write the one file here; with neither this nor `--dir`, one file goes to stdout.
+        #[arg(short, long, conflicts_with = "dir")]
+        output: Option<PathBuf>,
+        /// Write each file under this directory at its vault path.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Print a note's markdown.
     Cat {
         #[command(flatten)]
@@ -611,6 +637,55 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             } else {
                 for n in &notes {
                     println!("{}", n.path);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Files { remote, used_by, json } => {
+            let (r, vault) = remote.open()?;
+            let mut files = r.files(&vault)?;
+            if let Some(note) = used_by {
+                let id = r.resolve_note(&vault, &note)?.id;
+                files.retain(|f| f.used_by.contains(&id));
+            }
+            if json {
+                print_json(&files)?;
+            } else {
+                for f in &files {
+                    println!("{}", f.path);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Get { remote, paths, output, dir } => {
+            if paths.len() > 1 && dir.is_none() {
+                anyhow::bail!("several files need --dir to land in");
+            }
+            let (r, vault) = remote.open()?;
+            let files = r.files(&vault)?;
+            for path in &paths {
+                let wanted = path.trim_start_matches("./").trim_start_matches('/');
+                let Some(file) = files.iter().find(|f| f.path == wanted) else {
+                    anyhow::bail!("no file {wanted:?} in the vault (`lemmate files` lists them)");
+                };
+                let bytes = r.file_bytes(&vault, &file.hash)?;
+                match (&output, &dir) {
+                    (Some(out), _) => std::fs::write(out, &bytes)?,
+                    (None, Some(dir)) => {
+                        // A listed path is vault-relative and checked by the server, but this is
+                        // a write to the local disk: nothing outside `dir`.
+                        let rel = std::path::Path::new(&file.path);
+                        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+                            anyhow::bail!("refusing to write {:?} outside {}", file.path, dir.display());
+                        }
+                        let to = dir.join(rel);
+                        if let Some(parent) = to.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&to, &bytes)?;
+                        eprintln!("{}", to.display());
+                    }
+                    (None, None) => std::io::Write::write_all(&mut std::io::stdout(), &bytes)?,
                 }
             }
             Ok(ExitCode::SUCCESS)

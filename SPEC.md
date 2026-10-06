@@ -719,7 +719,7 @@ applies the result as CRDT edits, so API writes merge with concurrent editors.
 ### 13.2 CLI
 
 `lemmate login` (`--invite <link>` to redeem one), `lemmate vaults`,
-`lemmate ls|cat|new|edit|mv|rm`, `lemmate search`, `lemmate daily [date]`, `lemmate export`,
+`lemmate ls|cat|new|edit|mv|rm`, `lemmate files|get` (files that are not notes), `lemmate search`, `lemmate daily [date]`, `lemmate export`,
 `lemmate import obsidian`, `lemmate passwd` (own, or `--email` to reset another as admin),
 `lemmate invite` (`--list`, `--revoke`), `lemmate sync` (native projection folder without the
 GUI), `lemmate serve` (a root of vaults on this machine with no server at all — the relay and

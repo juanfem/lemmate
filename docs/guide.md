@@ -830,7 +830,7 @@ notes <command>
 corresponding flags.
 
 The remote commands from SPEC §13.2 (`lemmate ls|cat|new|edit|mv|rm`, `lemmate daily`,
-`lemmate vaults`) and the stdio MCP server (`lemmate mcp`, SPEC §13.3) have landed; the CLI's own
+`lemmate vaults`, and `lemmate files` / `lemmate get` for the files that are not notes) and the stdio MCP server (`lemmate mcp`, SPEC §13.3) have landed; the CLI's own
 `crates/cli/README.md` documents the MCP tool surface.
 
 ---

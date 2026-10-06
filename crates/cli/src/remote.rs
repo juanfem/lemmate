@@ -25,6 +25,19 @@ pub struct VaultSummary {
     pub notes: u32,
 }
 
+/// A file in a vault that is not a note — an image, a stylesheet, a `_quarto.yml` — as the
+/// server's file manager lists it (`lemmate_core::files::FileEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultFile {
+    pub path: String,
+    pub hash: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// The ids of the notes that depend on it.
+    #[serde(default)]
+    pub used_by: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteSummary {
     pub id: String,
@@ -234,6 +247,25 @@ impl Remote {
     fn send_note(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<Note> {
         let text = self.send_json(method, path, body)?;
         serde_json::from_str(&text).with_context(|| format!("parsing the response to {method} {path}"))
+    }
+
+    // ---- Files that are not notes. Not on `NotesApi` either: the MCP tools speak markdown. ----
+
+    pub fn files(&self, vault: &str) -> Result<Vec<VaultFile>> {
+        self.get_json(&format!("/vaults/{vault}/files"), &[])
+    }
+
+    /// A file's bytes, by the content hash its listing gives.
+    pub fn file_bytes(&self, vault: &str, hash: &str) -> Result<Vec<u8>> {
+        let path = format!("/vaults/{vault}/attachments/{hash}");
+        let what = format!("GET {path}");
+        let mut resp =
+            self.auth(self.agent.get(self.url(&path))).call().map_err(|e| transport_error(e, &what))?;
+        resp.body_mut()
+            .with_config()
+            .limit(lemmate_core::attachments::MAX_ATTACHMENT_BYTES)
+            .read_to_vec()
+            .with_context(|| format!("reading the response to {what}"))
     }
 
     // ---- Accounts (SPEC §11.1). Not on `NotesApi`: the MCP tools have no business here. ----
