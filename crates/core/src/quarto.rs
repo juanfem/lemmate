@@ -144,7 +144,16 @@ pub const PRINT_SANDBOX: &str =
 ///   on every printed page. Each page gets its own copy instead, the slide's own footer where it
 ///   has one and none where it says `data-footer="false"`, as Quarto shows them on screen;
 /// - its slide numbers are a bare count, whatever `slide-number` asks for (`c/t` is `1 / 12` on
-///   screen, `1` on paper). They are written the way the screen writes them.
+///   screen, `1` on paper). They are written the way the screen writes them;
+/// - it centres a slide from a height measured once, early — before the web fonts have come, so
+///   a title that wraps on screen was measured on one line and printed lower than it shows. A
+///   centred slide is centred again from its height once the fonts are in.
+///
+/// The footer, logo and slide number belong to the window, not to the slide: on screen they keep
+/// their CSS size while the slide is scaled to fit, so how big they look beside it depends on the
+/// screen. On paper the page *is* the slide, and left at their CSS size they came out ~1.4× too
+/// big and crowding the text. They are scaled as the deck shows them presented full screen on a
+/// 1920×1080 display — the usual projector, and the same PDF whatever window prints it.
 const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style><script>(function () {
   var done = false
   function go() { if (done) return; done = true; setTimeout(function () { window.print() }, 250) }
@@ -185,9 +194,13 @@ const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:
     if (n.length === 3) html += ' <span class="slide-number-delimiter">' + n[1] + '</span> <span class="slide-number-b">' + n[2] + '</span>'
     return html
   }
+  var finished = false
   function finish() {
-    if (done) return
-    var R = window.Reveal
+    if (finished) return
+    finished = true
+    var R = window.Reveal, cfg = R && R.getConfig ? R.getConfig() : {}, m = Number(cfg.margin) || 0
+    var zoom = 1 / Math.min(1920 * (1 - m) / parseFloat(cfg.width), 1080 * (1 - m) / parseFloat(cfg.height))
+    if (!(zoom > 0 && isFinite(zoom))) zoom = 1
     var footer = document.querySelector('.reveal > .footer-default') || document.querySelector('.reveal > .footer')
     var logo = document.querySelector('.reveal > .slide-logo')
     document.querySelectorAll('.reveal .pdf-page').forEach(function (page) {
@@ -200,14 +213,24 @@ const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:
         c.classList.remove('footer-default')
         c.style.position = 'absolute'
         c.style.display = 'block'
+        c.style.zoom = zoom
         page.appendChild(c)
       })
       var n = page.querySelector('.slide-number-pdf'), html = n && R && number(R, s)
       if (html) n.innerHTML = html
+      if (n) n.style.zoom = zoom
     })
     if (footer) footer.style.display = 'none'
     if (logo) logo.style.display = 'none'
-    go()
+    ;(document.fonts ? document.fonts.ready : Promise.resolve()).then(function () {
+      document.querySelectorAll('.reveal .pdf-page').forEach(function (page) {
+        var s = page.querySelector('section'), room = page.clientHeight
+        if (s && (cfg.center || s.classList.contains('center')) && s.offsetHeight <= room) {
+          s.style.top = Math.max((room - s.offsetHeight) / 2, 0) + 'px'
+        }
+      })
+      go()
+    })
   }
   var t = 0
   ;(function hook() {
