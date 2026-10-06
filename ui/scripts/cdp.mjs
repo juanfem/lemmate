@@ -75,7 +75,8 @@ async function pressKey(cdp, spec) {
   if (named[key]) { [vk, text] = named[key]; code = key; }
   else if (key.length === 1) {
     vk = key.toUpperCase().charCodeAt(0);
-    code = /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : /[0-9]/.test(key) ? `Digit${key}` : key;
+    code = /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : /[0-9]/.test(key) ? `Digit${key}` : { '[': 'BracketLeft', ']': 'BracketRight' }[key] ?? key;
+    if (key === '[' || key === ']') vk = key === '[' ? 219 : 221;
     text = modifiers & (MODS.ctrl | MODS.meta | MODS.alt) ? '' : key;
   } else die(`unsupported key: ${key}`);
   const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };

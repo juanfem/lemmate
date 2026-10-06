@@ -30,6 +30,15 @@ export function drawn(tabs: string[], pinned: string[]): string[] {
   return [...tabs].sort((a, b) => Number(pinned.includes(b)) - Number(pinned.includes(a)))
 }
 
+/** The tab `delta` steps from `active` along the strip as drawn, wrapping at either end. */
+export function stepTab(tabs: string[], pinned: string[], active: string | null, delta: number): string | null {
+  const strip = drawn(tabs, pinned)
+  if (strip.length === 0) return null
+  const at = active === null ? -1 : strip.indexOf(active)
+  if (at === -1) return strip[0]!
+  return strip[(((at + delta) % strip.length) + strip.length) % strip.length]!
+}
+
 /** The position `index` really lands on in `strip` (drawn, without the tab): kept in its group. */
 export function clampIndex(strip: string[], tab: string, index: number, pinned: string[]): number {
   const pins = strip.filter((t) => pinned.includes(t)).length

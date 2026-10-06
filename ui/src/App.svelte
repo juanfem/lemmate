@@ -22,7 +22,8 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { inNewPane, moveTab, placeRender, notePane, removeTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { inNewPane, moveTab, placeRender, notePane, removeTab, stepTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { tabKey } from './lib/tabkeys.ts'
 
   import SearchPane from './components/SearchPane.svelte'
   import TagsPane from './components/TagsPane.svelte'
@@ -771,6 +772,14 @@
     panes = panes.filter((_, j) => j !== i)
     focusedPane = Math.min(focusedPane > i ? focusedPane - 1 : focusedPane, panes.length - 1)
   }
+  /** Ctrl+Tab and its stand-ins: the focused pane's next or previous tab, as its strip draws them. */
+  function stepActive(delta: number) {
+    const p = focused
+    const id = stepTab(p.tabs, pinned, p.active, delta)
+    if (!id || id === p.active) return
+    if (p.kind === 'history') p.active = id
+    else landOn(id)
+  }
   function focusPane(delta: number) {
     focusedPane = (focusedPane + delta + panes.length) % panes.length
   }
@@ -944,7 +953,9 @@
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
-    { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W', run: () => activeTab && close(activeTab) },
+    { id: 'close', label: 'Close tab', shortcut: 'Ctrl+W / Alt+W', run: () => activeTab && close(activeTab) },
+    { id: 'nexttab', label: 'Next tab', shortcut: 'Ctrl+Shift+]', run: () => stepActive(1) },
+    { id: 'prevtab', label: 'Previous tab', shortcut: 'Ctrl+Shift+[', run: () => stepActive(-1) },
     ...(canDetach ? [{ id: 'detach', label: 'Move tab to new window', run: () => activeTab && detach(activeTab) }] : []),
     { id: 'pin', label: activeTab && pinned.includes(activeTab) ? 'Unpin tab' : 'Pin tab', run: () => activeTab && togglePin(activeTab) },
     { id: 'reopen', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T', run: reopenClosed },
@@ -1272,6 +1283,16 @@
     const mod = e.ctrlKey || e.metaKey
     if (e.altKey && !mod && !e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
       stepDaily(e.code === 'BracketLeft' ? -1 : 1)
+      e.preventDefault()
+      return
+    }
+    const tk = tabKey(e)
+    if (tk === 'close') {
+      if (activeTab) close(activeTab)
+      e.preventDefault()
+      return
+    } else if (tk) {
+      stepActive(tk.step)
       e.preventDefault()
       return
     }

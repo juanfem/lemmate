@@ -780,7 +780,9 @@ your account.
 | `Ctrl+Shift+B` | Bookmark / unbookmark this note |
 | `Ctrl+E` | Cycle this pane's view: live → source → reading |
 | `Ctrl+T` | New (empty) tab |
-| `Ctrl+W` | Close tab (no-op on a pinned tab) |
+| `Ctrl+W` / `Alt+W` | Close tab (no-op on a pinned tab) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab in this pane |
+| `Ctrl+Shift+]` / `Ctrl+Shift+[` | Same — works in a browser tab too (real `Ctrl` on a Mac) |
 | `Ctrl+Shift+T` | Reopen closed tab |
 | `Ctrl+\` | Split right |
 | `Ctrl+Alt+→` / `Ctrl+Alt+←` | Focus next / previous pane |
@@ -791,9 +793,12 @@ your account.
 Inside the palette: `↑`/`↓` to move, `Enter` to choose, `Ctrl+Enter` to open in a split,
 `Shift+Enter` to create a note from what you typed, `Escape` to close.
 
-Some of these — `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Shift+T` — are shortcuts the browser
-keeps for itself and a web page cannot intercept. They work in the desktop app; in a browser
-tab, use the ＋ button, a tab's ×, and the palette instead.
+Some of these — `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Shift+T`, `Ctrl+Tab` — are shortcuts the
+browser keeps for itself and a web page cannot intercept. They work in the desktop app; in a
+browser tab, use `Alt+W` and `Ctrl+Shift+[ / ]`, the ＋ button, a tab's ×, and the palette
+instead. In the editor, `Ctrl+Shift+[ / ]` therefore no longer folds at the cursor (the gutter
+arrows do; `Ctrl+Alt+[ / ]` still fold and unfold everything; on a Mac `Cmd+Alt+[ / ]` fold
+as before).
 
 Commands without a shortcut, reachable from the palette: show Files / Tags / Starred / Outline
 / Links / Version history / Trash, set the view to live / source / reading, Share note…,

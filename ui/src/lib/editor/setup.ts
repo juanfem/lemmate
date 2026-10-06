@@ -493,7 +493,9 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
         ...defaultKeymap,
         ...searchKeymap,
         ...historyKeymap,
-        ...foldKeymap,
+        // Ctrl+Shift+[ / ] step through tabs (tabkeys.ts), so folding at the cursor keeps only
+        // the Mac's Cmd+Alt+[ / ]; elsewhere the gutter folds, and Ctrl+Alt+[ / ] still fold all.
+        ...foldKeymap.map((b) => (b.key?.startsWith('Ctrl-Shift-') ? { ...b, key: undefined } : b)),
         indentWithTab,
       ]),
       ...(opts.extra ?? []),

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, scrollToShow, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, scrollToShow, stepTab, type TabPane } from '../src/lib/tabmoves.ts'
 import { renderTab, tabNote } from '../src/lib/rendertabs.ts'
 
 let seq = 100
@@ -199,4 +199,16 @@ test('a tab is scrolled into sight, clear of the cluster that covers the strip e
   assert.equal(scrollToShow(4, 100, 50, 500, 200), 0, 'never before the start')
   // Wider than what can be seen: its start wins, so the label is what shows.
   assert.equal(scrollToShow(400, 800, 0, 500, 200), 392)
+})
+
+test('stepping along a strip follows the drawn order and wraps', () => {
+  assert.equal(stepTab(['a', 'b', 'c'], [], 'a', 1), 'b')
+  assert.equal(stepTab(['a', 'b', 'c'], [], 'c', 1), 'a')
+  assert.equal(stepTab(['a', 'b', 'c'], [], 'a', -1), 'c')
+  // Pinned tabs are drawn first, so c (pinned) comes before a.
+  assert.equal(stepTab(['a', 'b', 'c'], ['c'], 'c', 1), 'a')
+  assert.equal(stepTab(['a', 'b', 'c'], ['c'], 'a', -1), 'c')
+  assert.equal(stepTab(['a'], [], 'a', 1), 'a')
+  assert.equal(stepTab([], [], null, 1), null)
+  assert.equal(stepTab(['a', 'b'], [], null, 1), 'a')
 })
