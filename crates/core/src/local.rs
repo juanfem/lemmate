@@ -992,6 +992,9 @@ struct ExportIn {
     /// A render to look at in the app rather than to save (`quarto::RenderOptions::viewing`).
     #[serde(default)]
     view: bool,
+    /// `?print-pdf` on a render opened as a page: open it to be printed (`quarto::for_print`).
+    #[serde(default, rename = "print-pdf")]
+    print: Option<String>,
 }
 
 /// Export through pandoc with the vault's `export/` folder as resources (SPEC §12).
@@ -1031,7 +1034,7 @@ async fn kept_render(
     let Some((bytes, mime, disposition)) = s.renders.get(&render, &id) else {
         return render_page(State(s), Path((vault, id)), q).await;
     };
-    Ok((
+    let response = (
         [
             (header::CONTENT_TYPE, mime.to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
@@ -1039,7 +1042,32 @@ async fn kept_render(
         ],
         bytes,
     )
-        .into_response())
+        .into_response();
+    Ok(if q.print.is_some() { printable(response).await } else { response })
+}
+
+/// A render page made to be printed (`?print-pdf`): a page gets the script that opens the print
+/// dialog and the sandbox that lets it; anything else (a PDF, a Word file) goes as it came. The
+/// server's render pages go through here too.
+pub async fn printable(response: axum::response::Response) -> axum::response::Response {
+    let html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("text/html"));
+    if !html || !response.status().is_success() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(crate::quarto::PRINT_SANDBOX),
+    );
+    axum::response::Response::from_parts(parts, crate::quarto::for_print(bytes.to_vec()).into())
 }
 
 /// A render as a page of its own, sandboxed by its headers (see the server's `render_page`).
@@ -1048,13 +1076,14 @@ async fn render_page(
     path: Path<(String, String)>,
     Query(q): Query<ExportIn>,
 ) -> std::result::Result<axum::response::Response, StatusCode> {
+    let print = q.print.is_some();
     let mut response =
         render_note(state, path, axum::Json(ExportIn { view: true, ..q })).await?.into_response();
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static(crate::quarto::PAGE_SANDBOX),
     );
-    Ok(response)
+    Ok(if print { printable(response).await } else { response })
 }
 
 #[derive(Deserialize)]

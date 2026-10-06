@@ -552,7 +552,7 @@ async fn render_uses_quarto_unless_switched_off() {
                     "storage stand-in first"
                 );
                 // What the pane rendered opens again as a page of its own without a second render.
-                let (kept, again, csp) = tokio::task::spawn_blocking({
+                let (kept, again, csp, printed, print_csp) = tokio::task::spawn_blocking({
                     let base = base_for_preview.clone();
                     move || {
                         let mut r = ureq::post(format!("{base}/notes"))
@@ -576,13 +576,24 @@ async fn render_uses_quarto_unless_switched_off() {
                             .unwrap();
                         let csp =
                             r.headers().get("content-security-policy").unwrap().to_str().unwrap().to_owned();
-                        (first, r.body_mut().read_to_string().unwrap(), csp)
+                        let again = r.body_mut().read_to_string().unwrap();
+                        // To be saved as a PDF: the same page, opening the print dialog.
+                        let mut r =
+                            ureq::get(format!("{base}/notes/{note}/render/{id}?format=revealjs&print-pdf"))
+                                .call()
+                                .unwrap();
+                        let print_csp =
+                            r.headers().get("content-security-policy").unwrap().to_str().unwrap().to_owned();
+                        (first, again, csp, r.body_mut().read_to_string().unwrap(), print_csp)
                     }
                 })
                 .await
                 .unwrap();
                 assert_eq!(kept, again, "the very page the pane had");
-                assert!(csp.starts_with("sandbox"));
+                assert!(csp.starts_with("sandbox") && !csp.contains("allow-modals"), "{csp}");
+                assert_eq!(print_csp, lemmate_core::quarto::PRINT_SANDBOX);
+                assert!(!kept.contains("window.print()") && printed.contains("window.print()"));
+                assert!(printed.starts_with(&kept[..kept.rfind("</body>").unwrap()]), "the same page");
             }
         } else {
             assert_eq!(status, 501, "enabled: {enabled}");

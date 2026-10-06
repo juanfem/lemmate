@@ -887,6 +887,12 @@ brings the pane back. **Open outside** (the box with an arrow) opens the same re
 browser tab of its own — in the desktop app, in your default browser; in the app installed on
 an iPhone, long-press it for *Open in* your browser — straight away. A browser that is not
 signed in goes through the sign-in first and comes back to the render: the page the pane already has is kept for half an hour, and only rendered again after.
+**Print** (the printer) opens the same render in a tab of its own, laid out for paper, and
+brings up the browser's print dialog — pick *Save as PDF* there to keep what the pane shows. A
+deck prints a slide to a page, the way reveal.js lays it out for printing (Chrome does this
+best); a page prints as it reads. It is not the picker's *PDF*, which Quarto makes through Typst
+from the note itself and which knows nothing of slides. In the desktop app it goes to your
+browser, as *Open outside* does.
 On a phone, swipe sideways to turn a deck's slides.
 
 **Speaker view.** Press **S** in a rendered deck (or pick *Speaker View* from its menu) for

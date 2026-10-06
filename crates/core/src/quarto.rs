@@ -123,6 +123,32 @@ pub fn preview_format(text: &str) -> Format {
 /// the session or the API of the site it came from.
 pub const PAGE_SANDBOX: &str = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox";
 
+/// [`PAGE_SANDBOX`] for a render opened to be printed ([`for_print`]): a sandboxed document may
+/// not open the print dialog unless it is allowed modals.
+pub const PRINT_SANDBOX: &str =
+    "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-modals";
+
+/// Opens the print dialog once the page is laid out to be printed: a page when it has loaded, a
+/// deck when reveal.js has laid its slides out as pages (`pdf-ready`, or already there) — with a
+/// fallback, should that never be said.
+const PRINT_SCRIPT: &str = r#"<script>(function(){var done=false;function go(){if(done)return;done=true;setTimeout(function(){window.print()},250)}
+if(document.querySelector(".reveal")){var t=0;(function hook(){var R=window.Reveal;if(R&&R.on){R.on("pdf-ready",go);if(document.querySelector(".pdf-page"))go();return}if(++t<100)setTimeout(hook,100)})();setTimeout(go,15000);return}
+if(document.readyState==="complete")go();else window.addEventListener("load",go)})()</script>"#;
+
+/// A render opened to be saved as a PDF: the page with the browser's print dialog opening by
+/// itself, where *Save as PDF* is a destination. Its URL carries `?print-pdf`, which is also what
+/// turns a reveal.js deck into its print layout, a slide to a page — the browser prints what the
+/// render shows rather than Quarto making a PDF of its own (that is [`Format::Pdf`], through
+/// Typst, which knows nothing of slides).
+pub fn for_print(page: Vec<u8>) -> Vec<u8> {
+    let at = page.windows(7).rposition(|w| w.eq_ignore_ascii_case(b"</body>")).unwrap_or(page.len());
+    let mut out = Vec::with_capacity(page.len() + PRINT_SCRIPT.len());
+    out.extend_from_slice(&page[..at]);
+    out.extend_from_slice(PRINT_SCRIPT.as_bytes());
+    out.extend_from_slice(&page[at..]);
+    out
+}
+
 /// Renders made for viewing, kept a while under an id of their own, so that the same page can be
 /// opened again — in a tab of its own, say — without Quarto making it a second time. A handful,
 /// for half an hour: this is a courtesy, not a store; a miss means rendering again.
@@ -1169,6 +1195,17 @@ mod tests {
 
     fn atts() -> Vec<String> {
         ATTACHMENTS.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_page_to_print_opens_the_dialog_from_the_end_of_its_body() {
+        let page = b"<html><body><script>w.write('</body>')</script></BODY></html>".to_vec();
+        let out = String::from_utf8(for_print(page)).unwrap();
+        let script = out.find("window.print()").unwrap();
+        assert!(out.find("w.write").unwrap() < script && script < out.find("</BODY>").unwrap());
+        let bare = String::from_utf8(for_print(b"no body".to_vec())).unwrap();
+        assert!(bare.starts_with("no body<script>"));
+        assert!(PRINT_SANDBOX.starts_with(PAGE_SANDBOX) && PRINT_SANDBOX.ends_with("allow-modals"));
     }
 
     #[test]

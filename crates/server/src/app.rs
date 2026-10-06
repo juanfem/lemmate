@@ -1448,6 +1448,9 @@ struct ExportIn {
     /// A render to look at in the app rather than to save (`quarto::RenderOptions::viewing`).
     #[serde(default)]
     view: bool,
+    /// `?print-pdf` on a render opened as a page: open it to be printed (`quarto::for_print`).
+    #[serde(default, rename = "print-pdf")]
+    print: Option<String>,
 }
 
 /// Render a note through pandoc (SPEC §12). The note's bibliography — its own `bibliography:`,
@@ -1681,7 +1684,7 @@ async fn kept_render(
     let Some((bytes, mime, disposition)) = state.renders.get(&render, &note.to_string()) else {
         return render_page(State(state), Ok(user), uri, Path((vault, id)), q).await;
     };
-    Ok((
+    let response = (
         [
             (header::CONTENT_TYPE, mime.to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
@@ -1689,7 +1692,8 @@ async fn kept_render(
         ],
         bytes,
     )
-        .into_response())
+        .into_response();
+    Ok(if q.print.is_some() { lemmate_core::local::printable(response).await } else { response })
 }
 
 /// A render page opened where there is no session — another browser than the one signed in, as
@@ -1721,12 +1725,13 @@ async fn render_page(
     Query(q): Query<ExportIn>,
 ) -> Result<axum::response::Response, StatusCode> {
     let Ok(user) = user else { return Ok(sign_in_first(&uri)) };
+    let print = q.print.is_some();
     let mut response = render_note(state, user, path, Json(ExportIn { view: true, ..q })).await?;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(lemmate_core::quarto::PAGE_SANDBOX),
     );
-    Ok(response)
+    Ok(if print { lemmate_core::local::printable(response).await } else { response })
 }
 
 #[derive(Serialize)]

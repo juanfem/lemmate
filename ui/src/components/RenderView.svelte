@@ -94,6 +94,15 @@
   function openOutside() {
     shell?.openExternal?.(new URL(tabUrl, location.href).href)
   }
+  /**
+   * The same render in a tab of its own, laid out to be printed and opening the print dialog by
+   * itself (`quarto::for_print`) — *Save as PDF* there keeps what is on screen, a deck a slide to
+   * a page. Not in the frame: printing from it would mean letting every render open dialogs.
+   */
+  let printUrl = $derived(`${tabUrl}&print-pdf`)
+  function printOutside() {
+    shell?.openExternal?.(new URL(printUrl, location.href).href)
+  }
 
   let root: HTMLDivElement | undefined = $state()
   let full = $state(false)
@@ -256,6 +265,11 @@
           <button class="icon" onclick={openOutside} title="Open in your browser" aria-label="Open in your browser"><Icon name="external" size={15} /></button>
         {:else}
           <a class="icon" href={tabUrl} target="_blank" rel="noopener" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="external" size={15} /></a>
+        {/if}
+        {#if shell?.openExternal}
+          <button class="icon" onclick={printOutside} title="Print or save as PDF, in your browser" aria-label="Print or save as PDF"><Icon name="print" size={15} /></button>
+        {:else}
+          <a class="icon" href={printUrl} target="_blank" rel="noopener" title="Print or save as PDF" aria-label="Print or save as PDF"><Icon name="print" size={15} /></a>
         {/if}
       {/if}
       {#if made === 'slides' || made === 'page'}
