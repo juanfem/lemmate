@@ -130,8 +130,11 @@ pub const PRINT_SANDBOX: &str =
 
 /// Opens the print dialog once the page is laid out to be printed: a page when it has loaded, a
 /// deck when reveal.js has laid its slides out as pages (`pdf-ready`, or already there) — with a
-/// fallback, should that never be said.
-const PRINT_SCRIPT: &str = r#"<script>(function(){var done=false;function go(){if(done)return;done=true;setTimeout(function(){window.print()},250)}
+/// fallback, should that never be said. The style keeps the page's colours: browsers print
+/// without backgrounds unless told otherwise, and on a Quarto page that is the tint of a
+/// callout's header, its icon (a background image) and the shading behind code — what reveal.js
+/// already asks for in a deck, a page has to be told.
+const PRINT_SCRIPT: &str = r#"<style>@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style><script>(function(){var done=false;function go(){if(done)return;done=true;setTimeout(function(){window.print()},250)}
 if(document.querySelector(".reveal")){var t=0;(function hook(){var R=window.Reveal;if(R&&R.on){R.on("pdf-ready",go);if(document.querySelector(".pdf-page"))go();return}if(++t<100)setTimeout(hook,100)})();setTimeout(go,15000);return}
 if(document.readyState==="complete")go();else window.addEventListener("load",go)})()</script>"#;
 
@@ -1204,7 +1207,7 @@ mod tests {
         let script = out.find("window.print()").unwrap();
         assert!(out.find("w.write").unwrap() < script && script < out.find("</BODY>").unwrap());
         let bare = String::from_utf8(for_print(b"no body".to_vec())).unwrap();
-        assert!(bare.starts_with("no body<script>"));
+        assert!(bare.starts_with("no body<style>") && bare.contains("print-color-adjust:exact"));
         assert!(PRINT_SANDBOX.starts_with(PAGE_SANDBOX) && PRINT_SANDBOX.ends_with("allow-modals"));
     }
 

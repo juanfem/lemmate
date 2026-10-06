@@ -1,6 +1,8 @@
 // Headless Chrome driver over the DevTools Protocol, for UI smoke tests.
 // Usage: node scripts/cdp.mjs <url> <outdir> [step ...]
 //   shot:<name>      screenshot -> <outdir>/<name>.png
+//   pdf:<name>       print the page as the print dialog would (its @page size, no background
+//                    graphics unless the page forces them) -> <outdir>/<name>.pdf
 //   eval:<js>        Runtime.evaluate (awaits promises), prints result JSON
 //   click:<selector> querySelector(sel).click(), errors if missing
 //   files:<p>[,<p>]  answer the next file picker the page opens with these local files
@@ -91,6 +93,13 @@ async function runStep(cdp, step, outdir) {
       const file = join(outdir, `${arg}.png`);
       writeFileSync(file, Buffer.from(data, 'base64'));
       console.log(`[shot] ${file}`);
+      return;
+    }
+    case 'pdf': {
+      const { data } = await cdp.send('Page.printToPDF', { preferCSSPageSize: true });
+      const file = join(outdir, `${arg}.pdf`);
+      writeFileSync(file, Buffer.from(data, 'base64'));
+      console.log(`[pdf] ${file}`);
       return;
     }
     case 'eval':
