@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, scrollToShow, type TabPane } from '../src/lib/tabmoves.ts'
 import { renderTab, tabNote } from '../src/lib/rendertabs.ts'
 
 let seq = 100
@@ -188,4 +188,15 @@ test('a render opens as a tab beside its note, or in a pane of its own when aske
   // A render beside its note moves out into a pane of its own; one alone in its pane stays.
   assert.deepEqual(shape(placeRender([pane(1, ['a', ra], ra)], 0, 3, 'a', 'pane', fresh)), { panes: ['[a]', `[${ra}]`], focused: 1 })
   assert.deepEqual(shape(placeRender([pane(1, ['a']), pane(2, [ra])], 1, 3, 'a', 'pane', fresh)), { panes: ['[a]', `[${ra}]`], focused: 1 })
+})
+
+test('a tab is scrolled into sight, clear of the cluster that covers the strip end', () => {
+  // A 500px strip whose last 200px are the cluster: 0…300 is what can be seen.
+  assert.equal(scrollToShow(100, 200, 0, 500, 200), 0, 'already in sight')
+  assert.equal(scrollToShow(250, 350, 0, 500, 200), 58, 'under the cluster: scrolled until clear of it')
+  assert.equal(scrollToShow(900, 1000, 0, 500, 200), 708, 'off the edge')
+  assert.equal(scrollToShow(100, 200, 600, 500, 200), 92, 'scrolled past: back to its left')
+  assert.equal(scrollToShow(4, 100, 50, 500, 200), 0, 'never before the start')
+  // Wider than what can be seen: its start wins, so the label is what shows.
+  assert.equal(scrollToShow(400, 800, 0, 500, 200), 392)
 })

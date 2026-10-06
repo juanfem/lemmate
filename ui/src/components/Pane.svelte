@@ -41,7 +41,7 @@
   import { measure } from '../lib/measure.svelte.ts'
   import type { OutlineItem } from '../lib/outline.ts'
   import { unnamedNote } from '../lib/notename.ts'
-  import { clampIndex, drawn, endedOutside, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
+  import { clampIndex, drawn, endedOutside, scrollToShow, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
   import { beginTabDrag, carriesTab, droppedTab, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
 
   let {
@@ -237,6 +237,18 @@
   // Handled in the capture phase on the whole pane, so a tab over the page never reaches the
   // editor underneath — CodeMirror would draw its drop cursor, and take a drop as text.
   let strip: HTMLElement | undefined = $state()
+  // The active tab stays in sight: opening a tab at the end of a long strip, or switching to
+  // one scrolled away, would otherwise leave it off the edge or under the cluster at the end.
+  $effect(() => {
+    const id = pane.active
+    void tabs.length
+    if (!strip || !id) return
+    const tab = [...strip.querySelectorAll<HTMLElement>('.tab')].find((el) => el.dataset.tab === id)
+    if (!tab) return
+    const covered = strip.querySelector<HTMLElement>('.cluster')?.offsetWidth ?? 0
+    const to = scrollToShow(tab.offsetLeft, tab.offsetLeft + tab.offsetWidth, strip.scrollLeft, strip.clientWidth, covered)
+    if (to !== strip.scrollLeft) strip.scrollLeft = to
+  })
   /** The outer thirds of a page split the pane; the middle, like the strip, moves the tab in. */
   const EDGE = 0.3
 
@@ -587,6 +599,9 @@
     gap: 2px;
     padding: 0 0.5rem;
     overflow-x: auto;
+    /* The active tab reaches 1px over the strip's border, and `overflow-x` alone would make
+       that a vertical scroll. */
+    overflow-y: hidden;
     border-bottom: 1px solid var(--border);
     background: var(--panel);
   }

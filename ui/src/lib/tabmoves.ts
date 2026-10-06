@@ -215,3 +215,19 @@ export function placeRender<P extends TabPane>(
   }
   return inNewPane(out, focused, max, tab, fresh)
 }
+
+/** Breathing room left beside a tab scrolled into view, so it does not sit flush on an edge. */
+const SHOW_MARGIN = 8
+
+/**
+ * Where a strip should scroll to so that the tab spanning `left`…`right` (in the strip's
+ * scrolling coordinates) can be seen — or `scroll` itself when it already can be. The strip's
+ * right end, `covered` pixels of it, is the sticky cluster of actions the tabs scroll under: a
+ * tab there is as hidden as one off the edge.
+ */
+export function scrollToShow(left: number, right: number, scroll: number, width: number, covered: number): number {
+  const end = scroll + width - covered
+  if (left < scroll) return Math.max(0, left - SHOW_MARGIN)
+  if (right > end) return Math.max(0, Math.min(left - SHOW_MARGIN, right - (width - covered) + SHOW_MARGIN))
+  return scroll
+}
