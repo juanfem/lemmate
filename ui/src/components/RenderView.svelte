@@ -25,7 +25,7 @@
    * note has been left alone for a few seconds.
    *
    * It renders what the note asks for — the first format its front matter declares — unless
-   * the picker says otherwise. A page (HTML, slides) shows here; a file (PDF, Word) downloads,
+   * the picker says otherwise. A page (HTML, slides) shows here; a file (PDF, Word, PowerPoint) downloads,
    * and the pane says so.
    */
   let {
@@ -65,6 +65,7 @@
     { id: 'revealjs', label: 'Slides (reveal.js)' },
     { id: 'pdf', label: 'PDF — download' },
     { id: 'docx', label: 'Word — download' },
+    { id: 'pptx', label: 'PowerPoint — download' },
   ]
   let choice: RenderFormat | 'auto' = $state((was?.choice as RenderFormat | undefined) ?? 'auto')
 
@@ -133,7 +134,9 @@
   }
   /** A render that was a file rather than a page: what was saved. */
   let saved: { name: string; url: string } | null = $state(null)
-  const KINDS: Record<string, string> = { 'text/html': 'page', 'application/pdf': 'PDF', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word file' }
+  const KINDS: Record<string, string> = { 'text/html': 'page', 'application/pdf': 'PDF', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word file',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint file',
+  }
 
   function save(blob: Blob, name: string) {
     if (saved) URL.revokeObjectURL(saved.url)

@@ -309,7 +309,7 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   `_quarto.yml` is the render's base project, minus its `project:` (no scripts, no output
   directory) and with HTML forced self-contained.
 - HTML is shown in a pane beside the note, in a sandboxed frame with no access to the app's
-  origin; PDF (through Typst), DOCX and reveal.js download.
+  origin; PDF (through Typst), DOCX, PPTX and reveal.js download.
 - A render runs when asked; an edit marks it stale. An opt-in *Auto* (per device) renders a
   page or deck again after 5 s without an edit — never a PDF or DOCX, which would download.
 

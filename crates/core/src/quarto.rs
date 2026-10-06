@@ -27,6 +27,9 @@ pub enum Format {
     /// PDF through Typst, which Quarto bundles; LaTeX is not needed.
     Pdf,
     Docx,
+    /// PowerPoint, through pandoc's writer: slides from the note's headings and `---` breaks,
+    /// without anything reveal.js draws itself.
+    Pptx,
     /// reveal.js slides, self-contained like `Html`.
     RevealJs,
 }
@@ -37,6 +40,7 @@ impl Format {
             "html" => Format::Html,
             "pdf" | "typst" => Format::Pdf,
             "docx" => Format::Docx,
+            "pptx" => Format::Pptx,
             "revealjs" | "slides" => Format::RevealJs,
             _ => return None,
         })
@@ -47,6 +51,7 @@ impl Format {
             Format::Html => "html",
             Format::Pdf => "typst",
             Format::Docx => "docx",
+            Format::Pptx => "pptx",
             Format::RevealJs => "revealjs",
         }
     }
@@ -55,6 +60,7 @@ impl Format {
             Format::Html | Format::RevealJs => "html",
             Format::Pdf => "pdf",
             Format::Docx => "docx",
+            Format::Pptx => "pptx",
         }
     }
     pub fn mime(self) -> &'static str {
@@ -62,6 +68,7 @@ impl Format {
             Format::Html | Format::RevealJs => "text/html; charset=utf-8",
             Format::Pdf => "application/pdf",
             Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }
     }
 }
@@ -83,7 +90,7 @@ fn declared_formats(text: &str) -> Vec<String> {
 
 /// What "Render with Quarto" makes of a note when nobody says otherwise (`"auto"`): the first
 /// format its front matter declares that a render can produce — a deck as slides, `pdf` or
-/// `typst` as a PDF, `docx` as a Word file — else a plain page.
+/// `typst` as a PDF, `docx` as a Word file, `pptx` as a PowerPoint one — else a plain page.
 pub fn declared_format(text: &str) -> Format {
     declared_formats(text)
         .iter()
@@ -92,6 +99,7 @@ pub fn declared_format(text: &str) -> Format {
             "html" => Some(Format::Html),
             "pdf" | "typst" => Some(Format::Pdf),
             "docx" => Some(Format::Docx),
+            "pptx" => Some(Format::Pptx),
             _ => None,
         })
         .unwrap_or(Format::Html)
@@ -467,7 +475,7 @@ fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)], guard: &Path) ->
         }
         _ => Mapping::new(),
     };
-    for name in ["html", "revealjs", "typst", "docx"] {
+    for name in ["html", "revealjs", "typst", "docx", "pptx"] {
         let mut options = match format.remove(name) {
             Some(Value::Mapping(m)) => m,
             _ => Mapping::new(),
@@ -1122,8 +1130,15 @@ local function raw(el)
   if (el.format:find('html') or el.format:find('revealjs')) and unsafe_raw(el.text) then return {} end
 end
 
+-- Not a guard: the one filter of ours every render runs, so the place for this too. A reveal.js
+-- pause has nothing to become in PowerPoint, and pandoc writes it as three dots on the slide.
+local function pause(el)
+  if FORMAT == 'pptx' and pandoc.utils.stringify(el) == '. . .' then return {} end
+end
+
 return {
   {
+    Para = pause,
     RawInline = raw,
     RawBlock = raw,
     Image = function(img)
@@ -1189,6 +1204,7 @@ mod tests {
             Format::Pdf
         );
         assert_eq!(declared_format("---\nformat: docx\n---\n"), Format::Docx);
+        assert_eq!(declared_format("---\nformat: [pptx, revealjs]\n---\n"), Format::Pptx);
         assert_eq!(
             declared_format("---\nformat: [beamer, typst]\n---\n"),
             Format::Pdf,
@@ -1363,7 +1379,7 @@ mod tests {
 
     /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary.
     #[test]
-    fn renders_html_pdf_and_docx_without_running_code() {
+    fn renders_html_pdf_docx_and_pptx_without_running_code() {
         let Some(bin) = quarto() else {
             eprintln!("skipped: set LEMMATE_TEST_QUARTO");
             return;
@@ -1392,6 +1408,17 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
         let (docx, _) = render("dir/Talk.qmd", md, Format::Docx, &atts, read, &opts).unwrap();
         assert!(docx.starts_with(b"PK"));
+        let deck =
+            "---\ntitle: Deck\n---\n\n## One\n\nFirst slide.\n\n. . .\n\nLater.\n\n## Two\n\n![[pic.png]]\n";
+        let (pptx, mime) = render("dir/Talk.qmd", deck, Format::Pptx, &atts, read, &opts).unwrap();
+        assert!(mime.contains("presentationml"));
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
+        let slides = zip.file_names().filter(|n| n.starts_with("ppt/slides/slide")).count();
+        assert_eq!(slides, 3, "a title slide and one per heading");
+        assert!(zip.file_names().any(|n| n.starts_with("ppt/media/")), "the image is in the deck");
+        let mut one = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("ppt/slides/slide2.xml").unwrap(), &mut one).unwrap();
+        assert!(one.contains("Later.") && !one.contains(". . ."), "a pause is dropped, not shown: {one}");
     }
 
     /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary. A theme named in front
@@ -1520,7 +1547,7 @@ mod tests {
         assert_eq!(v["filters"][0]["path"], "/w/guard.lua");
         assert_eq!(v["filters"][0]["at"], "post-render");
         assert!(v["format"]["html"].get("include-in-header").is_none());
-        for f in ["html", "revealjs", "typst", "docx"] {
+        for f in ["html", "revealjs", "typst", "docx", "pptx"] {
             assert_eq!(v["format"][f]["from"], READER, "{f}");
         }
     }

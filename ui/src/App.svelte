@@ -939,6 +939,7 @@
     { id: 'render-pdf', label: 'Render with Quarto as PDF', run: () => renderActive('pdf') },
     { id: 'render-docx', label: 'Render with Quarto as Word document', run: () => renderActive('docx') },
     { id: 'render-slides', label: 'Render with Quarto as slides (reveal.js)', run: () => renderActive('revealjs') },
+    { id: 'render-pptx', label: 'Render with Quarto as PowerPoint', run: () => renderActive('pptx') },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },

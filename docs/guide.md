@@ -878,9 +878,9 @@ becomes its alt text — and metadata blocks inside the note are not read.
 **Render with Quarto** — in the command palette, or the page icon on the strip of a `.qmd`
 note — renders the note **the way its front matter says**: the first
 format it declares that a render can make. A deck (`format: revealjs`) or a page (`html`) opens
-as a tab beside the note, in the same pane; a `pdf` (or `typst`) or `docx` note is saved to your downloads, and
+as a tab beside the note, in the same pane; a `pdf` (or `typst`), `docx` or `pptx` note is saved to your downloads, and
 the pane says so. The picker on the pane's bar renders it another way — as a plain page, as
-slides, or as a PDF or Word file to download — whatever the note declares. **Full screen** (the four corners)
+slides, or as a PDF, Word or PowerPoint file to download — whatever the note declares. **Full screen** (the four corners)
 fills the screen with the render — the browser's own full screen where it has one, the whole
 app window on an iPhone — and stays on the slide you were on; the **×** in its corner (or Esc)
 brings the pane back. **Open outside** (the box with an arrow) opens the same render in a
@@ -914,12 +914,19 @@ it runs when you ask: an edit afterwards marks the pane *Changed since this rend
 where you had scrolled to. Tick **Auto** on the bar of a page or deck to have it done for you:
 the pane renders again once the note has gone 5 seconds without a change, so it follows your
 writing without running Quarto on every keystroke. The choice is remembered on this device; a
-PDF or Word render never repeats by itself, and a note Quarto refuses is tried again only after
+PDF, Word or PowerPoint render never repeats by itself, and a note Quarto refuses is tried again only after
 your next edit. If Quarto refuses the note, the pane shows its message.
 
 PDFs are made through the Typst that Quarto bundles — no LaTeX needed — so a note's `pdf:`
 options that only LaTeX understands (a `documentclass`, say) do not apply; Typst's do. The
-palette's **Render with Quarto as PDF / Word document / slides** save a file directly.
+palette's **Render with Quarto as PDF / Word document / slides / PowerPoint** save a file directly.
+
+**PowerPoint** comes from pandoc's own writer, so it suits plain decks: a slide per `##`
+heading (or `---` break), a title slide from the front matter, images, tables, code, and
+`:::: {.columns}` as a two-column slide. `::: {.notes}` becomes the slide's speaker notes. What
+reveal.js draws itself does not carry over: fragments and `.incremental` lists show all at once,
+a `. . .` pause is dropped, and slide backgrounds, themes and `.smaller` are ignored — a
+`reference-doc:` under `format: pptx:` is how to style it instead.
 
 What goes in:
 
@@ -957,7 +964,7 @@ desktop app if it was copied in while the app was closed.
 the desktop app and `lemmate serve`, and `PATH` otherwise; without one, rendering answers
 **501** and the pane says so. The Docker image includes it. `POST
 /api/v1/vaults/{vault}/notes/{id}/render` with `{"format": "html" | "pdf" | "docx" |
-"revealjs"}` is the endpoint behind all of it; a render Quarto rejects answers **422** with its
+"pptx" | "revealjs"}` is the endpoint behind all of it; a render Quarto rejects answers **422** with its
 message.
 
 **Nothing in a note runs or reaches out.** A shared vault means anyone who can edit a note
