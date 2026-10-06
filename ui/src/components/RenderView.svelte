@@ -96,12 +96,49 @@
   }
   /**
    * The same render in a tab of its own, laid out to be printed and opening the print dialog by
-   * itself (`quarto::for_print`) — *Save as PDF* there keeps what is on screen, a deck a slide to
-   * a page. Not in the frame: printing from it would mean letting every render open dialogs.
+   * itself (`quarto::for_print`) — *Save as PDF* there keeps what is on screen. Not in the frame:
+   * printing from it would mean letting every render open dialogs. A page prints this way; so
+   * does a deck where the server cannot make its PDF itself.
    */
   let printUrl = $derived(`${tabUrl}&print-pdf`)
   function printOutside() {
     shell?.openExternal?.(new URL(printUrl, location.href).href)
+  }
+
+  /**
+   * A deck's PDF, made by the server: its print layout printed by headless Chrome on pages the
+   * slides' size (`quarto::Format::SlidesPdf`). The print dialog cannot be trusted with that — on
+   * macOS it puts the slides on A4. Where the server has no Chrome (501), the pane offers the
+   * dialog instead: a link the reader follows, since a tab opened after the request would be
+   * taken for a popup.
+   */
+  let pdfBusy = $state(false)
+  let pdfProblem: string | null = $state(null)
+  let printInstead = $state(false)
+  async function saveSlidesPdf() {
+    if (pdfBusy) return
+    pdfBusy = true
+    pdfProblem = null
+    printInstead = false
+    try {
+      const r = await api.render(session.id, noteId, 'slides-pdf')
+      if (r.status === 501) {
+        printInstead = true
+      } else if (!r.ok) {
+        pdfProblem = (await r.text()).trim() || `Making the PDF failed (${r.status}).`
+      } else {
+        const url = URL.createObjectURL(await r.blob())
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${displayName(session.pathOf(noteId) ?? 'note')}.pdf`.replace(/[/\\]/gu, '-')
+        a.click()
+        setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      }
+    } catch (e) {
+      pdfProblem = `Making the PDF failed: ${String(e)}`
+    } finally {
+      pdfBusy = false
+    }
   }
 
   let root: HTMLDivElement | undefined = $state()
@@ -250,6 +287,8 @@
     <span class="state">
       {#if busy}
         Rendering with Quarto…
+      {:else if pdfBusy}
+        Making the PDF…
       {:else if error}
         Not rendered
       {:else if stale}
@@ -266,7 +305,9 @@
         {:else}
           <a class="icon" href={tabUrl} target="_blank" rel="noopener" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="external" size={15} /></a>
         {/if}
-        {#if shell?.openExternal}
+        {#if made === 'slides'}
+          <button class="icon" onclick={saveSlidesPdf} disabled={pdfBusy} title="Save as PDF, a slide to a page" aria-label="Save as PDF"><Icon name="print" size={15} /></button>
+        {:else if shell?.openExternal}
           <button class="icon" onclick={printOutside} title="Print or save as PDF, in your browser" aria-label="Print or save as PDF"><Icon name="print" size={15} /></button>
         {:else}
           <a class="icon" href={printUrl} target="_blank" rel="noopener" title="Print or save as PDF" aria-label="Print or save as PDF"><Icon name="print" size={15} /></a>
@@ -282,6 +323,20 @@
   </div>
   {#if error}
     <pre class="error">{error}</pre>
+  {/if}
+  {#if pdfProblem}
+    <pre class="error">{pdfProblem}</pre>
+  {/if}
+  {#if printInstead}
+    <p class="instead">
+      This server cannot make the PDF itself.
+      {#if shell?.openExternal}
+        <button class="link" onclick={() => ((printInstead = false), printOutside())}>Print it from your browser</button>
+      {:else}
+        <a href={printUrl} target="_blank" rel="noopener" onclick={() => (printInstead = false)}>Print it from your browser</a>
+      {/if}
+      instead — choose <em>Save as PDF</em>, and set the paper to the slides' shape if it offers one.
+    </p>
   {/if}
   {#if saved}
     <div class="saved">
@@ -436,6 +491,24 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     padding: 0.1rem 0.3rem;
+  }
+  .instead {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--ui);
+    font-size: 0.75rem;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .instead a,
+  .instead .link {
+    color: var(--accent);
+    font: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
   }
   .saved {
     padding: 1.2rem 1rem;

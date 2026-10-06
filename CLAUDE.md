@@ -113,6 +113,13 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   rather than on `PATH` — set it to `/usr/bin/pandoc` and all three run; the Quarto unit test
   gates on `LEMMATE_TEST_QUARTO` the same way. The server and relay render tests ask the same
   availability question the code does, so with quarto on `PATH` they render for real.
+- `quarto install chrome-headless-shell` has put Chrome for Testing in
+  `~/.local/share/quarto/chrome-headless-shell/`, which `chrome::chrome_bin` finds, so the deck
+  PDF tests (`chrome::`, `quarto::…a_deck_prints…`) run here; they skip where no Chrome is found.
+  Learned: `--print-to-pdf` prints at load whatever `--virtual-time-budget` says (hence DevTools);
+  a refused navigation swaps in Chrome's error page; Quarto's installer needs `unzip`; and under
+  Docker Chrome's sandbox cannot start (no user namespaces) — the image sets
+  `LEMMATE_CHROME_NO_SANDBOX`.
 - Quarto quirks, learned here: a `.md` with code cells is refused (the temp copy is always
   `.qmd`); `--output NAME` quietly stops HTML embedding its resources (read the default output
   instead); Typst will not read files outside the project root (hence the `_quarto.yml`); and

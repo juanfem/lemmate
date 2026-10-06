@@ -310,6 +310,11 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   directory) and with HTML forced self-contained.
 - HTML is shown in a pane beside the note, in a sandboxed frame with no access to the app's
   origin; PDF (through Typst), DOCX, PPTX and reveal.js download.
+- A deck also prints to PDF as it shows (`slides-pdf`): its reveal.js print layout, printed by
+  headless Chrome on pages the slides' size, since a print dialog picks its own paper. The
+  deck's script runs there, so every request it makes is held: it gets itself and the MathJax
+  CDN, nothing else (`crates/core/src/chrome.rs`). Without a Chrome the app falls back to the
+  browser's print dialog.
 - A render runs when asked; an edit marks it stale. An opt-in *Auto* (per device) renders a
   page or deck again after 5 s without an edit — never a PDF or DOCX, which would download.
 

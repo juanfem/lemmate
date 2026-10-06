@@ -940,6 +940,7 @@
     { id: 'render-docx', label: 'Render with Quarto as Word document', run: () => renderActive('docx') },
     { id: 'render-slides', label: 'Render with Quarto as slides (reveal.js)', run: () => renderActive('revealjs') },
     { id: 'render-pptx', label: 'Render with Quarto as PowerPoint', run: () => renderActive('pptx') },
+    { id: 'render-slides-pdf', label: 'Render with Quarto as slides PDF (a slide to a page)', run: () => renderActive('slides-pdf') },
     { id: 'bookmark', label: session && active && session.isBookmarked('note', session.pathOf(active) ?? '') ? 'Remove bookmark' : 'Bookmark this note', shortcut: 'Ctrl+Shift+B', run: bookmarkActive },
     { id: 'rename', label: 'Rename / move note', run: renameActive },
     { id: 'delete', label: 'Move note to trash', run: deleteActive },
@@ -1236,9 +1237,10 @@
     if (!s || !active) return
     const id = active
     const r = await api.render(s.id, id, format)
-    if (r.status === 501) return void ask({ kind: 'confirm', title: 'Rendering needs Quarto, and there is none here — or the server has it switched off.', confirmLabel: 'OK' })
+    const needs = format === 'slides-pdf' ? 'Quarto and a Chrome to print with' : 'Quarto'
+    if (r.status === 501) return void ask({ kind: 'confirm', title: `Rendering needs ${needs}, and there is none here — or the server has it switched off.`, confirmLabel: 'OK' })
     if (!r.ok) return void ask({ kind: 'confirm', title: `Rendering failed: ${(await r.text()).trim() || r.status}`, confirmLabel: 'OK' })
-    const ext = format === 'revealjs' ? 'html' : format
+    const ext = format === 'revealjs' ? 'html' : format === 'slides-pdf' ? 'pdf' : format
     await saveResponse(r, `${displayName(s.pathOf(id) ?? 'note')}.${ext}`)
   }
 

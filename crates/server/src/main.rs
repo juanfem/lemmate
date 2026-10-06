@@ -54,6 +54,11 @@ struct Config {
     /// who can edit a note should not be able to do that.
     #[arg(long, env = "LEMMATE_DISABLE_QUARTO", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     disable_quarto: bool,
+    /// Chrome or chrome-headless-shell, for a deck's PDF on pages the slides' size (default:
+    /// Quarto's `quarto install chrome-headless-shell`, else a Chrome on PATH). Without one the
+    /// app prints decks through the browser's own dialog.
+    #[arg(long, env = "LEMMATE_CHROME")]
+    chrome: Option<PathBuf>,
     /// Purge attachment blobs that have been unreferenced for this many days.
     #[arg(long, env = "LEMMATE_ATTACHMENT_GRACE_DAYS", default_value_t = 30)]
     attachment_grace_days: u64,
@@ -143,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         pandoc: cfg.pandoc.clone(),
         quarto: cfg.quarto.clone(),
         quarto_enabled: !cfg.disable_quarto,
+        chrome: cfg.chrome.clone(),
         password_login: !cfg.disable_password_login,
         oidc: oidc.clone(),
         auth: if cfg.no_auth {

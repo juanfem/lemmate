@@ -11,6 +11,7 @@
 //! No UI, no network I/O beyond types; the server and native shells wire those up.
 
 pub mod attachments;
+pub mod chrome;
 pub mod client;
 pub mod credentials;
 pub mod daily;

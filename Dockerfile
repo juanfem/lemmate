@@ -105,6 +105,29 @@ RUN if [ "$WITH_QUARTO" = 1 ]; then \
         && ln -s "$(find "/opt/quarto-${QUARTO_VERSION}/bin/tools" -type f -name pandoc | head -n1)" /usr/local/bin/pandoc \
         && quarto --version && pandoc --version | head -n1; \
     fi
+# Headless Chrome, for a deck's PDF on pages the slides' size (SPEC §5.6): the print dialog
+# picks the paper itself — A4 on macOS — so the server prints decks instead. Quarto installs
+# Google's chrome-headless-shell (about 250 MB with the libraries it links and two font
+# families); there is none for linux/arm64, where the step is skipped and the app prints decks
+# through the browser's dialog, as it does with `--build-arg WITH_CHROME=0`. The container is
+# Chrome's sandbox: it gets no user namespaces under Docker's default seccomp profile, hence
+# LEMMATE_CHROME_NO_SANDBOX. A deck's requests are refused all the same (crates/core/src/chrome.rs).
+ARG WITH_CHROME=1
+RUN if [ "$WITH_QUARTO" = 1 ] && [ "$WITH_CHROME" = 1 ] && [ "$(dpkg --print-architecture)" = amd64 ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+             libasound2 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 libdrm2 libexpat1 \
+             libgbm1 libglib2.0-0 libnspr4 libnss3 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
+             libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 \
+             fonts-liberation fonts-dejavu-core unzip \
+        && rm -rf /var/lib/apt/lists/* \
+        && XDG_DATA_HOME=/opt/share quarto install chrome-headless-shell --no-prompt \
+        && ln -s "$(find /opt/share/quarto/chrome-headless-shell -type f -name chrome-headless-shell | head -n1)" \
+             /usr/local/bin/chrome-headless-shell \
+        && chrome-headless-shell --version; \
+    fi
+ENV LEMMATE_CHROME_NO_SANDBOX=1
+
 # Quarto keeps caches under the user's home, and the container may run as a uid with none
 # (docker-compose `user:`); /tmp is writable by any of them.
 ENV XDG_CACHE_HOME=/tmp/cache XDG_DATA_HOME=/tmp/share

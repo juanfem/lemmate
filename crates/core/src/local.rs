@@ -1067,7 +1067,7 @@ pub async fn printable(response: axum::response::Response) -> axum::response::Re
         header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static(crate::quarto::PRINT_SANDBOX),
     );
-    axum::response::Response::from_parts(parts, crate::quarto::for_print(bytes.to_vec()).into())
+    axum::response::Response::from_parts(parts, crate::quarto::for_print(bytes.to_vec(), true).into())
 }
 
 /// A render as a page of its own, sandboxed by its headers (see the server's `render_page`).
@@ -1188,7 +1188,11 @@ async fn render_note(
     let view = body.view;
     let opts = crate::quarto::RenderOptions { viewing: view, ..Default::default() };
     let rendered = tokio::task::spawn_blocking(move || {
-        if !crate::quarto::quarto_available(None) {
+        // A deck's PDF also needs a Chrome to print it; without one the UI falls back to the
+        // browser's print dialog, as it does without Quarto.
+        if !crate::quarto::quarto_available(None)
+            || (format == crate::quarto::Format::SlidesPdf && !crate::chrome::chrome_available(None))
+        {
             return Ok(None);
         }
         let proj = crate::projection::Projection::new(root);

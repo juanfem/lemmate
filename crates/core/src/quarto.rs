@@ -32,6 +32,9 @@ pub enum Format {
     Pptx,
     /// reveal.js slides, self-contained like `Html`.
     RevealJs,
+    /// The reveal.js deck printed to PDF the way it shows, a slide to a page the slides' size:
+    /// rendered as [`Format::RevealJs`], then printed by headless Chrome ([`crate::chrome`]).
+    SlidesPdf,
 }
 
 impl Format {
@@ -42,6 +45,7 @@ impl Format {
             "docx" => Format::Docx,
             "pptx" => Format::Pptx,
             "revealjs" | "slides" => Format::RevealJs,
+            "slides-pdf" => Format::SlidesPdf,
             _ => return None,
         })
     }
@@ -52,13 +56,13 @@ impl Format {
             Format::Pdf => "typst",
             Format::Docx => "docx",
             Format::Pptx => "pptx",
-            Format::RevealJs => "revealjs",
+            Format::RevealJs | Format::SlidesPdf => "revealjs",
         }
     }
     pub fn extension(self) -> &'static str {
         match self {
             Format::Html | Format::RevealJs => "html",
-            Format::Pdf => "pdf",
+            Format::Pdf | Format::SlidesPdf => "pdf",
             Format::Docx => "docx",
             Format::Pptx => "pptx",
         }
@@ -66,7 +70,7 @@ impl Format {
     pub fn mime(self) -> &'static str {
         match self {
             Format::Html | Format::RevealJs => "text/html; charset=utf-8",
-            Format::Pdf => "application/pdf",
+            Format::Pdf | Format::SlidesPdf => "application/pdf",
             Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }
@@ -156,7 +160,12 @@ pub const PRINT_SANDBOX: &str =
 /// 1920×1080 display — the usual projector, and the same PDF whatever window prints it.
 const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style><script>(function () {
   var done = false
-  function go() { if (done) return; done = true; setTimeout(function () { window.print() }, 250) }
+  function go() {
+    if (done) return
+    done = true
+    document.documentElement.setAttribute('data-lemmate-printed', '')
+    if (__DIALOG__) setTimeout(function () { window.print() }, 250)
+  }
   if (!document.querySelector('.reveal')) {
     if (document.readyState === 'complete') go(); else window.addEventListener('load', go)
     return
@@ -241,16 +250,19 @@ const PRINT_SCRIPT: &str = r##"<style>@media print{*{-webkit-print-color-adjust:
   setTimeout(finish, 15000)
 })()</script>"##;
 
-/// A render opened to be saved as a PDF: the page with the browser's print dialog opening by
-/// itself, where *Save as PDF* is a destination. Its URL carries `?print-pdf`, which is also what
-/// turns a reveal.js deck into its print layout, a slide to a page — the browser prints what the
-/// render shows rather than Quarto making a PDF of its own (that is [`Format::Pdf`], through
-/// Typst, which knows nothing of slides).
-pub fn for_print(page: Vec<u8>) -> Vec<u8> {
+/// A render laid out to be printed, as it shows: the page with the script above, opened under a
+/// URL with `?print-pdf`, which is also what turns a reveal.js deck into its print layout, a slide
+/// to a page. With `dialog`, the browser's print dialog opens by itself once it is laid out (a page
+/// opened in a tab of its own); without, the document is only marked `data-lemmate-printed` for
+/// [`crate::chrome::print_pdf`] to wait on ([`Format::SlidesPdf`]). Either way it is what the
+/// render shows, not Quarto's own PDF ([`Format::Pdf`], through Typst, which knows nothing of
+/// slides).
+pub fn for_print(page: Vec<u8>, dialog: bool) -> Vec<u8> {
+    let script = PRINT_SCRIPT.replace("__DIALOG__", if dialog { "true" } else { "false" });
     let at = page.windows(7).rposition(|w| w.eq_ignore_ascii_case(b"</body>")).unwrap_or(page.len());
-    let mut out = Vec::with_capacity(page.len() + PRINT_SCRIPT.len());
+    let mut out = Vec::with_capacity(page.len() + script.len());
     out.extend_from_slice(&page[..at]);
-    out.extend_from_slice(PRINT_SCRIPT.as_bytes());
+    out.extend_from_slice(script.as_bytes());
     out.extend_from_slice(&page[at..]);
     out
 }
@@ -353,11 +365,13 @@ pub struct RenderOptions {
     /// iPhone the slide then turned without the screen showing it. So a deck made for viewing
     /// keeps its URL alone; one saved to a file keeps its slide links.
     pub viewing: bool,
+    /// The Chrome a [`Format::SlidesPdf`] is printed with; `None` → [`crate::chrome::chrome_bin`].
+    pub chrome: Option<PathBuf>,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { quarto: None, timeout: Duration::from_secs(120), viewing: false }
+        Self { quarto: None, timeout: Duration::from_secs(120), viewing: false, chrome: None }
     }
 }
 
@@ -479,13 +493,18 @@ fn render_in(
         .status;
     // Named by Quarto after the source, beside it: asking for another name with `--output`
     // quietly stops HTML from embedding its resources.
-    let out = project.join(rel.with_extension(format.extension()));
+    let made = if format == Format::SlidesPdf { "html" } else { format.extension() };
+    let out = project.join(rel.with_extension(made));
     if !status.success() || !out.is_file() {
         let stderr = std::fs::read_to_string(&log).unwrap_or_default();
         return Err(Error::Export(tail(&stderr)));
     }
     let bytes = std::fs::read(out)?;
     let bytes = match (opts.viewing, format) {
+        (_, Format::SlidesPdf) => {
+            let print = crate::chrome::PrintOptions { chrome: opts.chrome.clone(), timeout: opts.timeout };
+            crate::chrome::print_pdf(&for_print(bytes, false), &print)?
+        }
         (true, Format::Html | Format::RevealJs) => with_storage(bytes),
         _ => bytes,
     };
@@ -1306,10 +1325,13 @@ mod tests {
     #[test]
     fn a_page_to_print_opens_the_dialog_from_the_end_of_its_body() {
         let page = b"<html><body><script>w.write('</body>')</script></BODY></html>".to_vec();
-        let out = String::from_utf8(for_print(page)).unwrap();
+        let page_copy = page.clone();
+        let out = String::from_utf8(for_print(page, true)).unwrap();
         let script = out.find("window.print()").unwrap();
         assert!(out.find("w.write").unwrap() < script && script < out.find("</BODY>").unwrap());
-        let bare = String::from_utf8(for_print(b"no body".to_vec())).unwrap();
+        let quiet = String::from_utf8(for_print(page_copy, false)).unwrap();
+        assert!(quiet.contains("if (false) setTimeout") && !quiet.contains("__DIALOG__"));
+        let bare = String::from_utf8(for_print(b"no body".to_vec(), true)).unwrap();
         assert!(bare.starts_with("no body<style>") && bare.contains("print-color-adjust:exact"));
         assert!(PRINT_SANDBOX.starts_with(PAGE_SANDBOX) && PRINT_SANDBOX.ends_with("allow-modals"));
     }
@@ -1562,6 +1584,41 @@ mod tests {
         let mut one = String::new();
         std::io::Read::read_to_string(&mut zip.by_name("ppt/slides/slide2.xml").unwrap(), &mut one).unwrap();
         assert!(one.contains("Later.") && !one.contains(". . ."), "a pause is dropped, not shown: {one}");
+    }
+
+    /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary and a Chrome is found. The
+    /// deck comes back as a PDF on pages the slides' shape, one per slide, laid out by reveal.js
+    /// and our print script — which numbered them as the deck asks — not by a print dialog.
+    #[test]
+    fn a_deck_prints_to_pdf_on_pages_the_shape_of_its_slides() {
+        let Some(bin) = quarto() else {
+            eprintln!("skipped: set LEMMATE_TEST_QUARTO");
+            return;
+        };
+        if !crate::chrome::chrome_available(None) {
+            eprintln!("skipped: no Chrome");
+            return;
+        }
+        let opts = RenderOptions { quarto: Some(bin), ..Default::default() };
+        let md = "---\ntitle: Deck\nformat:\n  revealjs:\n    width: 1280\n    height: 720\n    \
+                  slide-number: c/t\n    footer: A footer\n---\n\n## One\n\nFirst.\n\n## Two\n\nSecond.\n";
+        let (pdf, mime) = render("Deck.qmd", md, Format::SlidesPdf, &[], |_| None, &opts).unwrap();
+        assert_eq!(mime, "application/pdf");
+        assert!(pdf.starts_with(b"%PDF"));
+        let text = String::from_utf8_lossy(&pdf);
+        let boxes: Vec<(f64, f64)> = text
+            .match_indices("/MediaBox [")
+            .filter_map(|(at, m)| {
+                let rest = &text[at + m.len()..];
+                let nums: Vec<f64> =
+                    rest[..rest.find(']')?].split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                (nums.len() == 4).then(|| (nums[2] - nums[0], nums[3] - nums[1]))
+            })
+            .collect();
+        assert_eq!(boxes.len(), 3, "a title slide and two more: {boxes:?}");
+        for (w, h) in boxes {
+            assert!((w / h - 16.0 / 9.0).abs() < 0.01, "a 16:9 page, not paper: {w}×{h}");
+        }
     }
 
     /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary. A theme named in front

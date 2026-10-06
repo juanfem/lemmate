@@ -24,6 +24,8 @@ either way. From `crates/server/src/main.rs`:
 | `--pandoc PATH` | `LEMMATE_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
 | `--quarto PATH` | `LEMMATE_QUARTO` | quarto binary for *Render with Quarto* (default: on `PATH`; renders answer 501 without it) |
 | `--disable-quarto` | `LEMMATE_DISABLE_QUARTO` | off — set it to refuse renders even with quarto installed |
+| `--chrome PATH` | `LEMMATE_CHROME` | Chrome for a deck's PDF (default: Quarto's `chrome-headless-shell`, else a Chrome on `PATH`; without one the app prints decks through the browser's dialog) |
+| — | `LEMMATE_CHROME_NO_SANDBOX` | off; the image sets it — Chrome's own sandbox needs user namespaces, which a container lacks |
 | `--secure-cookies` | `LEMMATE_SECURE_COOKIES` | off |
 | `--snapshot-every-updates <N>` | `LEMMATE_SNAPSHOT_EVERY_UPDATES` | `500` |
 | `--snapshot-every-minutes <N>` | `LEMMATE_SNAPSHOT_EVERY_MINUTES` | `10` |
@@ -98,6 +100,12 @@ sha256 pinned in the Dockerfile before it is unpacked, so another release means
 `--build-arg QUARTO_VERSION=…` *and* the matching `QUARTO_SHA256_AMD64` (or `…_ARM64`) from that
 release's `quarto-<version>-checksums.txt`. PDF export through pandoc still needs a LaTeX engine,
 which is not included; Quarto's PDF does not.
+
+The image also has headless Chrome — Google's chrome-headless-shell, installed by Quarto, with
+the libraries and two font families it needs, about 250 MB more — which prints a deck to PDF on
+pages the size of its slides. `--build-arg WITH_CHROME=0` leaves it out, and the app then prints
+decks through the browser's own dialog. There is no chrome-headless-shell for linux/arm64, so
+arm64 images go without.
 
 Outside the image, use pandoc's own release (or Quarto's bundled one) rather than a Debian or
 Ubuntu package: those are built without embedded data files, and under the `--sandbox` every
@@ -364,6 +372,14 @@ the output, and Quarto honours both. On a shared server that means anyone who ca
 can run Lua and read files as the server's user, inside the container. If that is more than
 you want to allow, set `LEMMATE_DISABLE_QUARTO=true` (or build without Quarto, above): renders
 then answer 501 and the app says rendering is unavailable.
+
+A deck's PDF runs the deck's JavaScript — written by whoever wrote the note — in headless Chrome
+on the server, without Chrome's own sandbox inside a container. Every request the page makes is
+held and refused unless it is the deck itself or MathJax from `cdn.jsdelivr.net`: no files, no
+other site, nothing on the server's network or its loopback, no navigating away; other host
+names do not even resolve, and each run gets a fresh profile and a time limit. What is left is
+Chrome itself as attack surface for anyone who can edit a note; build with `WITH_CHROME=0` if
+that is more than you want.
 
 **Other things worth doing:**
 

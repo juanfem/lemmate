@@ -44,6 +44,9 @@ pub struct ServerOptions {
     /// matter, which can run Lua filters and pull files into the output — on this host, at the
     /// say-so of anyone who can edit a note. Off, renders answer 501 as if quarto were missing.
     pub quarto_enabled: bool,
+    /// Chrome for a deck's PDF (`quarto::Format::SlidesPdf`); `None` → `chrome::chrome_bin`'s
+    /// search. Without one that render answers 501, and the app prints through the browser.
+    pub chrome: Option<std::path::PathBuf>,
     /// Email + password sign-in (SPEC §11.1). Off, accounts come only from `oidc`.
     pub password_login: bool,
     /// An OpenID Connect provider to sign in with.
@@ -61,6 +64,7 @@ impl Default for ServerOptions {
             pandoc: None,
             quarto: None,
             quarto_enabled: true,
+            chrome: None,
             password_login: true,
             oidc: None,
         }
@@ -1560,17 +1564,25 @@ async fn render_note(
     };
     let blobs = state.attachments.clone();
     let bin = state.options.quarto.clone();
+    let chrome = state.options.chrome.clone();
     let path = row.path.clone();
     let view = body.view;
     let _slot = render_slot(&state).await?;
     let rendered = tokio::task::spawn_blocking(move || {
-        if !lemmate_core::quarto::quarto_available(bin.as_deref()) {
+        if !lemmate_core::quarto::quarto_available(bin.as_deref())
+            || (format == lemmate_core::quarto::Format::SlidesPdf
+                && !lemmate_core::chrome::chrome_available(chrome.as_deref()))
+        {
             return Ok(None);
         }
         let paths: Vec<String> = entries.keys().cloned().collect();
         let read = |p: &str| entries.get(p).and_then(|hash| blobs.get(vault, hash).ok().flatten());
-        let opts =
-            lemmate_core::quarto::RenderOptions { quarto: bin.clone(), viewing: view, ..Default::default() };
+        let opts = lemmate_core::quarto::RenderOptions {
+            quarto: bin.clone(),
+            viewing: view,
+            chrome: chrome.clone(),
+            ..Default::default()
+        };
         lemmate_core::quarto::render(&path, &text, format, &paths, read, &opts).map(Some)
     })
     .await
