@@ -34,3 +34,15 @@ test('wikilink rewrite mirrors the Rust rules', async () => {
   assert.equal(rewriteWikilinks('| [[Plan\\|the plan]] |', 'Projects/Plan.md', 'Archive/Roadmap.md'), '| [[Roadmap\\|the plan]] |')
   assert.equal(rewriteWikilinks('nothing', 'a.md', 'b.md'), null)
 })
+
+test('a new wikilink names the note alone until another note shares the name', async () => {
+  const { wikilinkTarget } = await import('../src/lib/links.ts')
+  const paths = ['Projects/Plan.md', 'Archive/Plan.md', 'Ideas.md', 'Talks/Deck.qmd', 'Deck.md']
+  assert.equal(wikilinkTarget('Ideas.md', paths), 'Ideas')
+  assert.equal(wikilinkTarget('Projects/Plan.md', paths), 'Projects/Plan')
+  assert.equal(wikilinkTarget('Archive/Plan.md', paths), 'Archive/Plan')
+  // `.md` and `.qmd` share a name the way a link spells it.
+  assert.equal(wikilinkTarget('Talks/Deck.qmd', paths), 'Talks/Deck')
+  assert.equal(wikilinkTarget('Deck.md', paths), 'Deck')
+  assert.equal(wikilinkTarget('Solo/Note.md', ['Solo/Note.md']), 'Note')
+})

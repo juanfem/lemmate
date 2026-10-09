@@ -20,6 +20,7 @@
   } from '../lib/tree.ts'
   import { canDrop, isInside, type DragPayload } from '../lib/moves.ts'
   import { beginDrag, endDrag, readDrag } from '../lib/dnd.ts'
+  import { wikilinkTarget } from '../lib/links.ts'
   import { clamp, dragResize } from '../lib/resize.ts'
   import { displayName } from '../lib/vault.svelte.ts'
   import { api } from '../lib/api.ts'
@@ -280,6 +281,12 @@
     return [id]
   }
 
+  /** What a wikilink to the note says: its name, or its path where another note shares the name. */
+  function linkTo(id: string): string {
+    const v = vaults.find((x) => x.id === vaultOf(id))
+    return wikilinkTarget(pathOf(id) ?? '', v?.notes.map((n) => n.path) ?? [])
+  }
+
   // ---- drag and drop
   function noteDragStart(id: string, e: DragEvent) {
     const ids = actOn(id)
@@ -287,7 +294,7 @@
     if (!vault) return
     // A drag carries one vault; a cross-vault selection drags only the part under the pointer.
     const notes = ids.filter((n) => vaultOf(n) === vault)
-    const links = notes.map((n) => `[[${displayName(pathOf(n) ?? '')}]]`)
+    const links = notes.map((n) => `[[${linkTo(n)}]]`)
     beginDrag(e, { vault, notes }, links.join('\n'))
   }
   function folderDragStart(vault: string, folder: string, e: DragEvent) {
@@ -347,7 +354,7 @@
       { label: '', separator: true },
       { label: 'Rename / move…', run: () => actions.onRenameNote?.(vault, id) },
       { label: 'Copy path', run: () => void copy(path) },
-      { label: 'Copy wikilink', run: () => void copy(`[[${displayName(path)}]]`) },
+      { label: 'Copy wikilink', run: () => void copy(`[[${linkTo(id)}]]`) },
       { label: '', separator: true },
       { label: 'Bookmark', run: () => actions.onBookmarkNote?.(vault, id) },
       ...(actions.onShareNote ? [{ label: 'Share…', run: () => actions.onShareNote?.(id) }] : []),

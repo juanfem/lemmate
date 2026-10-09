@@ -598,7 +598,9 @@ one you are reading: onto a pane's strip (where the marker shows) or the middle 
 open it there as a tab, or against the left or right edge to open it in a new pane beside. A note
 the pane already has is just brought forward. Drag a selection and they all open, in order. To
 put a link to a note into another note, use *Copy wikilink* on its right-click menu — or drag it
-into another app, which receives the wikilink as text.
+into another app, which receives the wikilink as text. The link names the note alone while that
+name is unique in its vault, and its folder path too (`[[Projects/Plan]]`) once another note
+shares it, so it always reaches the note you copied.
 
 **A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window

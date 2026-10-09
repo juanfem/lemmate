@@ -378,12 +378,13 @@ export class VaultSession {
     return undefined
   }
 
-  /** Resolve a wikilink target the way the engine does: exact path, basename, then `.md`. */
+  /** Resolve a wikilink target the way the engine does: exact path (extension optional), then basename. */
   resolveLink(target: string): NoteEntry | undefined {
     const t = target.trim()
-    const withExt = t.endsWith('.md') || t.endsWith('.qmd') ? t : `${t}.md`
+    // A path without its extension names a `.qmd` note too: the `[[` completion writes it so.
+    const exact = t.endsWith('.md') || t.endsWith('.qmd') ? [t] : [t, `${t}.md`, `${t}.qmd`]
     return (
-      this.notes.find((n) => n.path === withExt || n.path === t) ??
+      this.notes.find((n) => exact.includes(n.path)) ??
       this.notes.find((n) => basename(n.path).replace(/\.(md|qmd)$/u, '') === basename(t).replace(/\.(md|qmd)$/u, ''))
     )
   }
