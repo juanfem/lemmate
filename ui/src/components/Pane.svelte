@@ -43,6 +43,7 @@
   import { unnamedNote } from '../lib/notename.ts'
   import { clampIndex, drawn, endedOutside, scrollToShow, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
   import { beginTabDrag, carriesTab, droppedTab, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
+  import { carriesNotes, droppedNotes, endDrag, readDrag } from '../lib/dnd.ts'
 
   let {
     lookup,
@@ -71,6 +72,7 @@
     onTabDrop,
     onTabGone,
     onTabOut,
+    onNotesDrop,
     onHistory,
     historyOpen = false,
     onRender,
@@ -124,6 +126,8 @@
     onTabGone?: (drag: TabDrag) => void
     /** A tab dragged from this pane was let go outside every window, at screen `x`, `y`. */
     onTabOut?: (drag: TabDrag, x: number, y: number) => void
+    /** Notes dragged in from the sidebar: opened as tabs where they were let go, as a tab would land. */
+    onNotesDrop?: (notes: string[], drop: TabDrop) => void
     onHistory?: () => void
     /** Whether this note's history already has a pane, so the clock can say so. */
     historyOpen?: boolean
@@ -273,9 +277,16 @@
   /** From another window the tab is unknown until the drop, so it excludes nothing and owns no pane. */
   const FOREIGN: TabDrag = { tab: '', pane: null }
 
+  /** A sidebar drag, as the tab its first note would make: from no pane, like another window's. */
+  function noteDrag(): TabDrag {
+    const first = readDrag()?.notes[0]
+    return first ? { tab: first, pane: null } : FOREIGN
+  }
+
   function dragOver(e: DragEvent) {
-    if (!onTabDrop || !carriesTab(e)) return
-    const drag = tabDrag.current ?? FOREIGN
+    const notes = !carriesTab(e) && !!onNotesDrop && carriesNotes(e)
+    if (!notes && (!onTabDrop || !carriesTab(e))) return
+    const drag = notes ? noteDrag() : (tabDrag.current ?? FOREIGN)
     e.stopPropagation()
     const at = isHistory ? null : dropAt(e, drag)
     hoverTab(at)
@@ -285,6 +296,17 @@
   }
 
   function drop(e: DragEvent) {
+    if (!carriesTab(e) && onNotesDrop && carriesNotes(e)) {
+      e.stopPropagation()
+      hoverTab(null)
+      const notes = droppedNotes(e)
+      endDrag()
+      const at = notes.length && !isHistory ? dropAt(e, { tab: notes[0]!, pane: null }) : null
+      // Taken here, so the editor under the pointer never sees it as text to paste.
+      e.preventDefault()
+      if (at) onNotesDrop(notes, at)
+      return
+    }
     if (!onTabDrop || !carriesTab(e)) return
     e.stopPropagation()
     const local = tabDrag.current
@@ -324,7 +346,7 @@
   let over = $derived(tabDrag.over?.pane === pane.id ? tabDrag.over : null)
   /** Where on the strip the insertion bar goes, in the strip's own scrolling coordinates. */
   let marker = $derived.by(() => {
-    const drag = tabDrag.current ?? FOREIGN
+    const drag = tabDrag.current ?? noteDrag()
     if (!over || !('index' in over) || !Number.isFinite(over.index) || !strip) return null
     const others = [...strip.querySelectorAll<HTMLElement>('.tab')].filter((el) => el.dataset.tab !== drag.tab)
     const at = clampIndex(

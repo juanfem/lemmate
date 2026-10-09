@@ -22,7 +22,7 @@
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
-  import { inNewPane, moveTab, placeRender, notePane, removeTab, stepTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
+  import { inNewPane, moveTab, openDropped, placeRender, notePane, removeTab, stepTab, type TabDrag, type TabDrop } from './lib/tabmoves.ts'
   import { tabKey } from './lib/tabkeys.ts'
 
   import SearchPane from './components/SearchPane.svelte'
@@ -903,6 +903,18 @@
     closed = closed.filter((c) => c !== drag.tab)
     return true
   }
+  /** Notes dragged from the sidebar onto a pane: opened as tabs there, or in a pane of their own
+   *  against an edge — the "open in a new tab" a plain click is not. */
+  function dropNotes(notes: string[], drop: TabDrop) {
+    const ids = notes.filter((id) => sessionOf(id)?.pathOf(id))
+    const room = solo || narrow.current ? panes.length : MAX_PANES
+    const opened = openDropped(panes, ids, drop, pinned, room, (tab, like) => ({ id: ++paneSeq, tabs: [tab], active: tab, mode: like.mode, kind: 'note' }))
+    if (!opened) return
+    panes = opened.panes
+    focusedPane = opened.focused
+    closed = closed.filter((c) => !ids.includes(c))
+    landOn(panes[focusedPane]!.active!)
+  }
   /**
    * Another window took it. It still goes on the reopen stack: the window learns of the drop only
    * from the drag's final `dropEffect`, and if an engine ever reports a drop that did not happen,
@@ -1671,6 +1683,7 @@
           onDetach={canDetach ? detach : undefined}
           onTabDrop={dropTab}
           onTabGone={tabGone}
+          onNotesDrop={dropNotes}
           onTabOut={canDetach ? (drag, x, y) => detach(drag.tab, { pane: drag.pane, x, y }) : undefined}
           onPin={togglePin}
           onHistory={solo ? undefined : () => openHistory(i)}

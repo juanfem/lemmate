@@ -286,12 +286,14 @@
     const vault = vaultOf(id)
     if (!vault) return
     // A drag carries one vault; a cross-vault selection drags only the part under the pointer.
-    beginDrag(e, { vault, notes: ids.filter((n) => vaultOf(n) === vault) })
+    const notes = ids.filter((n) => vaultOf(n) === vault)
+    const links = notes.map((n) => `[[${displayName(pathOf(n) ?? '')}]]`)
+    beginDrag(e, { vault, notes }, links.join('\n'))
   }
   function folderDragStart(vault: string, folder: string, e: DragEvent) {
     const v = vaults.find((x) => x.id === vault)
     if (!v) return
-    beginDrag(e, { vault, folder, notes: v.notes.filter((n) => isInside(n.path, folder)).map((n) => n.id) })
+    beginDrag(e, { vault, folder, notes: v.notes.filter((n) => isInside(n.path, folder)).map((n) => n.id) }, folder)
   }
   function dragOver(vault: string, folder: string, e: DragEvent) {
     const drag = readDrag()

@@ -113,6 +113,43 @@ export function moveTab<P extends TabPane>(
 }
 
 /**
+ * Notes dragged in from the sidebar, opened where they were let go: each lands as a tab from
+ * another window would (`moveTab` with no pane to leave), so a note already open in the target
+ * moves to the drop rather than being doubled, and an edge splits the pane. The first note takes
+ * the drop; the rest follow it, in order, into the pane it landed in. Null when none could land.
+ */
+export function openDropped<P extends TabPane>(
+  panes: P[],
+  notes: string[],
+  drop: TabDrop,
+  pinned: string[],
+  maxPanes: number,
+  newPane: (tab: string, like: P) => P,
+): { panes: P[]; focused: number } | null {
+  let out: { panes: P[]; focused: number } | null = null
+  let at: TabDrop = drop
+  for (const tab of notes) {
+    const now: P[] = out?.panes ?? panes
+    const target = now.find((p) => p.id === at.pane)
+    // Let go on the page, a note the pane already has is shown where it is, not moved to the end.
+    const shown =
+      'index' in at && !Number.isFinite(at.index) && target && isNotes(target) && target.tabs.includes(tab)
+        ? { panes: now.map((p) => (p === target ? { ...p, active: tab } : p)), focused: now.indexOf(target) }
+        : null
+    const moved = shown ?? moveTab(now, { tab, pane: null }, at, pinned, maxPanes, newPane)
+    if (!moved) continue
+    out = moved
+    const landed = moved.panes[moved.focused]!
+    at = { pane: landed.id, index: drawn(landed.tabs, pinned).indexOf(tab) + 1 }
+  }
+  if (!out) return null
+  // The first one is in front, as a single drop would leave it.
+  const first = notes.find((n) => out!.panes[out!.focused]!.tabs.includes(n))
+  if (first) out.panes = out.panes.map((p, i) => (i === out!.focused ? { ...p, active: first } : p))
+  return out
+}
+
+/**
  * Whether a drag that no window took ended outside this one (`width` × `height`): dropped on the
  * desktop, another app, or a window that refused it. Judged by where it ended rather than by a
  * `dragleave` on the way out, because a cancelled drag fires `dragleave` too. An engine that

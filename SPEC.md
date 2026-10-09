@@ -526,7 +526,8 @@ Editing features:
   reopen closed tab. Tab state persisted per device. Opening a note **reuses the focused
   pane's active tab** (browsing is not tab-creation); a pinned tab and one already showing the
   note are never displaced, and a displaced tab joins the reopen stack. New tabs are explicit:
-  the ＋ on the strip, or *Open in a new tab* in the browser's right-click menu.
+  the ＋ on the strip, *Open in a new tab* in the browser's right-click menu, or dragging a
+  note from the browser onto a pane — its strip or page for a tab, an edge for a pane of its own.
 - **Quick switcher** — fuzzy search over paths, titles, aliases; creates note on Enter if
   no match.
 - **Command palette** — every command, with shortcut hints; per-user shortcut remapping.

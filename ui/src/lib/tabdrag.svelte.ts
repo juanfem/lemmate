@@ -50,6 +50,10 @@ export function droppedTab(e: DragEvent): string | null {
   }
 }
 
+// A note dragged from the sidebar marks the panes it passes over too, and its gesture ends in the
+// sidebar, where no pane hears it: the marker comes down on any drag's end.
+if (typeof window !== 'undefined') window.addEventListener('dragend', () => (tabDrag.over = null))
+
 export function endTabDrag() {
   tabDrag.current = null
   tabDrag.over = null

@@ -593,6 +593,13 @@ else) refuses the drop, and the tab stays where it was. Let a tab go **outside e
 it opens in a new one of its own, about where you let go (in a browser, if it blocks the popup,
 the tab stays put).
 
+**Drag notes from the sidebar** the same way to open them in a new tab without giving up the
+one you are reading: onto a pane's strip (where the marker shows) or the middle of its page to
+open it there as a tab, or against the left or right edge to open it in a new pane beside. A note
+the pane already has is just brought forward. Drag a selection and they all open, in order. To
+put a link to a note into another note, use *Copy wikilink* on its right-click menu — or drag it
+into another app, which receives the wikilink as text.
+
 **A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window
 with no sidebar — another app window in the desktop app, a popup in a browser. Links, the palette

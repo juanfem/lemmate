@@ -9,13 +9,14 @@ const MIME = 'application/x-lemmate-notes'
 
 let current: DragPayload | null = null
 
-export function beginDrag(e: DragEvent, payload: DragPayload) {
+/** `text` is what the drag gives anything outside the app: a note's wikilink, a folder's path. */
+export function beginDrag(e: DragEvent, payload: DragPayload, text: string) {
   current = payload
   if (!e.dataTransfer) return
   e.dataTransfer.effectAllowed = 'move'
   // Also on the event, so a drop that somehow outlives this module still knows what it holds.
   e.dataTransfer.setData(MIME, JSON.stringify(payload))
-  e.dataTransfer.setData('text/plain', payload.folder ?? payload.notes.join('\n'))
+  e.dataTransfer.setData('text/plain', text)
 }
 
 export function readDrag(e?: DragEvent): DragPayload | null {
@@ -27,6 +28,21 @@ export function readDrag(e?: DragEvent): DragPayload | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Notes a pane could open: a drag from this window's sidebar, or one from another window's, which
+ * is only recognised by its type until the drop (and may yet turn out to be a folder).
+ */
+export function carriesNotes(e: DragEvent): boolean {
+  if (current) return current.folder === undefined && current.notes.length > 0
+  return e.dataTransfer?.types.includes(MIME) ?? false
+}
+
+/** The notes a drop on a pane opens — none for a folder, whose drop is a move. */
+export function droppedNotes(e: DragEvent): string[] {
+  const drag = readDrag(e)
+  return drag && drag.folder === undefined ? drag.notes : []
 }
 
 export function endDrag() {

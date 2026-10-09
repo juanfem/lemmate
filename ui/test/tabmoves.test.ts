@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { clampIndex, endedOutside, inNewPane, moveTab, notePane, placeRender, removeTab, scrollToShow, stepTab, type TabPane } from '../src/lib/tabmoves.ts'
+import { clampIndex, endedOutside, inNewPane, moveTab, notePane, openDropped, placeRender, removeTab, scrollToShow, stepTab, type TabPane } from '../src/lib/tabmoves.ts'
 import { renderTab, tabNote } from '../src/lib/rendertabs.ts'
 
 let seq = 100
@@ -211,4 +211,22 @@ test('stepping along a strip follows the drawn order and wraps', () => {
   assert.equal(stepTab(['a'], [], 'a', 1), 'a')
   assert.equal(stepTab([], [], null, 1), null)
   assert.equal(stepTab(['a', 'b'], [], null, 1), 'a')
+})
+
+test('notes dropped from the sidebar open where they land, the first in front', () => {
+  const panes = [pane(1, ['a', 'b']), pane(2, ['x'])]
+  // On the strip, between a and b; the second follows the first.
+  assert.deepEqual(shape(openDropped(panes, ['n', 'm'], { pane: 1, index: 1 }, [], 3, fresh)), { panes: ['a [n] m b', '[x]'], focused: 0 })
+  // On the page's middle: at the end, nothing closed anywhere — the note stays where else it is open.
+  assert.deepEqual(shape(openDropped(panes, ['a'], { pane: 2, index: Infinity }, [], 3, fresh)), { panes: ['[a] b', 'x [a]'], focused: 1 })
+  // A note already in the target moves to the drop instead of being doubled.
+  assert.deepEqual(shape(openDropped(panes, ['b'], { pane: 1, index: 0 }, [], 3, fresh))?.panes, ['[b] a', '[x]'])
+  // On the page of a pane that has it already: shown where it is.
+  assert.deepEqual(shape(openDropped([pane(1, ['a', 'b'], 'b')], ['a'], { pane: 1, index: Infinity }, [], 3, fresh))?.panes, ['[a] b'])
+  // Against an edge: a pane of their own.
+  assert.deepEqual(shape(openDropped(panes, ['n', 'm'], { pane: 2, split: 'right' }, [], 3, fresh)), { panes: ['[a] b', '[x]', '[n] m'], focused: 2 })
+  // …which, with no room, is the target pane instead.
+  assert.deepEqual(shape(openDropped(panes, ['n'], { pane: 2, split: 'left' }, [], 2, fresh)), { panes: ['[a] b', 'x [n]'], focused: 1 })
+  // Nothing lands on a history pane.
+  assert.equal(openDropped([pane(1, ['a'], 'a', 'history')], ['n'], { pane: 1, index: 0 }, [], 3, fresh), null)
 })
