@@ -1063,21 +1063,36 @@ impl Store {
         Ok(out)
     }
 
-    /// Notes in `vault_id` whose wikilinks resolve to `note`: by full path, path without
-    /// extension, or basename without extension (SPEC §5.4 resolution order, loosely).
+    /// Notes in `note`'s vault with a wikilink or embed that resolves to it from where they
+    /// stand ([`markdown::resolve_wikilink`]): its path, with or without the extension, or its
+    /// name where no nearer note of that name takes the link. `note.path` is believed over the
+    /// store's — a rename asks with the path the note is leaving.
     pub fn backlinks_to(&self, note: &NoteRow) -> Result<Vec<NoteRow>> {
-        let stem = note.path.trim_end_matches(".md").trim_end_matches(".qmd").to_owned();
-        let base = stem.rsplit('/').next().unwrap_or(&stem).to_owned();
+        let stem = note.path.trim_end_matches(".md").trim_end_matches(".qmd");
+        let base = stem.rsplit('/').next().unwrap_or(stem);
+        let notes = self.list_notes(note.vault_id)?;
+        let paths: Vec<&str> = notes
+            .iter()
+            .map(|n| if n.id == note.id { note.path.as_str() } else { n.path.as_str() })
+            .collect();
+        // Every target that could name it ends in its name; which of them do is the resolver's call.
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT n.id, n.vault_id, n.path, n.title FROM note_links l JOIN notes n ON n.id = l.note_id
+            "SELECT DISTINCT n.id, n.vault_id, n.path, n.title, l.target FROM note_links l JOIN notes n ON n.id = l.note_id
              WHERE n.vault_id = ?1 AND n.deleted_at IS NULL AND n.id != ?2 AND l.kind IN ('wikilink','embed')
-               AND (l.target = ?3 OR l.target = ?4 OR l.target = ?5) ORDER BY n.path",
+               AND instr(l.target, ?3) > 0 ORDER BY n.path",
         )?;
-        let rows = stmt.query_map(
-            params![note.vault_id.to_string(), note.id.to_string(), note.path, stem, base],
-            row_to_note,
-        )?;
-        rows.map(|r| r.map_err(Into::into)).collect()
+        let rows = stmt.query_map(params![note.vault_id.to_string(), note.id.to_string(), base], |r| {
+            Ok((row_to_note(r)?, r.get::<_, String>(4)?))
+        })?;
+        let mut out: Vec<NoteRow> = Vec::new();
+        for row in rows {
+            let (from, target) = row?;
+            let reaches = markdown::resolve_wikilink(&target, &from.path, &paths) == Some(note.path.as_str());
+            if reaches && out.last().is_none_or(|n| n.id != from.id) {
+                out.push(from);
+            }
+        }
+        Ok(out)
     }
 
     /// Live notes carrying `tag` (exact, lower-case) or any nested tag under it.
@@ -2201,6 +2216,39 @@ mod tests {
         let after = store.tags_in_vault(vault).unwrap();
         assert!(!after.iter().any(|(t, _)| t == "projects/alpha/deep"), "{after:?}");
         assert_eq!(after.iter().find(|(t, _)| t == "projects").map(|(_, n)| *n), Some(2));
+    }
+
+    #[test]
+    fn a_bare_link_is_a_backlink_of_the_nearest_note_of_that_name_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let vault = VaultId::new();
+        let ids: Vec<NoteId> = (0..5).map(|_| NoteId::new()).collect();
+        let notes = [
+            ("Projects/Plan.md", ""),
+            ("Archive/Plan.md", ""),
+            ("Projects/Week.md", "See [[Plan]]."),
+            ("Archive/Old.md", "See [[Plan#Goals|the plan]] and ![[Projects/Plan]]."),
+            ("Inbox.md", "See [[Planning]] and [[Plan]]."),
+        ];
+        for (id, (path, text)) in ids.iter().zip(notes) {
+            store.upsert_note(*id, vault, path, None).unwrap();
+            store.index_note(*id, &markdown::index(text).unwrap()).unwrap();
+        }
+        let backlinks = |id: NoteId| {
+            let row = store.note_by_id(id).unwrap().unwrap();
+            store.backlinks_to(&row).unwrap().into_iter().map(|r| r.path).collect::<Vec<_>>()
+        };
+        // From the vault root neither Plan is nearer; the shallower-then-first-by-path one is Archive's.
+        assert_eq!(backlinks(ids[0]), ["Archive/Old.md", "Projects/Week.md"]);
+        assert_eq!(backlinks(ids[1]), ["Archive/Old.md", "Inbox.md"]);
+        // Asked with the path a rename is leaving, the answer is as it was at that path.
+        let row = store.note_by_id(ids[0]).unwrap().unwrap();
+        store.upsert_note(ids[0], vault, "Done/Roadmap.md", None).unwrap();
+        let leaving = store.backlinks_to(&NoteRow { path: "Projects/Plan.md".into(), ..row }).unwrap();
+        assert_eq!(
+            leaving.into_iter().map(|r| r.path).collect::<Vec<_>>(),
+            ["Archive/Old.md", "Projects/Week.md"]
+        );
     }
 
     #[test]

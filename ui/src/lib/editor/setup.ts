@@ -307,8 +307,8 @@ const embeddedLook = EditorView.editorAttributes.of({ class: 'cm-embedded' })
 
 /** What an editor needs from its vault to draw `![[note]]` in place (SPEC §5, tier 3). */
 export interface NoteSource {
-  /** The note a wikilink target names, and what to call it. */
-  resolve: (target: string) => { id: string; title: string } | undefined
+  /** The note a wikilink target, written in note `from`, names — and what to call it. */
+  resolve: (target: string, from?: string) => { id: string; title: string } | undefined
   /** Call `onText` with the note's markdown once it has loaded and on every change after it;
    *  the function returned stops. */
   follow: (id: string, onText: (text: string) => void) => () => void
@@ -361,9 +361,9 @@ const MAX_EMBED_DEPTH = 3
  * and each one it sits inside — so a note that embeds itself, or two that embed each other,
  * stop at a link instead of recursing.
  */
-function noteEmbeds(notes: NoteSource, openLink: (t: string) => void, chain: string[]) {
+function noteEmbeds(notes: NoteSource, openLink: (t: string, from?: string) => void, chain: string[]) {
   return (target: EmbedTarget): EmbeddedNote | undefined => {
-    const hit = notes.resolve(target.note)
+    const hit = notes.resolve(target.note, chain[chain.length - 1])
     if (!hit || chain.includes(hit.id) || chain.length > MAX_EMBED_DEPTH) return undefined
     const section = target.heading ?? (target.block === undefined ? undefined : `^${target.block}`)
     return {
@@ -375,7 +375,8 @@ function noteEmbeds(notes: NoteSource, openLink: (t: string) => void, chain: str
           state: EditorState.create({
             extensions: [
               embeddedExtensions({
-                openLink,
+                // A link inside the embed is the embedded note's, and resolves from where it is.
+                openLink: (t) => openLink(t, hit.id),
                 embedUrl: (t) => notes.embedUrl(hit.id, t),
                 openUrl: notes.openUrl && ((href) => notes.openUrl!(hit.id, href)),
                 embedNote: noteEmbeds(notes, openLink, [...chain, hit.id]),

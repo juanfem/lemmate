@@ -175,8 +175,8 @@
 
   /** Where `![[note]]` embeds read from: this vault, live. */
   const notes: NoteSource = {
-    resolve: (target) => {
-      const hit = session.resolveLink(target)
+    resolve: (target, from = noteId) => {
+      const hit = session.resolveLink(target, session.pathOf(from) ?? '')
       return hit && { id: hit.id, title: displayName(hit.path) }
     },
     follow: (id, onText) => session.watchNote(id, onText),
@@ -185,8 +185,9 @@
     watch: (onChange) => session.watchPaths(onChange),
   }
 
-  function openLink(target: string) {
-    const hit = session.resolveLink(target)
+  /** Follow a wikilink written in note `from` — this one, or a note embedded in it. */
+  function openLink(target: string, from = noteId) {
+    const hit = session.resolveLink(target, session.pathOf(from) ?? '')
     if (hit) onOpen(hit.id)
     else if (!session.canCreate) {
       // Following a link to nowhere creates the note — a write, which a reader may not make.
@@ -208,7 +209,7 @@
   function followUrl(notePath: string, href: string) {
     const target = linkTarget(notePath, href)
     if (target?.kind === 'web') window.open(target.url, '_blank', 'noopener,noreferrer')
-    else if (target?.kind === 'note') openLink(target.path)
+    else if (target?.kind === 'note') openLink(target.path, session.idOf(notePath) ?? noteId)
     else if (target) {
       // Written relative to the note, but a name alone finds it too, as an embed's does.
       const path = session.attachments[target.path] ? target.path : attachmentPath(session, notePath, target.path)

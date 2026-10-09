@@ -1217,10 +1217,13 @@ impl Engine {
             .into_iter()
             .map(|r| r.id)
             .collect();
+        let notes = self.store.list_notes(self.vault_id)?;
+        let paths: Vec<&str> = notes.iter().map(|n| n.path.as_str()).collect();
         for rid in referrers {
             let Some(state) = self.notes.get(&rid) else { continue };
             let text = state.doc.text();
-            if let Some(fixed) = markdown::rewrite_wikilinks(&text, old, new) {
+            let bare = markdown::BareName::of(&state.path, old, new, &paths);
+            if let Some(fixed) = markdown::rewrite_wikilinks(&text, old, new, bare) {
                 let path = state.path.clone();
                 let update = state.doc.set_text(&fixed);
                 self.store.append_update(DocId::Note(rid), &update, None)?;

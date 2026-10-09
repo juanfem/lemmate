@@ -278,8 +278,11 @@ Obsidian `> [!note]` blockquote callouts are converted on import (§11).
 ### 5.4 Links
 
 - **Wikilinks** `[[target]]`, `[[target|label]]`, `[[target#Heading]]` are the primary link
-  form. Target resolution: exact path → unique basename → alias. Ambiguous basenames must
-  be qualified by path.
+  form. Target resolution: exact path (extension optional) → basename → alias. A basename
+  several notes share goes to the one nearest the linking note — most folders in common, then
+  the shallowest, then the first by path — so following a link, its backlinks and the rewrite on
+  rename always agree on one target. A target with a folder in it is a path only. *Copy wikilink*
+  writes the bare name while it is unique in the vault and the path once it is not.
 - Standard links `[label](relative/path.md)` are supported and resolved relative to the note.
 - **Embeds** `![[note]]`, `![[note#Heading]]` transclude read-only **[tier 3]**.
 - Export: pandoc's `wikilinks_title_after_pipe` extension handles wikilinks natively;

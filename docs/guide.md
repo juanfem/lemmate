@@ -495,9 +495,13 @@ lives there and underneath it rather than in a column of its own:
   tags, so nothing that rewrites tags may rewrite them. There is no undo — a rename back is the
   way back.
 
-  Backlinks match links
-  whose target is the note's full path, its path without extension, or its basename. Unlinked
-  mentions, outgoing links and context snippets are not built.
+  Backlinks are the notes whose links reach this one: by its full path (with or without the
+  extension), or by its name alone. Where several notes share the name, a bare `[[Plan]]` goes
+  to the one nearest the note it is written in — the same folder, else the most folders in
+  common, else the shallowest — and counts as a backlink of that note only; clicking it opens the
+  same one, and renaming either note rewrites only the links that meant it (qualifying one with
+  its path when a nearer namesake would otherwise take it over). Unlinked mentions, outgoing
+  links and context snippets are not built.
 - **History** is not here at all: it opens in a pane of its own (below).
 
 **Daily notes.** `Ctrl+Shift+D`, or the calendar on the sidebar's rail (in the top bar on

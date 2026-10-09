@@ -462,12 +462,55 @@ fn parse_wikilink(inner: &str, embed: bool) -> WikiLink {
     WikiLink { target: target.trim().to_owned(), heading, label, embed }
 }
 
+fn strip_note_ext(p: &str) -> &str {
+    p.strip_suffix(".md").or_else(|| p.strip_suffix(".qmd")).unwrap_or(p)
+}
+
+fn folder_of(p: &str) -> &str {
+    p.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Which of the vault's note `paths` the wikilink `target`, written in the note at `from`,
+/// reaches (SPEC §5.4). An exact path wins, with or without its extension. Otherwise a bare
+/// name reaches the note of that name — and where several share it, the one nearest `from`:
+/// the most folders in common, then the shallowest, then the first by path. A target with a
+/// folder in it is a path and nothing else. `ui/src/lib/links.ts` holds the same rule.
+pub fn resolve_wikilink<'a>(target: &str, from: &str, paths: &[&'a str]) -> Option<&'a str> {
+    let t = target.trim();
+    let exact = |want: &str| paths.iter().copied().find(|p| *p == want);
+    if t.ends_with(".md") || t.ends_with(".qmd") {
+        if let Some(p) = exact(t) {
+            return Some(p);
+        }
+    } else if let Some(p) =
+        exact(t).or_else(|| exact(&format!("{t}.md"))).or_else(|| exact(&format!("{t}.qmd")))
+    {
+        return Some(p);
+    }
+    if t.contains('/') {
+        return None;
+    }
+    let name = strip_note_ext(t);
+    let here: Vec<&str> = folder_of(from).split('/').filter(|s| !s.is_empty()).collect();
+    let shared = |p: &str| {
+        folder_of(p).split('/').filter(|s| !s.is_empty()).zip(&here).take_while(|(a, b)| a == *b).count()
+    };
+    paths.iter().copied().filter(|p| strip_note_ext(p.rsplit('/').next().unwrap_or(p)) == name).min_by(
+        |a, b| {
+            shared(b).cmp(&shared(a)).then(a.matches('/').count().cmp(&b.matches('/').count())).then(a.cmp(b))
+        },
+    )
+}
+
 /// Rewrite `[[old]]`-style links that resolve to `old_path` so they point at `new_path`
-/// (SPEC §4.4: renames update links in referring notes). Matches the same forms the resolver
-/// accepts — full path, path without extension, basename without extension — and keeps any
-/// `#heading` / `|label` suffix. Returns `None` when nothing changed.
-pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str) -> Option<String> {
-    let strip = |p: &str| p.trim_end_matches(".md").trim_end_matches(".qmd").to_owned();
+/// (SPEC §4.4: renames update links in referring notes). A full path, or one without its
+/// extension, becomes the new path. A bare name is the note's only where `bare.before` says it
+/// reached it from the note being rewritten — another note of that name may be nearer there —
+/// and it stays bare only while `bare.after` says the new name still reaches it; otherwise it is
+/// qualified with the new path. Any `#heading` / `|label` suffix is kept. Returns `None` when
+/// nothing changed.
+pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str, bare: BareName) -> Option<String> {
+    let strip = |p: &str| strip_note_ext(p).to_owned();
     let (old_stem, new_stem) = (strip(old_path), strip(new_path));
     let old_base = old_stem.rsplit('/').next().unwrap_or(&old_stem).to_owned();
     let new_base = new_stem.rsplit('/').next().unwrap_or(&new_stem).to_owned();
@@ -490,10 +533,14 @@ pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str) -> Option<S
         let t = target.trim();
         let replacement = if t == old_path || t == old_stem {
             Some(new_stem.as_str())
-        } else if t == old_base && old_base != new_base {
-            // A bare basename keeps working only while the basename is unique; rewrite it to
-            // the new basename so the link still resolves.
-            Some(new_base.as_str())
+        } else if t == old_base && bare.before {
+            if !bare.after {
+                Some(new_stem.as_str())
+            } else if old_base != new_base {
+                Some(new_base.as_str())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -509,6 +556,27 @@ pub fn rewrite_wikilinks(text: &str, old_path: &str, new_path: &str) -> Option<S
     }
     out.push_str(rest);
     changed.then_some(out)
+}
+
+/// Whether a bare name, written in the note a rename rewrites, reached the renamed note
+/// `before` the rename, and whether its new name reaches it `after` (see [`resolve_wikilink`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BareName {
+    pub before: bool,
+    pub after: bool,
+}
+
+impl BareName {
+    /// From the note at `from`: `before` against the vault's paths with the note at `old`,
+    /// `after` against `paths`, which hold it at `new`.
+    pub fn of(from: &str, old: &str, new: &str, paths: &[&str]) -> Self {
+        let name = |p: &str| strip_note_ext(p.rsplit('/').next().unwrap_or(p)).to_owned();
+        let before: Vec<&str> = paths.iter().map(|p| if *p == new { old } else { p }).collect();
+        BareName {
+            before: resolve_wikilink(&name(old), from, &before) == Some(old),
+            after: resolve_wikilink(&name(new), from, paths) == Some(new),
+        }
+    }
 }
 
 fn push_tag(tags: &mut Vec<String>, tag: &str) {
@@ -550,21 +618,93 @@ mod tests {
     #[test]
     fn rewrites_links_on_rename() {
         let t = "see [[Projects/Plan]] and [[Plan|the plan]] and [[Projects/Plan.md#Goals]] but not [[Planning]] or `[[Plan]]`\n";
-        let r = rewrite_wikilinks(t, "Projects/Plan.md", "Archive/Roadmap.md").unwrap();
+        let r = rewrite_wikilinks(t, "Projects/Plan.md", "Archive/Roadmap.md", BARE).unwrap();
         assert_eq!(
             r,
             "see [[Archive/Roadmap]] and [[Roadmap|the plan]] and [[Archive/Roadmap#Goals]] but not [[Planning]] or `[[Roadmap]]`\n"
         );
-        assert_eq!(rewrite_wikilinks("nothing here", "a.md", "b.md"), None);
+        assert_eq!(rewrite_wikilinks("nothing here", "a.md", "b.md", BARE), None);
         // Same basename, different folder: bare basenames stay.
         assert_eq!(
-            rewrite_wikilinks("[[Plan]] [[Projects/Plan]]", "Projects/Plan.md", "Done/Plan.md").unwrap(),
+            rewrite_wikilinks("[[Plan]] [[Projects/Plan]]", "Projects/Plan.md", "Done/Plan.md", BARE)
+                .unwrap(),
             "[[Plan]] [[Done/Plan]]"
         );
         // A table cell escapes the alias pipe.
         assert_eq!(
-            rewrite_wikilinks("| [[Plan\\|the plan]] |", "Projects/Plan.md", "Archive/Roadmap.md").unwrap(),
+            rewrite_wikilinks("| [[Plan\\|the plan]] |", "Projects/Plan.md", "Archive/Roadmap.md", BARE)
+                .unwrap(),
             "| [[Roadmap\\|the plan]] |"
+        );
+    }
+
+    /// A bare name that reached the note before the rename and still does after it.
+    const BARE: BareName = BareName { before: true, after: true };
+
+    #[test]
+    fn a_bare_name_reaches_the_nearest_note_of_that_name() {
+        let paths = [
+            "Plan.md",
+            "Projects/Plan.md",
+            "Projects/A/Plan.md",
+            "Archive/Old/Plan.md",
+            "Talks/Deck.qmd",
+            "Solo.md",
+        ];
+        let r = |t: &str, from: &str| resolve_wikilink(t, from, &paths);
+        // An exact path wins, with or without the extension, from anywhere.
+        assert_eq!(r("Plan", "Projects/A/x.md"), Some("Plan.md"));
+        assert_eq!(r("Projects/Plan", "x.md"), Some("Projects/Plan.md"));
+        assert_eq!(r("Talks/Deck", "x.md"), Some("Talks/Deck.qmd"));
+        assert_eq!(r("Solo", "Deep/er/x.md"), Some("Solo.md"));
+        // Without one, the name: the same folder, then the most folders in common, then the
+        // shallowest, then the first by path.
+        let paths = ["Projects/Plan.md", "Projects/A/Plan.md", "Archive/Old/Plan.md", "Archive/New/Plan.md"];
+        let r = |t: &str, from: &str| resolve_wikilink(t, from, &paths);
+        assert_eq!(r("Plan", "Projects/A/x.md"), Some("Projects/A/Plan.md"));
+        assert_eq!(r("Plan", "Projects/x.md"), Some("Projects/Plan.md"));
+        assert_eq!(r("Plan", "Projects/B/x.md"), Some("Projects/Plan.md"));
+        assert_eq!(r("Plan", "Archive/Old/Deep/x.md"), Some("Archive/Old/Plan.md"));
+        assert_eq!(r("Plan.md", "Archive/x.md"), Some("Archive/New/Plan.md"));
+        assert_eq!(r("Plan", "x.md"), Some("Projects/Plan.md"));
+        // A folder makes it a path, and a path that is not there reaches nothing.
+        assert_eq!(r("A/Plan", "Projects/x.md"), None);
+        assert_eq!(r("Nothing", "x.md"), None);
+    }
+
+    #[test]
+    fn a_rename_leaves_bare_names_that_meant_another_note_alone() {
+        let text = "[[Plan]] and [[Projects/Plan]]";
+        // The bare one reached Archive/Plan from here: only the path follows the rename.
+        let not_ours = BareName { before: false, after: false };
+        assert_eq!(
+            rewrite_wikilinks(text, "Projects/Plan.md", "Done/Roadmap.md", not_ours).unwrap(),
+            "[[Plan]] and [[Done/Roadmap]]"
+        );
+        // It was ours, but after the move a nearer Plan would take it: qualified instead.
+        let lost = BareName { before: true, after: false };
+        assert_eq!(
+            rewrite_wikilinks(text, "Projects/Plan.md", "Done/Plan.md", lost).unwrap(),
+            "[[Done/Plan]] and [[Done/Plan]]"
+        );
+        // Worked out from the paths: from Archive/, the Plan there is nearer than Projects'.
+        assert_eq!(
+            BareName::of(
+                "Archive/x.md",
+                "Projects/Plan.md",
+                "Projects/Roadmap.md",
+                &["Projects/Roadmap.md", "Archive/Plan.md"]
+            ),
+            BareName { before: false, after: true }
+        );
+        assert_eq!(
+            BareName::of(
+                "Projects/x.md",
+                "Projects/Plan.md",
+                "Done/Plan.md",
+                &["Done/Plan.md", "Archive/Plan.md"]
+            ),
+            BareName { before: true, after: false }
         );
     }
 

@@ -46,3 +46,28 @@ test('a new wikilink names the note alone until another note shares the name', a
   assert.equal(wikilinkTarget('Deck.md', paths), 'Deck')
   assert.equal(wikilinkTarget('Solo/Note.md', ['Solo/Note.md']), 'Note')
 })
+
+test('a bare wikilink reaches the nearest note of its name, as the Rust resolver does', async () => {
+  const { resolveWikilink, bareName, rewriteWikilinks } = await import('../src/lib/links.ts')
+  // The cases of `markdown::tests::a_bare_name_reaches_the_nearest_note_of_that_name`.
+  let paths = ['Plan.md', 'Projects/Plan.md', 'Projects/A/Plan.md', 'Archive/Old/Plan.md', 'Talks/Deck.qmd', 'Solo.md']
+  assert.equal(resolveWikilink('Plan', 'Projects/A/x.md', paths), 'Plan.md')
+  assert.equal(resolveWikilink('Projects/Plan', 'x.md', paths), 'Projects/Plan.md')
+  assert.equal(resolveWikilink('Talks/Deck', 'x.md', paths), 'Talks/Deck.qmd')
+  assert.equal(resolveWikilink('Solo', 'Deep/er/x.md', paths), 'Solo.md')
+  paths = ['Projects/Plan.md', 'Projects/A/Plan.md', 'Archive/Old/Plan.md', 'Archive/New/Plan.md']
+  assert.equal(resolveWikilink('Plan', 'Projects/A/x.md', paths), 'Projects/A/Plan.md')
+  assert.equal(resolveWikilink('Plan', 'Projects/x.md', paths), 'Projects/Plan.md')
+  assert.equal(resolveWikilink('Plan', 'Projects/B/x.md', paths), 'Projects/Plan.md')
+  assert.equal(resolveWikilink('Plan', 'Archive/Old/Deep/x.md', paths), 'Archive/Old/Plan.md')
+  assert.equal(resolveWikilink('Plan.md', 'Archive/x.md', paths), 'Archive/New/Plan.md')
+  assert.equal(resolveWikilink('Plan', 'x.md', paths), 'Projects/Plan.md')
+  assert.equal(resolveWikilink('A/Plan', 'Projects/x.md', paths), undefined)
+  assert.equal(resolveWikilink('Nothing', 'x.md', paths), undefined)
+  // …and of `a_rename_leaves_bare_names_that_meant_another_note_alone`.
+  const text = '[[Plan]] and [[Projects/Plan]]'
+  assert.equal(rewriteWikilinks(text, 'Projects/Plan.md', 'Done/Roadmap.md', { before: false, after: false }), '[[Plan]] and [[Done/Roadmap]]')
+  assert.equal(rewriteWikilinks(text, 'Projects/Plan.md', 'Done/Plan.md', { before: true, after: false }), '[[Done/Plan]] and [[Done/Plan]]')
+  assert.deepEqual(bareName('Archive/x.md', 'Projects/Plan.md', 'Projects/Roadmap.md', ['Projects/Roadmap.md', 'Archive/Plan.md']), { before: false, after: true })
+  assert.deepEqual(bareName('Projects/x.md', 'Projects/Plan.md', 'Done/Plan.md', ['Done/Plan.md', 'Archive/Plan.md']), { before: true, after: false })
+})

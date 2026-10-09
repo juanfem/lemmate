@@ -21,7 +21,7 @@ const REFRESH_EVERY_MS = 60_000
 /** How long an edit made on the user's behalf waits for a note to sync before giving up. */
 const SYNC_WAIT_MS = 10_000
 import { SyncClient, type SyncStatus } from './sync.ts'
-import { rewriteWikilinks } from './links.ts'
+import { bareName, resolveWikilink, rewriteWikilinks } from './links.ts'
 import { safeVaultPath } from './notename.ts'
 export { rewriteWikilinks }
 import { ulid } from './ulid.ts'
@@ -378,15 +378,10 @@ export class VaultSession {
     return undefined
   }
 
-  /** Resolve a wikilink target the way the engine does: exact path (extension optional), then basename. */
-  resolveLink(target: string): NoteEntry | undefined {
-    const t = target.trim()
-    // A path without its extension names a `.qmd` note too: the `[[` completion writes it so.
-    const exact = t.endsWith('.md') || t.endsWith('.qmd') ? [t] : [t, `${t}.md`, `${t}.qmd`]
-    return (
-      this.notes.find((n) => exact.includes(n.path)) ??
-      this.notes.find((n) => basename(n.path).replace(/\.(md|qmd)$/u, '') === basename(t).replace(/\.(md|qmd)$/u, ''))
-    )
+  /** The note a wikilink `target`, written in the note at `from`, reaches (`resolveWikilink`). */
+  resolveLink(target: string, from = ''): NoteEntry | undefined {
+    const path = resolveWikilink(target, from, this.notes.map((n) => n.path))
+    return path === undefined ? undefined : this.notes.find((n) => n.path === path)
   }
 
   /**
@@ -514,7 +509,8 @@ export class VaultSession {
           continue
         }
         const text = doc.getText('content')
-        const fixed = rewriteWikilinks(text.toString(), old, path)
+        const from = this.pathOf(r.id) ?? r.path ?? ''
+        const fixed = rewriteWikilinks(text.toString(), old, path, bareName(from, old, path, [...this.notesMap.values()]))
         if (fixed !== null) replaceText(text, fixed)
       } finally {
         release()
