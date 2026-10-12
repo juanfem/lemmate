@@ -1,3 +1,5 @@
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
+import type { EditorState } from '@codemirror/state'
 import type { SyntaxNode } from '@lezer/common'
 
 /** One heading in a note, as the editor found it. The margin index and the palette both
@@ -6,6 +8,42 @@ export interface OutlineItem {
   level: number
   text: string
   pos: number
+}
+
+/** What a pass over a note's syntax tree finds: its headings and its inline `#tags` (without
+ *  the `#`). `complete` is false when the parse had not reached the end of the note, so the
+ *  lists stop short and the caller should ask again. */
+export interface Outline {
+  items: OutlineItem[]
+  tags: string[]
+  complete: boolean
+}
+
+/**
+ * Headings and inline tags, from the whole note. The editor's own tree will not do: CodeMirror
+ * parses in the background, a slice at a time, and stops altogether some way past the viewport —
+ * so a note just opened, or a long one, has a tree that ends early, and reading it gave an
+ * outline missing its later headings until an edit came along to read it again. This finishes
+ * the parse first, spending at most `budget` ms; the work done is kept, so a note too long for
+ * one budget is finished across several calls.
+ */
+export function readOutline(state: EditorState, budget = 100): Outline {
+  const full = ensureSyntaxTree(state, state.doc.length, budget)
+  const items: OutlineItem[] = []
+  const tags: string[] = []
+  ;(full ?? syntaxTree(state)).iterate({
+    enter(node) {
+      if (node.name === 'NoteTag') {
+        tags.push(state.sliceDoc(node.from, node.to).trim().replace(/^#/u, ''))
+        return
+      }
+      const m = /^ATXHeading(\d)$/u.exec(node.name)
+      if (!m) return
+      const text = headingText(node.node, (from, to) => state.sliceDoc(from, to))
+      items.push({ level: Number(m[1]), text, pos: node.from })
+    },
+  })
+  return { items, tags, complete: full !== null }
 }
 
 /** Syntax that shows nothing of itself once rendered: emphasis and code marks, link brackets,

@@ -11,8 +11,7 @@
   import { api } from '../lib/api.ts'
   import { displayName } from '../lib/vault.svelte.ts'
 
-  import { syntaxTree } from '@codemirror/language'
-  import { headingText, type OutlineItem } from '../lib/outline.ts'
+  import { readOutline, type OutlineItem } from '../lib/outline.ts'
   import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
   import { attachmentPath, embedUrlFor } from '../lib/attachments.ts'
   import { linkTarget } from '../lib/linktarget.ts'
@@ -284,20 +283,9 @@
   function reportHeadings(v: EditorView) {
     clearTimeout(headingTimer)
     headingTimer = setTimeout(() => {
-      const items: OutlineItem[] = []
-      const inline: string[] = []
-      syntaxTree(v.state).iterate({
-        enter(node) {
-          if (node.name === 'NoteTag') {
-            inline.push(v.state.sliceDoc(node.from, node.to).trim().replace(/^#/u, ''))
-            return
-          }
-          const m = /^ATXHeading(\d)$/u.exec(node.name)
-          if (!m) return
-          const text = headingText(node.node, (from, to) => v.state.sliceDoc(from, to))
-          items.push({ level: Number(m[1]), text, pos: node.from })
-        },
-      })
+      const { items, tags: inline, complete } = readOutline(v.state)
+      // The rest of a long note is parsed by the next pass, which reads it all again.
+      if (!complete) reportHeadings(v)
       onHeadings?.(items)
       const doc = v.state.doc.toString()
       void readTags(doc, inline)
