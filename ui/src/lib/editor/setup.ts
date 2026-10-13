@@ -172,7 +172,12 @@ const theme = EditorView.theme({
   // around it as padding, for the same measuring reason as `.cm-heading`.
   '.cm-table': { overflowX: 'auto', padding: '0.4em 0', cursor: 'text' },
   '.cm-table table': { borderCollapse: 'collapse', fontSize: '0.95em', lineHeight: '1.45' },
-  '.cm-table th, .cm-table td': { border: '1px solid var(--border)', padding: '0.3em 0.7em', textAlign: 'left', verticalAlign: 'top' },
+  // Cells break at words: `.cm-lineWrapping`'s `overflow-wrap: anywhere` would let a cell's
+  // min-content shrink to one letter, and the table squeeze a short column to `C⏎2⏎2`.
+  '.cm-table th, .cm-table td': {
+    border: '1px solid var(--border)', padding: '0.3em 0.7em', textAlign: 'left', verticalAlign: 'top',
+    overflowWrap: 'break-word', wordBreak: 'normal',
+  },
   '.cm-table th': { fontWeight: '600', background: 'var(--panel)' },
   '.cm-table code': { fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--code-bg)', borderRadius: '3px', padding: '0 0.2em' },
   '.cm-table a:not(.cm-wikilink)': { color: 'var(--accent)' },
