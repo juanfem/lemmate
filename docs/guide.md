@@ -332,6 +332,7 @@ Callout `collapse="true"` is not implemented.
   is where its spelling suggestions are.
 - **Spell checking** is the browser's (or, in the desktop app, the system's) and is on in notes
   unless you turn it off — **View: no spell checking** in the palette, remembered per browser.
+  Web addresses, `[[links]]`, `#tags` and code are left alone; a link's label is still checked.
   On Linux the desktop app checks against the dictionaries for your locale (`LANGUAGE`, then
   `LANG`), which need to be installed — hunspell or aspell ones, through Enchant. Set
   `LEMMATE_SPELL_LANGUAGES=en_US,es_ES` to choose others, or `none` to leave it off.

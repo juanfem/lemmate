@@ -20,6 +20,7 @@ import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
 import { insertLink, run, toggleMark } from './format.ts'
 import { selectionBar } from './selectionBar.ts'
+import { skipSpelling } from './spelling.ts'
 
 const highlight = HighlightStyle.define([
   { tag: t.heading, fontWeight: '600' },
@@ -492,6 +493,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       theme,
       modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
       spellCompartment.of(spellcheckAttrs(opts.spellcheck ?? false)),
+      skipSpelling,
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
       selectionBar(),
