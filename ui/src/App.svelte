@@ -43,6 +43,7 @@
   import Modal from './components/Modal.svelte'
   import { measure } from './lib/measure.svelte.ts'
   import { colours } from './lib/palette.svelte.ts'
+  import { spelling } from './lib/spellcheck.svelte.ts'
   import Icon, { type IconName } from './components/Icon.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
@@ -951,6 +952,7 @@
     colours.current === 'warm'
       ? { id: 'palette', label: 'View: Finder colours', run: () => colours.set('finder') }
       : { id: 'palette', label: 'View: warm paper colours', run: () => colours.set('warm') },
+    { id: 'spellcheck', label: spelling.on ? 'View: no spell checking' : 'View: check spelling', run: spelling.toggle },
     ...(serverFeatures ? [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }] : []),
     ...(localOnly && canConnect ? [{ id: 'connect', label: 'Connect a server…', run: () => (connectOpen = true) }] : []),
     // Only a relay can merge vaults: it is the one thing that holds both engines (SPEC §3.2).

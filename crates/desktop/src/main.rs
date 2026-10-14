@@ -13,6 +13,7 @@
 
 mod config;
 mod env_path;
+mod spelling;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -420,6 +421,8 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
         // every HTML5 drag. Nothing listens to that handler's events: there is no IPC.
         .disable_drag_drop_handler()
         .initialization_script(SHELL_SCRIPT)
+        // Idempotent, and every window shares one web context: once per load is plenty.
+        .on_page_load(|window, _| spelling::enable(&window))
         .on_navigation(move |url| {
             if !url.path().starts_with(SHELL_PREFIX) {
                 return true;

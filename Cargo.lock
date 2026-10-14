@@ -2631,6 +2631,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "webkit2gtk",
 ]
 
 [[package]]

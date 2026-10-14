@@ -443,9 +443,19 @@ export interface EditorOptions extends PreviewOptions {
   extra?: Extension[]
   complete?: CompletionSources
   mode?: ViewMode
+  /** Let the browser (or webview) underline misspellings. CodeMirror's own default is off. */
+  spellcheck?: boolean
 }
 
 const modeCompartment = new Compartment()
+const spellCompartment = new Compartment()
+
+const spellcheckAttrs = (on: boolean): Extension => EditorView.contentAttributes.of({ spellcheck: on ? 'true' : 'false' })
+
+/** Turn the platform's spell checker on or off in a running editor. */
+export function setSpellcheck(view: EditorView, on: boolean) {
+  view.dispatch({ effects: spellCompartment.reconfigure(spellcheckAttrs(on)) })
+}
 
 /** Swap the view mode in place — the doc, the scroll position and the collab binding all stay. */
 export function setViewMode(view: EditorView, mode: ViewMode, opts: PreviewOptions) {
@@ -481,6 +491,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       syntaxHighlighting(highlight),
       theme,
       modeCompartment.of(modeExtensions(opts.mode ?? 'live', opts)),
+      spellCompartment.of(spellcheckAttrs(opts.spellcheck ?? false)),
       ...(opts.complete ? [noteCompletions(opts.complete)] : []),
       yCollab(text, awareness),
       selectionBar(),

@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { EditorView } from '@codemirror/view'
-  import { createEditor, setViewMode, type NoteSource, type ViewMode } from '../lib/editor/setup.ts'
+  import { createEditor, setSpellcheck, setViewMode, type NoteSource, type ViewMode } from '../lib/editor/setup.ts'
   import { listIndent } from '../lib/editor/lists.ts'
+  import { spelling } from '../lib/spellcheck.svelte.ts'
   import { insertLink, run, toggleMark, toggleTask, toggleWikilink, type Plan } from '../lib/editor/format.ts'
   import { MOD } from '../lib/editor/selectionBar.ts'
   import { startCompletion } from '@codemirror/autocomplete'
@@ -445,6 +446,7 @@
       notes,
       noteId,
       mode,
+      spellcheck: spelling.on,
       extra: [fileHandlers, headingWatcher, pageFurniture(head, foot)],
       complete: {
         notes: () => session.notes.map((n) => n.path),
@@ -492,6 +494,11 @@
   $effect(() => {
     const m = mode
     if (view) setViewMode(view, m, { openLink, embedUrl, openUrl, notes, noteId })
+  })
+
+  $effect(() => {
+    const on = spelling.on
+    if (view) setSpellcheck(view, on)
   })
 
   /** A press on the bar must not take the focus off the text it is about to indent. */

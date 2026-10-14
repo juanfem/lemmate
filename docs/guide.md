@@ -330,6 +330,11 @@ Callout `collapse="true"` is not implemented.
   ticks one already there) and *Insert image or file…*, which uploads from your computer and
   puts the embed where you clicked. `Shift`+right-click gets you the browser's own menu, which
   is where its spelling suggestions are.
+- **Spell checking** is the browser's (or, in the desktop app, the system's) and is on in notes
+  unless you turn it off — **View: no spell checking** in the palette, remembered per browser.
+  On Linux the desktop app checks against the dictionaries for your locale (`LANGUAGE`, then
+  `LANG`), which need to be installed — hunspell or aspell ones, through Enchant. Set
+  `LEMMATE_SPELL_LANGUAGES=en_US,es_ES` to choose others, or `none` to leave it off.
 - **On a phone** the bar above the note holds the buttons the keyboard lacks: ⇤/⇥ for the two
   `Tab` commands, a checklist box, bold, italic, a note link, a link, and an upload (which can
   also take a photo). It scrolls sideways if the screen is narrow. There is no floating bar on
