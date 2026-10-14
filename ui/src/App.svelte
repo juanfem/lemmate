@@ -42,6 +42,7 @@
   import type { SharedNote } from './lib/api.ts'
   import Modal from './components/Modal.svelte'
   import { measure } from './lib/measure.svelte.ts'
+  import { colours } from './lib/palette.svelte.ts'
   import Icon, { type IconName } from './components/Icon.svelte'
 
   // ---- first run (desktop): the relay serves the UI in setup mode until configured
@@ -947,6 +948,9 @@
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
     { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
     { id: 'full-width', label: measure.full ? 'View: centred text column' : 'View: full-width text', run: measure.toggle },
+    colours.current === 'warm'
+      ? { id: 'palette', label: 'View: Finder colours', run: () => colours.set('finder') }
+      : { id: 'palette', label: 'View: warm paper colours', run: () => colours.set('warm') },
     ...(serverFeatures ? [{ id: 'share', label: 'Share note…', run: () => (shareOpen = !!active) }] : []),
     ...(localOnly && canConnect ? [{ id: 'connect', label: 'Connect a server…', run: () => (connectOpen = true) }] : []),
     // Only a relay can merge vaults: it is the one thing that holds both engines (SPEC §3.2).
@@ -1960,7 +1964,7 @@
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
-    background: #22c55e;
+    background: var(--ok);
     flex: none;
   }
   .offline .dot,

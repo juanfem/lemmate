@@ -159,7 +159,7 @@
   /* The note you are reading: the same "the row fills" language as a selected folder, one
      step quieter, so the two states read as the same idea at two scopes. */
   .row.active {
-    background: var(--accent-bg);
+    background: var(--sel-bg);
     color: var(--sel-fg);
   }
   .row.active.selected {

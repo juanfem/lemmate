@@ -107,7 +107,7 @@
     background: var(--accent-bg);
   }
   .row.active {
-    background: var(--accent-bg);
+    background: var(--sel-bg);
     color: var(--sel-fg);
     font-weight: 600;
   }

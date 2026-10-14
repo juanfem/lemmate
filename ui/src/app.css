@@ -5,12 +5,54 @@
   --ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --prose: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --mono: ui-monospace, 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+  /* Finder's: white content, greys with the faint blue bias of macOS vibrancy, system blue
+     for links and for the selected row, and Xcode's default colours for code. The other
+     palette, warm paper, is below under [data-palette='warm']; `lib/palette.ts` picks one. */
+  --bg: #ffffff;
+  --panel: #ececee;
+  /* The right panel is a shade lighter than the left: it is closer to the document, and the
+     two would otherwise clamp the editor between identical greys. */
+  --panel-2: #f6f6f7;
+  /* Behind the tab strip and the list headers — darker than the page, so the active tab opens
+     into it the way a Finder or Safari tab does. */
+  --chrome: #e4e4e7;
+  --fg: #262626;
+  --prose-fg: #1d1d1f;
+  --muted: #7c7c80;
+  /* Metadata that must stay legible but never compete: dates, counts, snippets. */
+  --faint: #a9a9ae;
+  --border: #d9d9de;
+  /* Inside the document column, where a full-strength rule would cut the page in half. */
+  --border-soft: #e9e9ed;
+  --hover: #e1e1e5;
+  --accent: #007aff;
+  --accent-fg: #fff;
+  /* A pale wash of the accent, behind tags, callouts, an active toolbar button. */
+  --accent-bg: #e8f1fe;
+  /* The open note's row: a focused Finder list's solid blue, with white text on it. */
+  --sel-bg: #0064e1;
+  --sel-fg: #fff;
+  --sel-muted: #cfe0fb;
+  --code-bg: #f5f5f7;
+  --tag-bg: #e8e8ed;
+  --danger: #d70015;
+  --danger-bg: #ffeceb;
+  --danger-border: #ffc7c2;
+  --ok: #28cd41;
+  --syn-keyword: #9b2393;
+  --syn-string: #c41a16;
+  --syn-comment: #5d6c79;
+  --syn-number: #1c00cf;
+  --syn-function: #326d74;
+  --syn-type: #0b4f79;
+  --syn-property: #6c36a9;
+  --syn-meta: #643820;
+}
+:root[data-palette='warm'] {
   /* A warm near-white rather than pure #fff: the page is a sheet of paper the text sits on,
      and #fff beside a serif face reads as a form field. */
   --bg: #fdfcfb;
   --panel: #f6f4f1;
-  /* The right panel is a shade lighter than the left: it is closer to the document, and the
-     two would otherwise clamp the editor between identical greys. */
   --panel-2: #f8f6f4;
   /* Behind the tab strip and the list headers — the chrome that is not a panel of its own. */
   --chrome: #f2efeb;
@@ -18,10 +60,8 @@
   /* Prose is a touch darker than UI text: at 17.5px serif on paper the UI grey reads thin. */
   --prose-fg: #231f1b;
   --muted: #8a857e;
-  /* Metadata that must stay legible but never compete: dates, counts, snippets. */
   --faint: #a8a29a;
   --border: #e4e0da;
-  /* Inside the document column, where a full-strength rule would cut the page in half. */
   --border-soft: #eceae6;
   --hover: #f2f0ed;
   --accent: oklch(0.55 0.11 260);
@@ -29,6 +69,7 @@
   /* Selection fill for a *row*. Not accent-at-low-alpha: over the warm panel that goes muddy,
      so it is a mixed violet-grey of its own. */
   --accent-bg: #e9e6f2;
+  --sel-bg: #e9e6f2;
   --sel-fg: #221f2e;
   --sel-muted: #7b7590;
   --code-bg: #f2f0ed;
@@ -54,6 +95,39 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --bg: #1e1e1e;
+    --panel: #2a2a2c;
+    --panel-2: #232324;
+    --chrome: #161617;
+    --fg: #dfdfdf;
+    --prose-fg: #e8e8e8;
+    --muted: #98989d;
+    --faint: #737377;
+    --border: #3a3a3c;
+    --border-soft: #2c2c2e;
+    --hover: #343437;
+    --accent: #0a84ff;
+    --accent-fg: #fff;
+    --accent-bg: #1b2e4a;
+    --sel-bg: #0058d0;
+    --sel-fg: #fff;
+    --sel-muted: #b9cdf0;
+    --code-bg: #262628;
+    --tag-bg: #333336;
+    --danger: #ff6961;
+    --danger-bg: #3b1f1d;
+    --danger-border: #6a2c27;
+    --ok: #32d74b;
+    --syn-keyword: #ff7ab2;
+    --syn-string: #ff8170;
+    --syn-comment: #7f8c98;
+    --syn-number: #d9c97c;
+    --syn-function: #67b7a4;
+    --syn-type: #5dd8ff;
+    --syn-property: #d0a8ff;
+    --syn-meta: #fd8f3f;
+  }
+  :root[data-palette='warm'] {
     /* The same paper, unlit — warm-neutral rather than the blue-grey a generic dark theme
        reaches for, so switching themes does not also switch the app's temperature. */
     --bg: #1a1816;
@@ -70,6 +144,7 @@
     --accent: oklch(0.72 0.11 260);
     --accent-fg: #14131c;
     --accent-bg: #2e2c3f;
+    --sel-bg: #2e2c3f;
     --sel-fg: #e6e3f2;
     --sel-muted: #a29bbb;
     --code-bg: #26231f;

@@ -274,7 +274,7 @@
     background: var(--hover);
   }
   .row.active {
-    background: var(--accent-bg);
+    background: var(--sel-bg);
     color: var(--sel-fg);
   }
   .main {
