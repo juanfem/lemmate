@@ -754,7 +754,12 @@ only). They are enforced on every REST call and every relay frame, not in the UI
 updates are refused by the server. A vault nobody owns yet is claimed by the first user who
 syncs it, so create and claim your vaults before handing out accounts.
 
-**Sharing a whole vault** is a REST-only operation today — there is no members UI:
+**Sharing a whole vault** — *Members…* on the vault's right-click menu in the file tree, or
+*Members of “…”…* in the palette. An owner adds people by the email of an existing account
+(invite them first from *Account settings* if they have none), changes their role, and removes
+them; everyone else sees the list read-only. A vault always keeps one owner: the last one cannot
+step down or leave until someone else is made owner. A new member sees the vault the next time
+their app starts. The same operations over REST:
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" https://…/api/v1/vaults/$VAULT/members

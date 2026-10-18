@@ -122,6 +122,8 @@ export interface TreeActions {
   onDeleteFolder?: (vault: string, folder: string) => void
   onCreateInVault?: (vault: string) => void
   onRenameVault?: (vault: string) => void
+  /** Who is in the vault — only where a server with accounts answers for it. */
+  onVaultMembers?: (vault: string) => void
   onImportInto?: (vault: string) => void
   onNewVault?: () => void
   onRenameNote?: (vault: string, id: string) => void

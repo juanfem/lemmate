@@ -369,6 +369,7 @@
         { label: 'New note in this vault', run: () => actions.onCreateInVault?.(vault) },
         { label: '', separator: true },
         { label: 'Rename vault…', run: () => actions.onRenameVault?.(vault) },
+        ...(actions.onVaultMembers ? [{ label: 'Members…', run: () => actions.onVaultMembers?.(vault) }] : []),
         { label: 'Import an Obsidian vault…', run: () => actions.onImportInto?.(vault) },
         { label: '', separator: true },
         { label: 'Expand all', run: expandAll },

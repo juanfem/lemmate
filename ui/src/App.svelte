@@ -8,6 +8,7 @@
   import Setup from './components/Setup.svelte'
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
+  import MembersDialog from './components/MembersDialog.svelte'
   import SignedOut from './components/SignedOut.svelte'
   import DailyDialog from './components/DailyDialog.svelte'
   import { compare as compareDays, dayOf, formatDate, iso, pathFor, templateOf, today, type Day } from './lib/daily.ts'
@@ -68,6 +69,8 @@
   let probed = $state(false)
   let connectOpen = $state(false)
   let mergeOpen = $state(false)
+  /** The vault whose members dialog is open. */
+  let membersOf: string | null = $state(null)
   if (!readPublicToken())
     fetch('/api/v1/local/setup')
       .then((r) => (r.ok ? r.json() : null))
@@ -983,6 +986,7 @@
     { id: 'prevpane', label: 'Focus previous pane', shortcut: 'Ctrl+Alt+←', run: () => focusPane(-1) },
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
+    ...(session && serverFeatures ? [{ id: 'members', label: `Members of “${session.label}”…`, run: () => (membersOf = session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
     ...(me && me.id !== 'local'
       ? [
@@ -1542,6 +1546,7 @@
                 onDeleteFolder: deleteFolder,
                 onCreateInVault: createInVault,
                 onRenameVault: renameVault,
+                onVaultMembers: serverFeatures ? (v: string) => (membersOf = v) : undefined,
                 onImportInto: (v) => (importInto = v),
                 onNewVault: newVault,
                 onRenameNote: renameNote,
@@ -1735,6 +1740,9 @@
       initialFrom={session?.id ?? null}
       onClose={() => (mergeOpen = false)}
     />
+  {/if}
+  {#if membersOf && me}
+    <MembersDialog vault={membersOf} label={workspace?.label(membersOf) ?? 'vault'} myId={me.id} onClose={() => (membersOf = null)} />
   {/if}
   {#if shareOpen && active && session}
     <ShareDialog vault={session.id} noteId={active} path={activePath} base={serverBase} onClose={() => (shareOpen = false)} />
