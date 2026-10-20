@@ -1578,9 +1578,9 @@ mod tests {
         let (pptx, mime) = render("dir/Talk.qmd", deck, Format::Pptx, &atts, read, &opts).unwrap();
         assert!(mime.contains("presentationml"));
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
-        let slides = zip.file_names().filter(|n| n.starts_with("ppt/slides/slide")).count();
+        let slides = zip.file_names().filter(|n| n.as_ref().unwrap().starts_with("ppt/slides/slide")).count();
         assert_eq!(slides, 3, "a title slide and one per heading");
-        assert!(zip.file_names().any(|n| n.starts_with("ppt/media/")), "the image is in the deck");
+        assert!(zip.file_names().any(|n| n.unwrap().starts_with("ppt/media/")), "the image is in the deck");
         let mut one = String::new();
         std::io::Read::read_to_string(&mut zip.by_name("ppt/slides/slide2.xml").unwrap(), &mut one).unwrap();
         assert!(one.contains("Later.") && !one.contains(". . ."), "a pause is dropped, not shown: {one}");

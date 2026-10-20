@@ -588,7 +588,7 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).unwrap();
-            if f.name().starts_with("word/media/") {
+            if f.name().unwrap().starts_with("word/media/") {
                 let mut bytes = Vec::new();
                 f.read_to_end(&mut bytes).unwrap();
                 out.push(bytes);

@@ -76,8 +76,11 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # RUSTSEC-2026-0381 (distrusted emSign roots) is fixed in webpki-roots 1.0.10, which the lock
+      # holds. tokio-tungstenite (0.29 and 0.30 alike) still asks for ^0.26, and 0.26.11 is only a
+      # shim re-exporting 1.x, so the advisory matches a version number, not the roots we ship.
       - name: cargo audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0381
 
   # The live end-to-end suites in ui/test (sync, relay) skip themselves unless they are given
   # built binaries, so the `node` job runs them inert. This job builds the binaries and runs

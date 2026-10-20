@@ -38,7 +38,7 @@ ureq = "3"
 url = "2"
 webpki-roots = "1"
 yrs = { version = "0.27", features = ["sync"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 # Killing a timed-out pandoc/quarto together with what it started (`pandoc::run_bounded`).

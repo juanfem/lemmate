@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(report, ExportReport { files: 3, bytes: 7 + 7 + 9 });
 
         let mut archive = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
-        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        let names: Vec<String> = archive.file_names().map(|n| n.unwrap().into_owned()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, vec!["Root.md", "a/Nested.qmd", "a/img.png"]);
