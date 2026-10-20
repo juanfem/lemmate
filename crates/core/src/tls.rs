@@ -4,6 +4,8 @@
 //! PEM file (`--ca-cert`); it then becomes the *only* trusted root for that connection, which is
 //! the right shape for "my server, my CA".
 
+use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +13,10 @@ use std::time::Duration;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs};
+use ureq::unversioned::transport::{
+    ConnectProxyConnector, ConnectionDetails, Connector, RustlsConnector, TcpConnector, Transport,
+};
 
 use crate::error::{Error, Result};
 
@@ -91,7 +97,73 @@ fn agent_with(
             .build();
         builder = builder.tls_config(tls);
     }
-    Ok(ureq::Agent::new_with_config(builder.build()))
+    let connector = ConnectProxyConnector::default()
+        .chain(EveryAddress(TcpConnector::default()))
+        .chain(RustlsConnector::default());
+    Ok(ureq::Agent::with_parts(builder.build(), connector, DefaultResolver::default()))
+}
+
+/// ureq's own TCP connector, made to try the next address when one is unreachable.
+///
+/// ureq walks a host's addresses but moves on only from a refusal or a timeout; "no route to
+/// host" ends the call. That is what macOS answers when it keeps an app off the local network —
+/// a server whose IPv6 address lies in the LAN's prefix, reached from inside the LAN — while the
+/// same server's IPv4 address works. The WebSocket (tokio's connect) already tries every address,
+/// so without this a desktop app syncs fine and still cannot list its vaults.
+#[derive(Debug)]
+struct EveryAddress(TcpConnector);
+
+impl<In: Transport> Connector<In> for EveryAddress {
+    type Out = <TcpConnector as Connector<In>>::Out;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        if chained.is_some() || details.addrs.len() < 2 {
+            return self.0.connect(details, chained);
+        }
+        // The original start time and timeout go to every attempt, so ureq's own connect
+        // deadline still bounds the whole walk.
+        first_reachable(&details.addrs, |addrs| {
+            let mut rest = ResolvedSocketAddrs::from_fn(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+            addrs.iter().for_each(|a| rest.push(*a));
+            self.0.connect(
+                &ConnectionDetails {
+                    addrs: rest,
+                    run_connector: details.run_connector.clone(),
+                    current_time: details.current_time.clone(),
+                    ..*details
+                },
+                None,
+            )
+        })
+    }
+}
+
+/// Call `attempt` with `addrs`, then with what follows the first address for as long as the
+/// answer is "unreachable" and there is something left to try.
+fn first_reachable<T>(
+    addrs: &[SocketAddr],
+    mut attempt: impl FnMut(&[SocketAddr]) -> Result<T, ureq::Error>,
+) -> Result<T, ureq::Error> {
+    let mut rest = addrs;
+    loop {
+        match attempt(rest) {
+            Err(ureq::Error::Io(e))
+                if rest.len() > 1
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable
+                    ) =>
+            {
+                tracing::debug!(addr = %rest[0], error = %e, "unreachable; trying the next address");
+                rest = &rest[1..];
+            }
+            other => return other,
+        }
+    }
 }
 
 /// A warning when `server` would carry a bearer token in cleartext: an `http://` or `ws://` URL
@@ -142,6 +214,55 @@ mod tests {
         let t = &transfer.config().timeouts();
         assert_eq!(t.connect, Some(CONNECT_TIMEOUT));
         assert!(t.global.is_some_and(|g| g > API_TIMEOUT));
+    }
+
+    #[test]
+    fn an_unreachable_address_hands_over_to_the_next() {
+        let addrs: Vec<SocketAddr> = ["[2001:db8::1]:443", "192.0.2.1:443", "198.51.100.1:443"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        fn io_err<T>(kind: io::ErrorKind) -> Result<T, ureq::Error> {
+            Err(ureq::Error::Io(io::Error::from(kind)))
+        }
+
+        // Unreachable, then unreachable again: the walk reaches the last address.
+        let mut seen = Vec::new();
+        let got = first_reachable(&addrs, |rest| {
+            seen.push(rest[0]);
+            if rest.len() > 1 { io_err(io::ErrorKind::HostUnreachable) } else { Ok(rest[0]) }
+        });
+        assert_eq!(got.unwrap(), addrs[2]);
+        assert_eq!(seen, addrs);
+
+        // Anything else ends it where it happened, as ureq would have.
+        let mut calls = 0;
+        let got: Result<(), _> = first_reachable(&addrs, |_| {
+            calls += 1;
+            io_err(io::ErrorKind::PermissionDenied)
+        });
+        assert!(matches!(got, Err(ureq::Error::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied));
+        assert_eq!(calls, 1);
+
+        // With nothing left, the last address's error is the answer.
+        let got: Result<(), _> = first_reachable(&addrs, |_| io_err(io::ErrorKind::NetworkUnreachable));
+        assert!(matches!(got, Err(ureq::Error::Io(e)) if e.kind() == io::ErrorKind::NetworkUnreachable));
+    }
+
+    #[test]
+    fn the_agent_still_reaches_a_server_by_name() {
+        // IPv4 only, so `localhost` resolves to an address that refuses (::1) as well as this one.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").unwrap();
+        });
+        let mut resp = http_agent(None).unwrap().get(format!("http://localhost:{port}/")).call().unwrap();
+        assert_eq!(resp.body_mut().read_to_string().unwrap(), "ok");
     }
 
     #[test]

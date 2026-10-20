@@ -1087,6 +1087,15 @@ updates on one you can only view. The window says so in a red strip above the st
 write. On the desktop the refusal comes through the local relay, and a window opened after it
 is told too.
 
+**A vault is missing from the desktop app.** The app asks the server for your vaults once, as it
+starts; if it cannot reach it then, only the folders already on disk open, and the rest wait for
+the next launch. The log (`desktop.log`, in `~/.local/state/lemmate` on Linux,
+`~/Library/Logs/lemmate` on macOS) says `could not ask the server which vaults exist` and why. On
+macOS, check *System Settings → Privacy & Security → Local Network* for Lemmate: a server on your
+own network — or one whose IPv6 address is in your network's range — is a local-network device to
+macOS, and an app without that permission is told "no route to host". The app tries the server's
+other addresses before giving up, so a server with an IPv4 address too is still found.
+
 **Where things live.**
 
 | Path | What |
