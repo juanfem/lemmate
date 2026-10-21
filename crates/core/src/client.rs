@@ -16,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
-use tokio_tungstenite::{Connector, connect_async_tls_with_config};
+use tokio_tungstenite::{Connector, client_async_tls_with_config};
 use tracing::{debug, info, warn};
 
 use crate::attachments::{MAX_ATTACHMENT_BYTES, hash_bytes, mime_for_path};
@@ -48,6 +48,9 @@ const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// A connection must have lasted this long before the reconnect delay starts over: a server
 /// that accepts the upgrade and drops it at once would otherwise be hammered every second.
 const RECONNECT_HEALTHY: Duration = Duration::from_secs(10);
+/// How long TLS and the WebSocket upgrade may take once TCP is connected (see [`connect_server`]).
+const HANDSHAKE_TIMEOUT: Duration =
+    if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(30) };
 /// How much may wait to be written to the server before the connection is dropped and the
 /// reconnect handshake catches it up instead (see `local::Outbox`).
 const SERVER_QUEUE_BYTES: usize = 64 << 20;
@@ -187,10 +190,7 @@ pub async fn start_many(opts: Vec<SyncOptions>, local: LocalOptions) -> Result<L
         .into_iter()
         .zip(opts)
         .zip(served.events)
-        .map(|((mut engine, o), rx)| {
-            engine.routes = Some(served.routes.clone());
-            tokio::spawn(run_inner(engine, o, rx))
-        })
+        .map(|((engine, o), rx)| spawn_engine(engine, o, rx, &served.routes, &served.registrar))
         .collect();
     let tasks = Arc::new(Mutex::new(tasks));
 
@@ -247,11 +247,105 @@ fn open_new_vault(
     std::fs::create_dir_all(&dir)?;
     let opts = SyncOptions { vault_dir: dir, vault_id: Some(vault), once: false, ..template.clone() };
     // Opened before registering, so a vault that cannot be opened is not one the relay claims.
-    let mut engine = Engine::open(&opts)?;
+    let engine = Engine::open(&opts)?;
     let Some(rx) = registrar.add(vault) else { return Ok(None) };
-    engine.routes = Some(routes.clone());
     info!(%vault, dir = %opts.vault_dir.display(), "opened a vault created by the UI");
-    Ok(Some(tokio::spawn(run_inner(engine, opts, rx))))
+    Ok(Some(spawn_engine(engine, opts, rx, routes, registrar)))
+}
+
+/// Start one vault's engine behind the relay. One that runs until it is stopped (every engine
+/// but `once`) is [`supervise`]d, so a vault cannot quietly drop out of a running app.
+fn spawn_engine(
+    engine: Engine,
+    opts: SyncOptions,
+    rx: mpsc::UnboundedReceiver<LocalEvent>,
+    routes: &Arc<Routes>,
+    registrar: &crate::local::Registrar,
+) -> tokio::task::JoinHandle<Result<SyncReport>> {
+    let vault = engine.vault_id;
+    let routes = routes.clone();
+    if opts.once {
+        let mut engine = engine;
+        engine.routes = Some(routes);
+        return tokio::spawn(run_inner(engine, opts, rx));
+    }
+    // The engine already open is the first run's; a restart opens the vault again, which is
+    // also what re-reads the folder for whatever changed while nothing was watching it.
+    let mut first = Some(engine);
+    let run = move |rx| {
+        let (engine, opts, routes) = (first.take(), opts.clone(), routes.clone());
+        async move {
+            let mut engine = match engine {
+                Some(engine) => engine,
+                None => Engine::open(&opts)?,
+            };
+            engine.routes = Some(routes);
+            run_inner(engine, opts, rx).await
+        }
+    };
+    let registrar = registrar.clone();
+    tokio::spawn(supervise(vault, rx, run, move || registrar.renew(vault)))
+}
+
+/// The delay before a stopped engine is started again doubles from this up to the maximum, and
+/// starts over once a run has lasted [`RESTART_HEALTHY`].
+const RESTART_MIN: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(1) };
+const RESTART_MAX: Duration = Duration::from_secs(60);
+const RESTART_HEALTHY: Duration = Duration::from_secs(60);
+
+/// Run a vault's engine for as long as the relay runs: if it stops — an error, or a panic — say
+/// why, and start it again on a new channel.
+///
+/// The relay outlives its engines (a merged-away vault retires while the rest carry on), so
+/// without this an engine that ended took its vault out of the app with nothing to show for
+/// it: the window kept the tree it had cached, and every request for that vault went
+/// unanswered until the app was restarted. An engine that *retires* returns `Ok`, and that is
+/// the one ending that is final. So is the relay itself going away (`renew` has nothing to
+/// give), and this task being aborted, which aborts the run with it.
+async fn supervise<R, F>(
+    vault: VaultId,
+    mut rx: mpsc::UnboundedReceiver<LocalEvent>,
+    mut run: R,
+    renew: impl Fn() -> Option<mpsc::UnboundedReceiver<LocalEvent>>,
+) -> Result<SyncReport>
+where
+    R: FnMut(mpsc::UnboundedReceiver<LocalEvent>) -> F,
+    F: std::future::Future<Output = Result<SyncReport>> + Send + 'static,
+{
+    /// Aborts the run when the supervisor is dropped, which is how aborting the one aborts both.
+    struct AbortOnDrop(tokio::task::JoinHandle<Result<SyncReport>>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut delay = RESTART_MIN;
+    loop {
+        let started = Instant::now();
+        let mut task = AbortOnDrop(tokio::spawn(run(rx)));
+        let why = match (&mut task.0).await {
+            Ok(Ok(report)) => return Ok(report),
+            Ok(Err(e)) => e.to_string(),
+            Err(e) if e.is_panic() => format!("panicked: {}", panic_message(e.into_panic().as_ref())),
+            Err(e) => return Err(Error::Sync(e.to_string())),
+        };
+        if started.elapsed() >= RESTART_HEALTHY {
+            delay = RESTART_MIN;
+        }
+        tracing::error!(%vault, reason = %why, "the vault's sync engine stopped; starting it again in {delay:?}");
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(RESTART_MAX);
+        rx = renew().ok_or_else(|| Error::Sync(why))?;
+    }
+}
+
+/// What a panic said, when it said it with a string — which `panic!` and `expect` do.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(no message)")
 }
 
 /// The vault a directory already belongs to, or `None` if it holds no sidecar yet. Lets a shell
@@ -326,8 +420,24 @@ async fn run_inner(
     loop {
         let connector = tls.clone().map(Connector::Rustls);
         let request = ws_request(&ws_url, opts.token.as_deref())?;
-        match connect_async_tls_with_config(request, None, false, connector).await {
-            Ok((ws, _)) => {
+        // The window on this machine is served while the server makes up its mind: a connection
+        // attempt can take as long as the system's TCP timeout, or the handshake's.
+        let attempt = connect_server(request, connector);
+        let connected = match work_offline_until(
+            &mut engine,
+            &mut fs_rx,
+            &mut done_rx,
+            &mut local_rx,
+            &mut local_alive,
+            attempt,
+        )
+        .await
+        {
+            Waited::Retired => return Ok(engine.report()),
+            Waited::Done(connected) => connected,
+        };
+        match connected {
+            Ok(ws) => {
                 info!(url = %ws_url, "connected");
                 let connected_at = Instant::now();
                 let (mut sink, mut stream) = ws.split();
@@ -420,22 +530,12 @@ async fn run_inner(
             }
         }
         // Offline: local peers, the projection, and the journal keep working.
-        let deadline = Instant::now() + backoff;
-        while Instant::now() < deadline {
-            tokio::select! {
-                ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
-                done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done) },
-                ev = local_rx.recv(), if local_alive => match ev {
-                    Some(ev) => {
-                        engine.on_local_event(ev);
-                        if engine.retiring {
-                            return Ok(engine.report());
-                        }
-                    }
-                    None => local_alive = false,
-                },
-                _ = tokio::time::sleep(TICK) => engine.tick(),
-            }
+        let pause = tokio::time::sleep(backoff);
+        if let Waited::Retired =
+            work_offline_until(&mut engine, &mut fs_rx, &mut done_rx, &mut local_rx, &mut local_alive, pause)
+                .await
+        {
+            return Ok(engine.report());
         }
         backoff = (backoff * 2).min(RECONNECT_MAX);
     }
@@ -490,6 +590,77 @@ async fn run_standalone(
                 }
             }
         }
+    }
+}
+
+/// How [`work_offline_until`] came back.
+enum Waited<T> {
+    Done(T),
+    /// A local UI merged this vault away; the engine is to stop.
+    Retired,
+}
+
+/// Keep the engine at everything that needs no server — the local UIs, the folder, attachment
+/// transfers already under way — until `until` resolves. Whatever the engine is waiting for on
+/// the network, a window on this machine must not be left waiting with it: its frames, and the
+/// relay's queries, go nowhere but this engine.
+async fn work_offline_until<T>(
+    engine: &mut Engine,
+    fs_rx: &mut mpsc::Receiver<FsEvent>,
+    done_rx: &mut mpsc::UnboundedReceiver<TransferDone>,
+    local_rx: &mut mpsc::UnboundedReceiver<LocalEvent>,
+    local_alive: &mut bool,
+    until: impl std::future::Future<Output = T>,
+) -> Waited<T> {
+    tokio::pin!(until);
+    let mut ticker = tokio::time::interval(TICK);
+    loop {
+        tokio::select! {
+            out = &mut until => return Waited::Done(out),
+            ev = fs_rx.recv() => if let Some(ev) = ev { engine.on_fs_event(ev) },
+            done = done_rx.recv() => if let Some(done) = done { engine.on_transfer_done(done) },
+            ev = local_rx.recv(), if *local_alive => match ev {
+                Some(ev) => {
+                    engine.on_local_event(ev);
+                    if engine.retiring {
+                        return Waited::Retired;
+                    }
+                }
+                None => *local_alive = false,
+            },
+            _ = ticker.tick() => engine.tick(),
+        }
+    }
+}
+
+type ServerSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open the WebSocket to the server: TCP, then TLS and the upgrade under [`HANDSHAKE_TIMEOUT`].
+///
+/// What `connect_async_tls_with_config` does, split so the handshake can be timed on its own. A
+/// server that accepts the connection and then says nothing — one being replaced, or wedged on a
+/// full disk — would otherwise hold the attempt open for good, and nothing logs a wait. The TCP
+/// connect keeps the system's timeout: it moves to the host's next address only when one fails,
+/// and cutting it short would stop a slow-to-fail first address from ever giving way to the next.
+async fn connect_server(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    connector: Option<Connector>,
+) -> std::result::Result<ServerSocket, String> {
+    let uri = request.uri();
+    let host = uri.host().ok_or("the server address has no host")?;
+    // `[::1]` in a URL, `::1` to connect to (and to rustls).
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).to_owned();
+    let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("wss") { 443 } else { 80 });
+    let tcp =
+        tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| format!("IO error: {e}"))?;
+    let handshake = client_async_tls_with_config(request, tcp, None, connector);
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+        Ok(Ok((ws, _))) => Ok(ws),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "connected, but the server did not finish the handshake within {HANDSHAKE_TIMEOUT:?}"
+        )),
     }
 }
 
@@ -2888,6 +3059,104 @@ mod tests {
         let long = Duration::from_secs(16);
         assert_eq!(retry_delay(long, Duration::from_millis(200)), long, "dropped at once: keep backing off");
         assert_eq!(retry_delay(long, RECONNECT_HEALTHY), RECONNECT_MIN);
+    }
+
+    /// The engine stopping — a panic, an error — is not the end of the vault: it is said, and
+    /// the engine started again on a new channel, until it ends the one way that is final.
+    #[tokio::test]
+    async fn a_stopped_engine_is_started_again_until_it_retires() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let vault = VaultId::new();
+        let (runs, renewed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let r = runs.clone();
+        let run = move |_rx| {
+            let n = r.fetch_add(1, SeqCst);
+            async move {
+                match n {
+                    0 => panic!("a bug in the engine"),
+                    1 => Err(Error::Sync("the sidecar cannot be read".into())),
+                    _ => Ok(SyncReport { vault_id: vault, notes: 7 }),
+                }
+            }
+        };
+        let n = renewed.clone();
+        let renew = move || {
+            n.fetch_add(1, SeqCst);
+            Some(mpsc::unbounded_channel().1)
+        };
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let report = tokio::time::timeout(Duration::from_secs(5), supervise(vault, rx, run, renew))
+            .await
+            .expect("restarted promptly")
+            .expect("the last run retired");
+        assert_eq!(report.notes, 7);
+        assert_eq!((runs.load(SeqCst), renewed.load(SeqCst)), (3, 2));
+
+        // A relay that no longer holds the vault has no channel to give: that ends it too.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let gone = supervise(vault, rx, |_rx| async { Err(Error::Sync("stopped".into())) }, || None).await;
+        assert!(gone.is_err());
+    }
+
+    /// A server that accepts the connection and then never answers — one being replaced, or
+    /// wedged on a full disk. The engine used to sit in the handshake for good: its window got no
+    /// answer for anything in that vault, and nothing was logged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_that_never_answers_does_not_keep_the_window_waiting() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = silent.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let a = accepted.clone();
+        let listener = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                a.fetch_add(1, SeqCst);
+                held.push(socket);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let vault_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("hello.md"), "hi\n").unwrap();
+        let opts = SyncOptions {
+            vault_dir,
+            server_url: Some(format!("http://{server}")),
+            vault_id: None,
+            once: false,
+            ca_cert: None,
+            token: None,
+        };
+        let local = LocalOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            web_dir: None,
+            vault_root: None,
+            config_path: None,
+            allow_remote: false,
+        };
+        let relay = start(opts, local).await.unwrap();
+
+        // Answered by the engine (a relay query), while its first attempt is still waiting.
+        let url = format!("http://{}/api/v1/vaults/{}/notes", relay.addr, relay.vault_id);
+        let key = relay.key.clone();
+        let listing = tokio::task::spawn_blocking(move || {
+            let mut r = ureq::get(&url).header("authorization", format!("Bearer {key}")).call().unwrap();
+            r.body_mut().read_to_string().unwrap()
+        });
+        let listing = tokio::time::timeout(Duration::from_secs(5), listing)
+            .await
+            .expect("the window is answered while the server says nothing")
+            .unwrap();
+        assert!(listing.contains("hello.md"), "{listing}");
+
+        // And the attempt is given up and made again, not left open.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while accepted.load(SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "no second attempt: the first is still waiting");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        relay.abort();
+        listener.abort();
     }
 
     #[test]

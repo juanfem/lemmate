@@ -361,6 +361,7 @@ impl LocalState {
 }
 
 /// Adds an engine to a running relay: what a shell uses to open a vault a UI has just created.
+#[derive(Clone)]
 pub(crate) struct Registrar(Arc<LocalState>);
 
 impl Registrar {
@@ -379,6 +380,28 @@ impl Registrar {
             }
         }
         engines.push(EngineRef { vault, tx });
+        Some(rx)
+    }
+
+    /// A new channel for `vault`, whose engine stopped and is being started again; `None` when
+    /// the relay no longer holds that vault.
+    ///
+    /// Every local UI is disconnected as well. The engine that stopped took with it what each
+    /// window had subscribed to, and the frames sent to it since are lost; a window that
+    /// reconnects handshakes every doc it has open, which is what the new engine needs to hear.
+    pub(crate) fn renew(&self, vault: VaultId) -> Option<mpsc::UnboundedReceiver<LocalEvent>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut engines = self.0.engines.write().ok()?;
+            engines.iter_mut().find(|e| e.vault == vault)?.tx = tx;
+        }
+        // After the swap: a window connecting from now on announces itself to the new engine,
+        // and one that announced itself to the old engine is in `peers` already, and goes.
+        if let Ok(peers) = self.0.peers.read() {
+            for peer in peers.values() {
+                peer.close();
+            }
+        }
         Some(rx)
     }
 }
@@ -704,7 +727,9 @@ async fn peer_session(socket: WebSocket, state: Arc<LocalState>) {
                 Some(Ok(_)) => {}
             },
             _ = tx.overflowed() => {
-                tracing::warn!(peer = id, "a local UI is not keeping up; disconnecting it");
+                if !tx.is_closed() {
+                    tracing::warn!(peer = id, "a local UI is not keeping up; disconnecting it");
+                }
                 break;
             }
             _ = &mut writer => break,
@@ -1477,6 +1502,8 @@ pub struct Outbox {
     limit: usize,
     full: Arc<AtomicBool>,
     overflow: Arc<tokio::sync::Notify>,
+    /// Set by [`Outbox::close`]: the refusal that follows is the relay's doing, not the peer's.
+    closed: Arc<AtomicBool>,
 }
 
 pub(crate) struct OutboxRx {
@@ -1489,7 +1516,8 @@ pub(crate) fn outbox(limit: usize) -> (Outbox, OutboxRx) {
     let queued = Arc::new(AtomicUsize::new(0));
     let full = Arc::new(AtomicBool::new(false));
     let overflow = Arc::new(tokio::sync::Notify::new());
-    (Outbox { tx, queued: queued.clone(), limit, full, overflow }, OutboxRx { rx, queued })
+    let closed = Arc::new(AtomicBool::new(false));
+    (Outbox { tx, queued: queued.clone(), limit, full, overflow, closed }, OutboxRx { rx, queued })
 }
 
 impl Outbox {
@@ -1513,9 +1541,21 @@ impl Outbox {
         true
     }
 
-    /// Resolves once a frame has been refused for want of room.
+    /// Resolves once a frame has been refused for want of room, or the queue was closed.
     pub(crate) async fn overflowed(&self) {
         self.overflow.notified().await
+    }
+
+    /// Refuse everything from now on and wake the owner, which drops the connection the way it
+    /// does for an overflow — so the peer reconnects, and handshakes everything again.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.full.store(true, Ordering::Relaxed);
+        self.overflow.notify_one();
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 }
 
@@ -2239,6 +2279,56 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), tx.overflowed()).await.unwrap();
         assert_eq!(rx.recv().await.map(|b| b.len()), Some(500));
         assert!(!tx.send(vec![0; 10]), "an overflowed queue stays closed: its peer is to be dropped");
+    }
+
+    /// An engine started again gets the vault's frames from then on, and every window is
+    /// disconnected: what each had subscribed to went with the old engine, and a window that
+    /// reconnects handshakes all of it again — this time with an engine that answers.
+    #[tokio::test]
+    async fn renewing_an_engine_moves_the_vault_and_its_windows_onto_the_new_one() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+        let within = std::time::Duration::from_secs(2);
+        let vault = VaultId::new();
+        let opts = LocalOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            web_dir: None,
+            vault_root: None,
+            config_path: None,
+            allow_remote: false,
+        };
+        let mut served = serve(&opts, &[vault], None).await.unwrap();
+        let mut old = served.events.remove(0);
+        let url = format!("ws://{}/ws?key={}", served.addr, served.key);
+        let (mut window, _) = tokio_tungstenite::connect_async(url.as_str()).await.unwrap();
+        let hello = tokio::time::timeout(within, old.recv()).await.unwrap();
+        assert!(matches!(hello, Some(LocalEvent::PeerConnected { .. })));
+
+        let mut new = served.registrar.renew(vault).expect("the relay holds this vault");
+        let end = tokio::time::timeout(within, window.next()).await.expect("the window is disconnected");
+        assert!(matches!(end, None | Some(Err(_)) | Some(Ok(WsMsg::Close(_)))), "{end:?}");
+
+        let (mut window, _) = tokio_tungstenite::connect_async(url.as_str()).await.unwrap();
+        loop {
+            match tokio::time::timeout(within, new.recv()).await.unwrap() {
+                Some(LocalEvent::PeerConnected { .. }) => break,
+                Some(LocalEvent::PeerGone { .. }) => {} // the first window's goodbye
+                _ => panic!("expected the new engine to hear of the window"),
+            }
+        }
+        let step1 = crate::sync::Message::Sync(crate::sync::SyncMessage::SyncStep1(Default::default()));
+        let frame = Frame::new(DocId::Vault(vault).to_string(), &step1).encode();
+        window.send(WsMsg::Binary(frame.into())).await.unwrap();
+        loop {
+            match tokio::time::timeout(within, new.recv()).await.unwrap() {
+                Some(LocalEvent::PeerFrame { .. }) => break,
+                Some(LocalEvent::PeerGone { .. }) => {} // may land after the reconnect
+                _ => panic!("expected the window's frame"),
+            }
+        }
+        assert!(old.try_recv().is_err(), "nothing more reaches the engine that stopped");
+        assert!(served.registrar.renew(VaultId::new()).is_none(), "a vault the relay does not hold");
+        served.task.abort();
     }
 
     #[test]

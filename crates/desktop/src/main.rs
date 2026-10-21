@@ -113,6 +113,7 @@ impl Relay {
 fn main() -> ExitCode {
     env_path::widen();
     let log_file = init_logging();
+    log_panics();
 
     let cli = config::Cli::parse();
     if let Some(ctx) = config::Config::needs_setup(&cli) {
@@ -131,6 +132,19 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fatal(&e, log_file.as_deref(), false),
     }
+}
+
+/// Put panics in the log too. The default hook prints to stderr, which an app started from a
+/// launcher does not have — and a panic in one vault's engine is survived (the relay starts it
+/// again), so without this the file would never say what happened.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let at = info.location().map(|l| l.to_string()).unwrap_or_default();
+        let message = info.payload_as_str().unwrap_or("(no message)");
+        tracing::error!(%at, "panic: {message}");
+        default(info);
+    }));
 }
 
 /// Log to stderr and to a file (see [`lemmate_core::paths::log_dir`]): an app started from a
