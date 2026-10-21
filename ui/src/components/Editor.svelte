@@ -1,3 +1,12 @@
+<script lang="ts" module>
+  import type { StateEffect } from '@codemirror/state'
+
+  /** Where each note was left: a tab switch rebuilds the editor, and coming back to a note
+   *  should find it scrolled and with the cursor where it was, not at the top. Per note, for
+   *  the life of the page. */
+  const places = new Map<string, { scroll: StateEffect<unknown>; anchor: number; head: number; length: number }>()
+</script>
+
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { EditorView } from '@codemirror/view'
@@ -294,6 +303,13 @@
       onStats?.({ lines: v.state.doc.lines, words: text ? text.split(/\s+/u).length : 0 })
     }, 150)
   }
+  /** Note where the reader is, for `places`. Kept as it changes rather than read on the way
+   *  out: by `onDestroy` the editor is already off the page and its scroller reads 0. */
+  function remember(v: EditorView) {
+    if (v.state.doc.length === 0) return
+    const { anchor, head } = v.state.selection.main
+    places.set(noteId, { scroll: v.scrollSnapshot(), anchor, head, length: v.state.doc.length })
+  }
   let hereFrame = 0
   /** Which section the reader is in, for the margin index. Coalesced into a frame: a scroll
    *  fires far more often than the answer to that question changes. */
@@ -302,6 +318,7 @@
     hereFrame = requestAnimationFrame(() => {
       hereFrame = 0
       if (!view) return
+      remember(view)
       const box = view.scrollDOM.getBoundingClientRect()
       // Down the middle of the scroller, just below its top edge: the first line still on screen.
       onHere?.(view.posAtCoords({ x: box.left + box.width / 2, y: box.top + 8 }, false))
@@ -313,7 +330,7 @@
     // A link or a front-matter path may have changed which files the note uses.
     if (u.docChanged && onOpenFile) session.filesChanged()
     // Headings move when the text does, and when a fold or a widget resizes around them.
-    if (u.docChanged || u.geometryChanged) reportHere()
+    if (u.docChanged || u.geometryChanged || u.selectionSet) reportHere()
   })
 
   /** Run a formatting command from a button or the menu, and hand the focus back to the text. */
@@ -457,9 +474,22 @@
     reportHeadings(view)
     view.scrollDOM.addEventListener('scroll', reportHere, { passive: true })
     reportHere()
-    // If the doc was still empty (not yet synced), move the cursor past the front matter once
-    // the content lands, so it opens folded rather than revealed by a cursor stuck at 0.
     const ytext = acquired.doc.getText('content')
+    const place = places.get(noteId)
+    /** Put the cursor and the scroll back where this note was left, as far as the text allows. */
+    const restore = (v: EditorView) => {
+      if (!place) return
+      const len = v.state.doc.length
+      v.dispatch({
+        selection: { anchor: Math.min(place.anchor, len), head: Math.min(place.head, len) },
+        // The snapshot names a document position; a shorter text may no longer hold it.
+        effects: len >= place.length ? place.scroll : EditorView.scrollIntoView(Math.min(place.head, len), { y: 'center' }),
+      })
+    }
+    if (place && ytext.length > 0) restore(view)
+    // If the doc was still empty (not yet synced), wait for the content: then either go back to
+    // where the note was left, or move the cursor past the front matter so it opens folded
+    // rather than revealed by a cursor stuck at 0.
     if (ytext.length === 0) {
       // Removed by whichever comes first, the content or the editor closing — not twice, which
       // Yjs reports as an error.
@@ -472,6 +502,7 @@
         stop()
         const v = view
         if (!v || v.state.selection.main.head !== 0) return
+        if (place) return restore(v)
         const text = v.state.doc.toString()
         if (!text.startsWith('---\n')) return
         const close = text.indexOf('\n---', 4)
