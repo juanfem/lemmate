@@ -11,6 +11,8 @@
 //                    which is how a phone scrolls a page or turns a slide
 //   mouse:<x>,<y>    a real left press and release at viewport coordinates — what CodeMirror's
 //                    own mousedown handling (posAtCoords, the height map) needs to see
+//   drag:<x>,<y>,<x2>,<y2>  a real left-button drag from (x, y) to (x2, y2), in steps — enough
+//                    for Chrome to start a native drag-and-drop and drop it where it ends
 //   type:<text>      Input.insertText
 //   key:<key>        keyDown+keyUp, e.g. Enter, Escape, ArrowDown, Ctrl+o
 //   wait:<ms>        sleep
@@ -130,6 +132,18 @@ async function runStep(cdp, step, outdir) {
       if (!Number.isFinite(x) || !Number.isFinite(y)) die(`bad mouse (expected x,y): ${arg}`);
       for (const type of ['mousePressed', 'mouseReleased'])
         await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+      return;
+    }
+    case 'drag': {
+      const [x, y, x2, y2] = arg.split(',').map(Number);
+      if ([x, y, x2, y2].some((n) => !Number.isFinite(n))) die(`bad drag (expected x,y,x2,y2): ${arg}`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 10; i++) {
+        await cdp.send('Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: x + ((x2 - x) * i) / 10, y: y + ((y2 - y) * i) / 10, button: 'left', buttons: 1 });
+        await sleep(30);
+      }
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x2, y: y2, button: 'left', buttons: 0, clickCount: 1 });
       return;
     }
     case 'type':

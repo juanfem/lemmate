@@ -2,6 +2,7 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { api, type RenderFormat } from '../lib/api.ts'
   import { displayName, type VaultSession } from '../lib/vault.svelte.ts'
+  import { dragging } from '../lib/dragging.svelte.ts'
   import {
     AUTO_RENDER_WAIT,
     autoRenderDue,
@@ -348,7 +349,7 @@
     </div>
   {/if}
   {#if html !== null && !saved}
-    <iframe bind:this={frame} class:dim={busy} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
+    <iframe bind:this={frame} class:dim={busy} class:dragging={dragging.on} title="Rendered note" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc={html}></iframe>
   {:else if busy}
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
@@ -542,5 +543,9 @@
   }
   iframe.dim {
     opacity: 0.55;
+  }
+  /* A drag over the frame is the pane's to hear (lib/dragging.svelte.ts). */
+  iframe.dragging {
+    pointer-events: none;
   }
 </style>
