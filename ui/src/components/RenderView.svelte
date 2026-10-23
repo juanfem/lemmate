@@ -114,32 +114,57 @@
    * taken for a popup.
    */
   let pdfBusy = $state(false)
-  let pdfProblem: string | null = $state(null)
+  let exportProblem: string | null = $state(null)
   let printInstead = $state(false)
   async function saveSlidesPdf() {
     if (pdfBusy) return
     pdfBusy = true
-    pdfProblem = null
+    exportProblem = null
     printInstead = false
     try {
       const r = await api.render(session.id, noteId, 'slides-pdf')
       if (r.status === 501) {
         printInstead = true
       } else if (!r.ok) {
-        pdfProblem = (await r.text()).trim() || `Making the PDF failed (${r.status}).`
+        exportProblem = (await r.text()).trim() || `Making the PDF failed (${r.status}).`
       } else {
-        const url = URL.createObjectURL(await r.blob())
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${displayName(session.pathOf(noteId) ?? 'note')}.pdf`.replace(/[/\\]/gu, '-')
-        a.click()
-        setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        download(await r.blob(), 'pdf')
       }
     } catch (e) {
-      pdfProblem = `Making the PDF failed: ${String(e)}`
+      exportProblem = `Making the PDF failed: ${String(e)}`
     } finally {
       pdfBusy = false
     }
+  }
+
+  /**
+   * A deck as PowerPoint, made here from the page on screen rather than by the server: it is laid
+   * out to print in a hidden frame, and every slide becomes native shapes and text boxes
+   * (`lib/pptx.ts`). Unlike Quarto's own PowerPoint, through pandoc, it looks like the deck.
+   */
+  let pptxBusy = $state(false)
+  async function saveSlidesPptx() {
+    if (pptxBusy || html === null) return
+    pptxBusy = true
+    exportProblem = null
+    try {
+      const { deckToPptx } = await import('../lib/pptx.ts')
+      download(await deckToPptx(html), 'pptx')
+    } catch (e) {
+      exportProblem = `Making the PowerPoint file failed: ${e instanceof Error ? e.message : String(e)}`
+    } finally {
+      pptxBusy = false
+    }
+  }
+
+  /** A file made from the render, to the downloads, named after the note; the pane keeps the page. */
+  function download(blob: Blob, ext: string) {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${displayName(session.pathOf(noteId) ?? 'note')}.${ext}`.replace(/[/\\]/gu, '-')
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
   }
 
   let root: HTMLDivElement | undefined = $state()
@@ -290,6 +315,8 @@
         Rendering with Quarto…
       {:else if pdfBusy}
         Making the PDF…
+      {:else if pptxBusy}
+        Making the PowerPoint file…
       {:else if error}
         Not rendered
       {:else if stale}
@@ -308,6 +335,7 @@
         {/if}
         {#if made === 'slides'}
           <button class="icon" onclick={saveSlidesPdf} disabled={pdfBusy} title="Save as PDF, a slide to a page" aria-label="Save as PDF"><Icon name="print" size={15} /></button>
+          <button class="icon" onclick={saveSlidesPptx} disabled={pptxBusy || busy} title="Save as PowerPoint, as the slides look here" aria-label="Save as PowerPoint"><Icon name="slides" size={15} /></button>
         {:else if shell?.openExternal}
           <button class="icon" onclick={printOutside} title="Print or save as PDF, in your browser" aria-label="Print or save as PDF"><Icon name="print" size={15} /></button>
         {:else}
@@ -325,8 +353,8 @@
   {#if error}
     <pre class="error">{error}</pre>
   {/if}
-  {#if pdfProblem}
-    <pre class="error">{pdfProblem}</pre>
+  {#if exportProblem}
+    <pre class="error">{exportProblem}</pre>
   {/if}
   {#if printInstead}
     <p class="instead">

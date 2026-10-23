@@ -30,6 +30,7 @@
     "@lezer/markdown": "^1.7.2",
     "@noble/hashes": "^2.4.0",
     "codemirror": "^6.0.2",
+    "jszip": "^3.10.1",
     "katex": "^0.16.47",
     "lib0": "^0.2.117",
     "mdast-util-from-markdown": "^2.0.3",

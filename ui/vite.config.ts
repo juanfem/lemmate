@@ -70,6 +70,8 @@ export default defineConfig({
   build: { outDir: 'dist', emptyOutDir: true, sourcemap: true },
   server: {
     port: 5173,
+    // The deck print layout is shared with the Rust side (`lib/pptx.ts` imports it).
+    fs: { allow: ['.', '../crates/core/src/print-layout.html'] },
     proxy: {
       '/api': 'http://127.0.0.1:8080',
       '/ws': { target: 'ws://127.0.0.1:8080', ws: true },

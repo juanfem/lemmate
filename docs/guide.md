@@ -925,6 +925,17 @@ On a **page**, the printer opens it in a tab of its own laid out for paper and b
 print dialog, where paper is the right page — pick *Save as PDF* there. Neither is the picker's
 *PDF*, which Quarto makes through Typst from the note itself and which knows nothing of slides.
 The palette has the deck's PDF too: **Render with Quarto as slides PDF**.
+**Save as PowerPoint** (the screen on a stand, next to the printer) on a **deck** downloads it
+as a `.pptx` that looks like the deck: each slide is laid out as it prints, and every box, text
+block and list becomes a native PowerPoint shape or text box you can edit, in the deck's own
+fonts (embedded in the file), with `::: {.notes}` as the slide's speaker notes. It is made in
+your browser — or the desktop app — from the page on screen, so it needs neither Chrome nor the
+server, and comes out as your screen lays the deck out. Fonts are embedded only from static
+font files (a variable font, or one the system provides, is left for PowerPoint to find), and a
+weight other than regular and bold becomes a family of its own (*Inter Medium*), as PowerPoint
+holds four faces a family. Text is set 4% smaller than on screen, because PowerPoint breaks lines
+a little differently and a line that just fits would wrap. Fragments show all at once, and what
+a slide draws with a `::before`/`::after` of no size of its own is left out.
 On a phone, swipe sideways to turn a deck's slides.
 
 **Speaker view.** Press **S** in a rendered deck (or pick *Speaker View* from its menu) for
@@ -959,12 +970,13 @@ PDFs are made through the Typst that Quarto bundles — no LaTeX needed — so a
 options that only LaTeX understands (a `documentclass`, say) do not apply; Typst's do. The
 palette's **Render with Quarto as PDF / Word document / slides / PowerPoint** save a file directly.
 
-**PowerPoint** comes from pandoc's own writer, so it suits plain decks: a slide per `##`
+The picker's **PowerPoint** comes from pandoc's own writer, so it suits plain decks: a slide per `##`
 heading (or `---` break), a title slide from the front matter, images, tables, code, and
 `:::: {.columns}` as a two-column slide. `::: {.notes}` becomes the slide's speaker notes. What
 reveal.js draws itself does not carry over: fragments and `.incremental` lists show all at once,
 a `. . .` pause is dropped, and slide backgrounds, themes and `.smaller` are ignored — a
-`reference-doc:` under `format: pptx:` is how to style it instead.
+`reference-doc:` under `format: pptx:` is how to style it instead. For a deck that should keep
+its look, render it as slides and use **Save as PowerPoint** on the pane.
 
 What goes in:
 

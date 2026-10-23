@@ -23,6 +23,8 @@ RUN npm ci
 # Sources second. ui/node_modules and ui/dist are excluded by .dockerignore, so this neither
 # clobbers the installed tree nor imports a stale local build.
 COPY ui/ ./
+# The deck print layout, which the PowerPoint export shares with lemmate-core.
+COPY crates/core/src/print-layout.html /crates/core/src/print-layout.html
 RUN npm run build
 
 

@@ -318,6 +318,11 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   deck's script runs there, so every request it makes is held: it gets itself and the MathJax
   CDN, nothing else (`crates/core/src/chrome.rs`). Without a Chrome the app falls back to the
   browser's print dialog.
+- A deck also saves as PowerPoint as it shows, made in the client rather than by Quarto: the
+  page on screen is laid out to print in a second sandboxed frame (the same print layout as
+  `slides-pdf`), and a vendored dom-to-pptx turns each page into native shapes and text boxes,
+  embedding the deck's own static fonts. The frame posts the file back; nothing runs on the
+  server (`ui/src/lib/pptx.ts`).
 - A render runs when asked; an edit marks it stale. An opt-in *Auto* (per device) renders a
   page or deck again after 5 s without an edit — never a PDF or DOCX, which would download.
 
