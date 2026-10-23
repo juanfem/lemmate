@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The webview Tauri runs on Linux, for its spell checker (`spelling.rs`). Same version as wry's.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
+gtk = "0.18"
 
 # Printing a render natively on macOS (`print.rs`), where the webview prints nothing for a page.
 # The versions Tauri's wry already uses.
@@ -35,6 +36,10 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSObject"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSPrintInfo", "NSPrintOperation", "NSResponder", "NSView", "NSWindow"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "WKWebView"] }
+
+# The save dialog a download asks with (`downloads.rs`); on Linux that is GTK's own, above.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = { version = "0.17", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

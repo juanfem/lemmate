@@ -325,6 +325,10 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   `slides-pdf`), and a vendored dom-to-pptx turns each page into native shapes and text boxes,
   embedding the deck's own static fonts. The frame posts the file back; nothing runs on the
   server (`ui/src/lib/pptx.ts`).
+- A file made from a render asks where it goes. Where the browser has a save picker (Chromium)
+  the place is asked at the click, before the file is made, and the file written there after
+  (`ui/src/lib/savefile.ts`); elsewhere it is a download, and the desktop shell stages every
+  download and then asks with the platform's save dialog (`crates/desktop/src/downloads.rs`).
 - A render runs when asked; an edit marks it stale. An opt-in *Auto* (per device) renders a
   page or deck again after 5 s without an edit — never a PDF or DOCX, which would download.
 

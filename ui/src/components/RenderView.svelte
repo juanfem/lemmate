@@ -16,6 +16,7 @@
     type Place,
   } from '../lib/render.ts'
   import { printHere } from '../lib/printlayout.ts'
+  import { saveAs } from '../lib/savefile.ts'
   import Icon from './Icon.svelte'
 
   /**
@@ -142,14 +143,13 @@
     exportProblem = null
     printInstead = false
     try {
-      const r = await api.render(session.id, noteId, 'slides-pdf')
-      if (r.status === 501) {
-        printInstead = true
-      } else if (!r.ok) {
-        exportProblem = (await r.text()).trim() || `Making the PDF failed (${r.status}).`
-      } else {
-        download(await r.blob(), 'pdf')
-      }
+      await saveAs(fileName('pdf'), 'application/pdf', async () => {
+        const r = await api.render(session.id, noteId, 'slides-pdf')
+        if (r.status === 501) printInstead = true
+        else if (!r.ok) exportProblem = (await r.text()).trim() || `Making the PDF failed (${r.status}).`
+        else return r.blob()
+        return null
+      })
     } catch (e) {
       exportProblem = `Making the PDF failed: ${String(e)}`
     } finally {
@@ -168,8 +168,8 @@
     pptxBusy = true
     exportProblem = null
     try {
-      const { deckToPptx } = await import('../lib/pptx.ts')
-      download(await deckToPptx(html), 'pptx')
+      const page = html
+      await saveAs(fileName('pptx'), PPTX, async () => (await import('../lib/pptx.ts')).deckToPptx(page))
     } catch (e) {
       exportProblem = `Making the PowerPoint file failed: ${e instanceof Error ? e.message : String(e)}`
     } finally {
@@ -177,15 +177,9 @@
     }
   }
 
-  /** A file made from the render, to the downloads, named after the note; the pane keeps the page. */
-  function download(blob: Blob, ext: string) {
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${displayName(session.pathOf(noteId) ?? 'note')}.${ext}`.replace(/[/\\]/gu, '-')
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
-  }
+  /** A file made from the render is named after the note; the pane keeps the page. */
+  const fileName = (ext: string) => `${displayName(session.pathOf(noteId) ?? 'note')}.${ext}`.replace(/[/\\]/gu, '-')
+  const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
 
   let root: HTMLDivElement | undefined = $state()
   let full = $state(false)
@@ -385,7 +379,7 @@
   {/if}
   {#if saved}
     <div class="saved">
-      <p>Saved <strong>{saved.name}</strong> to your downloads.</p>
+      <p>Saved <strong>{saved.name}</strong>.</p>
       <p class="muted">
         <a href={saved.url} download={saved.name}>Save it again</a> · or pick <em>Page</em> or <em>Slides</em> above to see
         the note here.

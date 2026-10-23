@@ -12,6 +12,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod config;
+mod downloads;
 mod env_path;
 mod print;
 mod spelling;
@@ -447,6 +448,8 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
         .disable_drag_drop_handler()
         // Idempotent, and every window shares one web context: once per load is plenty.
         .on_page_load(|window, _| spelling::enable(&window))
+        // A file the page saves asks where it goes, as a browser set to ask would.
+        .on_download(downloads::on_download)
         .on_navigation(move |url| {
             if !url.path().starts_with(SHELL_PREFIX) {
                 return true;

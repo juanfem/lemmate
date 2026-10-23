@@ -938,6 +938,9 @@ weight other than regular and bold becomes a family of its own (*Inter Medium*),
 holds four faces a family. Text is set 4% smaller than on screen, because PowerPoint breaks lines
 a little differently and a line that just fits would wrap. Fragments show all at once, and what
 a slide draws with a `::before`/`::after` of no size of its own is left out.
+The deck's PDF and PowerPoint file ask where to save them, named after the note: in Chrome and
+Edge before they are made, in the desktop app once they are; other browsers download them,
+asking only if set to. A Word or PDF file from the picker downloads the same way.
 On a phone, swipe sideways to turn a deck's slides.
 
 **Speaker view.** Press **S** in a rendered deck (or pick *Speaker View* from its menu) for
