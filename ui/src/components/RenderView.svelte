@@ -15,6 +15,7 @@
     writeAutoRender,
     type Place,
   } from '../lib/render.ts'
+  import { printHere } from '../lib/printlayout.ts'
   import Icon from './Icon.svelte'
 
   /**
@@ -90,20 +91,39 @@
    * way the frame stays where it is in the page, so the deck keeps its slide: moving an iframe
    * reloads it. A pane is a CSS container, which a plain `position: fixed` would stay inside.
    */
-  /** The desktop app's shell, which can hand a page to the system's default browser. */
-  const shell = (window as unknown as { lemmateShell?: { openExternal?: (url: string) => void } }).lemmateShell
+  /** The desktop app's shell, which can hand a page to the system's default browser and, on
+   *  macOS, print one natively. */
+  const shell = (window as unknown as { lemmateShell?: { openExternal?: (url: string) => void; printPage?: (url: string) => void } })
+    .lemmateShell
   function openOutside() {
     shell?.openExternal?.(new URL(tabUrl, location.href).href)
   }
   /**
-   * The same render in a tab of its own, laid out to be printed and opening the print dialog by
-   * itself (`quarto::for_print`) — *Save as PDF* there keeps what is on screen. Not in the frame:
-   * printing from it would mean letting every render open dialogs. A page prints this way; so
-   * does a deck where the server cannot make its PDF itself.
+   * The render laid out to be printed, and the print dialog over it — *Save as PDF* there keeps
+   * what is on screen. A page prints this way; so does a deck where the server cannot make its PDF
+   * itself. It happens in a hidden frame of its own (`printHere`), which alone may open dialogs:
+   * the pane's frame may not. The macOS app's webview opens no dialog for a page, so there the
+   * shell prints the same layout natively (`?print-pdf`, `quarto::for_print`), on paper the
+   * slides' size.
    */
   let printUrl = $derived(`${tabUrl}&print-pdf`)
-  function printOutside() {
-    shell?.openExternal?.(new URL(printUrl, location.href).href)
+  let printing = $state(false)
+  async function printIt() {
+    if (printing || html === null) return
+    printInstead = false
+    exportProblem = null
+    if (shell?.printPage) {
+      shell.printPage(new URL(printUrl, location.href).href)
+      return
+    }
+    printing = true
+    try {
+      await printHere(html, made === 'slides')
+    } catch (e) {
+      exportProblem = `Printing failed: ${e instanceof Error ? e.message : String(e)}`
+    } finally {
+      printing = false
+    }
   }
 
   /**
@@ -317,6 +337,8 @@
         Making the PDF…
       {:else if pptxBusy}
         Making the PowerPoint file…
+      {:else if printing}
+        Laying it out to print…
       {:else if error}
         Not rendered
       {:else if stale}
@@ -336,10 +358,8 @@
         {#if made === 'slides'}
           <button class="icon" onclick={saveSlidesPdf} disabled={pdfBusy} title="Save as PDF, a slide to a page" aria-label="Save as PDF"><Icon name="print" size={15} /></button>
           <button class="icon" onclick={saveSlidesPptx} disabled={pptxBusy || busy} title="Save as PowerPoint, as the slides look here" aria-label="Save as PowerPoint"><Icon name="slides" size={15} /></button>
-        {:else if shell?.openExternal}
-          <button class="icon" onclick={printOutside} title="Print or save as PDF, in your browser" aria-label="Print or save as PDF"><Icon name="print" size={15} /></button>
         {:else}
-          <a class="icon" href={printUrl} target="_blank" rel="noopener" title="Print or save as PDF" aria-label="Print or save as PDF"><Icon name="print" size={15} /></a>
+          <button class="icon" onclick={printIt} disabled={printing} title="Print or save as PDF" aria-label="Print or save as PDF"><Icon name="print" size={15} /></button>
         {/if}
       {/if}
       {#if made === 'slides' || made === 'page'}
@@ -359,11 +379,7 @@
   {#if printInstead}
     <p class="instead">
       This server cannot make the PDF itself.
-      {#if shell?.openExternal}
-        <button class="link" onclick={() => ((printInstead = false), printOutside())}>Print it from your browser</button>
-      {:else}
-        <a href={printUrl} target="_blank" rel="noopener" onclick={() => (printInstead = false)}>Print it from your browser</a>
-      {/if}
+      <button class="link" onclick={printIt}>Print it here</button>
       instead — choose <em>Save as PDF</em>, and set the paper to the slides' shape if it offers one.
     </p>
   {/if}
@@ -529,7 +545,6 @@
     color: var(--muted);
     border-bottom: 1px solid var(--border-soft);
   }
-  .instead a,
   .instead .link {
     color: var(--accent);
     font: inherit;

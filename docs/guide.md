@@ -921,8 +921,10 @@ the shape of its slides — made by the server (or the desktop app) with headles
 deck as it shows: your theme, the footer and slide numbers where a full-screen presentation puts
 them. The browser's print dialog cannot be trusted with that: on macOS it puts slides on A4.
 Where there is no Chrome to print with, the pane says so and offers the print dialog instead.
-On a **page**, the printer opens it in a tab of its own laid out for paper and brings up the
-print dialog, where paper is the right page — pick *Save as PDF* there. Neither is the picker's
+On a **page**, the printer lays it out for paper and brings up the print dialog, where paper is
+the right page — pick *Save as PDF* there. Either dialog opens over the app, not in another tab
+or browser; in the macOS app it is the system's print panel, on a window showing the layout that
+closes again with the panel, and a deck goes on paper the shape of its slides. Neither is the picker's
 *PDF*, which Quarto makes through Typst from the note itself and which knows nothing of slides.
 The palette has the deck's PDF too: **Render with Quarto as slides PDF**.
 **Save as PowerPoint** (the screen on a stand, next to the printer) on a **deck** downloads it

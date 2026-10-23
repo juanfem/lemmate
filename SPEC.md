@@ -317,7 +317,9 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   headless Chrome on pages the slides' size, since a print dialog picks its own paper. The
   deck's script runs there, so every request it makes is held: it gets itself and the MathJax
   CDN, nothing else (`crates/core/src/chrome.rs`). Without a Chrome the app falls back to the
-  browser's print dialog.
+  print dialog, as for a page: the render is laid out to print (`print-layout.html`) in a hidden
+  frame that alone may open dialogs. The macOS webview opens none for a page, so there the
+  desktop shell prints the relay's `?print-pdf` page natively, on paper the slides' size.
 - A deck also saves as PowerPoint as it shows, made in the client rather than by Quarto: the
   page on screen is laid out to print in a second sandboxed frame (the same print layout as
   `slides-pdf`), and a vendored dom-to-pptx turns each page into native shapes and text boxes,

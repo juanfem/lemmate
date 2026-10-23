@@ -2,7 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import JSZip from 'jszip'
-import { afterHeadStart, exportPage, PRINT_VIEW, shrinkFonts } from '../src/lib/pptx.ts'
+import { exportPage, shrinkFonts } from '../src/lib/pptx.ts'
+import { afterHeadStart, inPrintLayout, PRINT_VIEW } from '../src/lib/printlayout.ts'
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
@@ -40,4 +41,13 @@ test('every font size in the slides shrinks, and nothing else does', async () =>
   const out = await JSZip.loadAsync(await shrinkFonts(await zip.generateAsync({ type: 'uint8array' })))
   assert.equal(await out.file('ppt/slides/slide1.xml')!.async('string'), '<a:rPr lang="en-US" sz="2304" b="1"/><a:endParaRPr sz="960"/><a:defRPr sz="100"/><a:ext cx="2400"/>')
   assert.equal(await out.file('ppt/slideLayouts/slideLayout1.xml')!.async('string'), '<a:rPr sz="2400"/>')
+})
+
+test('a page prints without the deck print view, and opens its dialog itself', () => {
+  const page = '<html><head></head><body><p>x</p></body></html>'
+  assert.equal(
+    inPrintLayout(page, '<script>if (__DIALOG__) print()</script>', { deck: false, dialog: true, then: '<i/>' }),
+    '<html><head></head><body><p>x</p><script>if (true) print()</script><i/></body></html>',
+  )
+  assert.ok(inPrintLayout(page, '', { deck: true, dialog: true }).includes(PRINT_VIEW))
 })

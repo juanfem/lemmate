@@ -13,6 +13,7 @@
 
 mod config;
 mod env_path;
+mod print;
 mod spelling;
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -39,6 +40,7 @@ const SHELL_PREFIX: &str = "/.lemmate-shell/";
 const CLOSE_PATH: &str = "/.lemmate-shell/close-window";
 const OPEN_PATH: &str = "/.lemmate-shell/open-window";
 const EXTERNAL_PATH: &str = "/.lemmate-shell/open-external";
+const PRINT_PATH: &str = "/.lemmate-shell/print";
 const SIGN_IN_PATH: &str = "/.lemmate-shell/sign-in";
 /// Where the server sends the sign-in window back to. Never loaded: the window's navigation
 /// handler catches it first (`BrowserSignIn::is_callback`), so no port need be listening.
@@ -55,6 +57,11 @@ const SHELL_SCRIPT: &str = r#"window.lemmateShell = {
   openExternal: (url) => location.assign("/.lemmate-shell/open-external?" + new URLSearchParams({ url: new URL(url, location.href).href })),
   signIn: (server, ca) => location.assign("/.lemmate-shell/sign-in?" + new URLSearchParams({ server, ca: ca || "" })),
 }"#;
+/// The macOS app's addition to [`SHELL_SCRIPT`]: printing a render, which the webview will not
+/// do for the page there ([`print`]). Elsewhere the page prints for itself, and finds no
+/// `printPage` to ask.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PRINT_SHELL_SCRIPT: &str = r#"window.lemmateShell.printPage = (url) => location.assign("/.lemmate-shell/print?" + new URLSearchParams({ url: new URL(url, location.href).href }))"#;
 /// How long the "connected" answer gets to reach the page before the restart takes the process.
 const RESTART_GRACE: Duration = Duration::from_millis(500);
 
@@ -429,12 +436,15 @@ fn start_relay(app: &tauri::App, cfg: &config::Config) -> anyhow::Result<Relay> 
 /// platform, as it was before this handler existed.
 fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWindowBuilder<'_, Wry, M> {
     let (opener, navigator, me) = (app.app_handle().clone(), app.app_handle().clone(), label.clone());
-    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+    let builder =
+        WebviewWindowBuilder::new(app, label, WebviewUrl::External(url)).initialization_script(SHELL_SCRIPT);
+    #[cfg(target_os = "macos")]
+    let builder = builder.initialization_script(PRINT_SHELL_SCRIPT);
+    builder
         // The page does its own drag and drop — notes and folders in the tree, tabs between
         // panes, files onto the editor — and on Windows Tauri's file-drop handler swallows
         // every HTML5 drag. Nothing listens to that handler's events: there is no IPC.
         .disable_drag_drop_handler()
-        .initialization_script(SHELL_SCRIPT)
         // Idempotent, and every window shares one web context: once per load is plenty.
         .on_page_load(|window, _| spelling::enable(&window))
         .on_navigation(move |url| {
@@ -481,6 +491,14 @@ fn relay_window<M: Manager<Wry>>(app: &M, label: String, url: Url) -> WebviewWin
                     Some(ShellRequest::External(url)) if ServerOrigin::allows(&handle, &url) => {
                         open_in_browser(&url)
                     }
+                    // A render of this relay's, laid out to print: only macOS asks.
+                    #[cfg(target_os = "macos")]
+                    Some(ShellRequest::Print(url))
+                        if handle.try_state::<Relay>().is_some_and(|r| r.serves(&url)) =>
+                    {
+                        let url = handle.try_state::<Relay>().map_or(url.clone(), |r| r.keyed(&url));
+                        print::open(&handle, url)
+                    }
                     _ => tracing::debug!(window = me, "ignored a shell request"),
                 }
             });
@@ -507,6 +525,8 @@ enum ShellRequest {
     Close,
     /// `url` in the system's default browser — a render, to present it.
     External(Url),
+    /// `url`, a render laid out to print, printed natively (macOS, [`print`]).
+    Print(Url),
     /// A note window on `url`, at a screen position (logical pixels, top left) if the page knew one.
     Open {
         url: Url,
@@ -547,10 +567,10 @@ impl ShellRequest {
                     arg("ca").map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).map(PathBuf::from);
                 Some(Self::SignIn { server, ca_cert })
             }
-            EXTERNAL_PATH => {
+            EXTERNAL_PATH | PRINT_PATH => {
                 let target = url.query_pairs().find(|(k, _)| k == "url").map(|(_, v)| v.into_owned())?;
                 let target = Url::parse(&target).ok().filter(|u| matches!(u.scheme(), "http" | "https"))?;
-                Some(Self::External(target))
+                Some(if url.path() == PRINT_PATH { Self::Print(target) } else { Self::External(target) })
             }
             _ => None,
         }
@@ -1024,6 +1044,14 @@ mod tests {
             None
         );
         assert_eq!(ShellRequest::parse(&url(EXTERNAL_PATH)), None);
+        assert!(PRINT_PATH.starts_with(SHELL_PREFIX) && PRINT_SHELL_SCRIPT.contains(PRINT_PATH));
+        let mut ask = url(PRINT_PATH);
+        ask.query_pairs_mut().append_pair("url", &format!("{render}&print-pdf"));
+        assert_eq!(
+            ShellRequest::parse(&ask),
+            Some(ShellRequest::Print(Url::parse(&format!("{render}&print-pdf")).unwrap()))
+        );
+        assert_eq!(ShellRequest::parse(&url(&format!("{PRINT_PATH}?url=javascript%3Aalert(1)"))), None);
         assert_eq!(ShellRequest::parse(&url(CLOSE_PATH)), Some(ShellRequest::Close));
         assert_eq!(
             ShellRequest::parse(&url(&format!("{OPEN_PATH}?route=%23%2Fw%2F01J%2F01K&x=120&y=-40"))),
