@@ -1187,6 +1187,11 @@
   function openFile(vault: string, path: string) {
     open(fileTab(vault, path))
   }
+  /** A file followed from inside a note — its shelf, a link — gets a tab of its own: the note
+   *  it came from stays open beside it, rather than being displaced by a viewer with no way back. */
+  function openFileFromNote(vault: string, path: string) {
+    openInNewTab(fileTab(vault, path))
+  }
 
   let uploadTarget = $derived(uploading ? workspace?.get(uploading.vault) : undefined)
   /** The note the upload dialog offers "next to": the focused one, when it is in that vault. */
@@ -1704,7 +1709,7 @@
           renderOpen={!!p.active && panes.some((q) => q.kind !== 'history' && q.tabs.includes(renderTab(tabNote(p.active!))))}
           onRenameFile={renameFile}
           onDeleteFile={deleteFile}
-          onOpenFile={openFile}
+          onOpenFile={openFileFromNote}
           onUploadFiles={(vault, folder) => startUpload(vault, folder)}
           onSeq={(seq) => { focusedPane = i; p.seq = seq }}
           onAsk={(title, initial, opts) => ask({ kind: 'prompt', title, initial, ...opts })}
