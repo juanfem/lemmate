@@ -67,6 +67,14 @@ const theme = EditorView.theme({
   // Kept tight on purpose. The gutter is in the flow, so every pixel of it shifts the centred
   // measure to the right of the pane's real centre; a fold arrow needs nowhere near the default
   // width, and the narrower it is the closer the document sits to actually centred.
+  // CodeMirror draws the selection behind the text, so anything with a background of its own —
+  // a code block's lines, inline code, a callout, a table — would hide it. Above the text and
+  // translucent, it shows through all of them.
+  '.cm-selectionLayer': { zIndex: '1 !important', pointerEvents: 'none' },
+  '& .cm-selectionLayer .cm-selectionBackground': { background: 'color-mix(in srgb, var(--fg) 14%, transparent)' },
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+    background: 'color-mix(in srgb, var(--accent) 26%, transparent)',
+  },
   '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--faint)', minWidth: '0' },
   '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35, padding: '0 0.3em' },
   '.cm-foldGutter:hover .cm-gutterElement': { opacity: 1 },
