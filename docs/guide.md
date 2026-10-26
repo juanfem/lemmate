@@ -478,7 +478,10 @@ lives there and underneath it rather than in a column of its own:
 - **The outline** is an index in the left margin: the note's headings, right-aligned against
   the text, click to jump. The section you are reading is marked with a rule beside it as you
   scroll. It skips the note's own title, and it is not drawn in a pane too narrow to have a
-  margin (roughly the width of two panes on a laptop).
+  margin (roughly the width of two panes on a laptop). Below the headings, under a rule and in
+  small capitals, it lists the shelves at the foot of the page — **Files**, **Tags**,
+  **Backlinks**, with their counts — so a long note's are a click away rather than a scroll. A
+  note without headings gets the margin for these alone once it runs past 60 lines.
 - **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
   the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
   declares — lower-cased, as they appear in the Tags pane and in search. Click one to list

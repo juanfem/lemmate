@@ -106,7 +106,7 @@ export function renderPageFoot(
   el.replaceChildren()
 
   if (data.files && data.onOpenFile) {
-    const box = shelf(el, data.files.length ? `Files · ${data.files.length}` : 'Files')
+    const box = shelf(el, data.files.length ? `Files · ${data.files.length}` : 'Files', 'files')
     const row = box.appendChild(document.createElement('div'))
     row.className = 'cm-page-tags'
     for (const f of data.files) {
@@ -138,7 +138,7 @@ export function renderPageFoot(
     }
   }
 
-  const tags = shelf(el, 'Tags')
+  const tags = shelf(el, 'Tags', 'tags')
   const row = tags.appendChild(document.createElement('div'))
   row.className = 'cm-page-tags'
   // The names arrive normalised, without the `#` an inline tag is written with. Both kinds are
@@ -180,7 +180,7 @@ export function renderPageFoot(
     none.append(' in its front matter.')
   }
 
-  const links = shelf(el, data.backlinks.length ? `Backlinks · ${data.backlinks.length}` : 'Backlinks')
+  const links = shelf(el, data.backlinks.length ? `Backlinks · ${data.backlinks.length}` : 'Backlinks', 'backlinks')
   if (data.backlinks.length === 0) {
     const none = links.appendChild(document.createElement('p'))
     none.className = 'cm-page-none'
@@ -211,9 +211,13 @@ export interface PageFile {
   badge: string
 }
 
-function shelf(parent: HTMLElement, title: string): HTMLElement {
+/** The shelves at the foot of a page, by the name the margin index jumps to them with. */
+export type Shelf = 'files' | 'tags' | 'backlinks'
+
+function shelf(parent: HTMLElement, title: string, key: Shelf): HTMLElement {
   const section = parent.appendChild(document.createElement('section'))
   section.className = 'cm-page-shelf'
+  section.dataset.shelf = key
   const h = section.appendChild(document.createElement('h2'))
   h.className = 'cm-page-shelf-title'
   h.textContent = title

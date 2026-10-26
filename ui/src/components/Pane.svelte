@@ -40,6 +40,7 @@
   import ContextMenu, { menuAt, type MenuState } from './ContextMenu.svelte'
   import { measure } from '../lib/measure.svelte.ts'
   import type { OutlineItem } from '../lib/outline.ts'
+  import type { Shelf } from '../lib/editor/page.ts'
   import { unnamedNote } from '../lib/notename.ts'
   import { clampIndex, drawn, endedOutside, scrollToShow, type TabDrag, type TabDrop } from '../lib/tabmoves.ts'
   import { beginTabDrag, carriesTab, droppedTab, endTabDrag, hoverTab, tabDrag } from '../lib/tabdrag.svelte.ts'
@@ -199,6 +200,18 @@
   /** Quarto notes are still markdown, but saying so is the point of the label. */
   let format = $derived(activePath.endsWith('.qmd') ? 'Quarto' : 'Markdown')
   let stats: { lines: number; words: number } = $state({ lines: 0, words: 0 })
+  /** The shelves at the foot of the page, which the margin lists after the headings: in a long
+   *  note they are a long scroll away. */
+  let shelves: { files?: number; tags: number; backlinks: number } = $state({ tags: 0, backlinks: 0 })
+  let jumpToShelf: ((shelf: Shelf) => void) | undefined = $state()
+  let shelfList = $derived<[Shelf, string, number][]>([
+    ...(shelves.files === undefined ? [] : [['files', 'Files', shelves.files] as [Shelf, string, number]]),
+    ['tags', 'Tags', shelves.tags],
+    ['backlinks', 'Backlinks', shelves.backlinks],
+  ])
+  /** Lines past which a note without headings still gets a margin, for its shelves alone. */
+  const LONG_NOTE = 60
+  let showMargin = $derived(index.length > 0 || stats.lines >= LONG_NOTE)
 
   // What the strip folds away on a narrow pane lives here too, so nothing becomes unreachable
   // by making the window smaller. Delete stays at the bottom, behind a separator: a destructive
@@ -506,12 +519,12 @@
     </div>
   {:else if pane.active && session && !isBlank(pane.active)}
     {#key pane.active}
-      <div class="page" class:outlined={index.length > 0}>
+      <div class="page" class:outlined={showMargin}>
         <!-- The outline in the margin the measure already leaves empty — or, with full-width
              text, in a column of its own the text is moved over for. It is an index, not a
              panel: no header, no chrome, and gone the moment the pane is too narrow to hold a
              margin at all — at which point ⌘K and the headings themselves are how you move. -->
-        {#if index.length}
+        {#if showMargin}
           <nav class="margin" aria-label="Outline">
             {#each index as h, i (h.pos)}
               <button
@@ -522,6 +535,15 @@
                 onclick={() => jumpTo?.(h.pos)}
                 title={h.text}>{h.text}</button>
             {/each}
+            <!-- Not sections of the note but the page's own furniture below it: set apart by a
+                 rule and in small capitals, so they never read as headings. -->
+            <div class="shelves" class:alone={!index.length} role="group" aria-label="Below the note">
+              {#each shelfList as [key, label, count] (key)}
+                <button class="shelf" onclick={() => jumpToShelf?.(key)} title={`Go to ${label.toLowerCase()}`}>
+                  {label}{#if count}<span class="count">{count}</span>{/if}
+                </button>
+              {/each}
+            </div>
           </nav>
         {/if}
         <div class="editor-wrap">
@@ -539,6 +561,8 @@
             {onAsk}
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}
+            onShelves={(s) => (shelves = s)}
+            bind:jumpToShelf
             mode={pane.mode}
             bind:jumpTo
           />
@@ -859,6 +883,47 @@
     border-right-color: var(--accent);
   }
   .margin .entry:hover {
+    color: var(--accent);
+  }
+  .margin .shelves {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
+    margin-top: 0.7rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-soft);
+    width: 6.5rem;
+    max-width: 100%;
+  }
+  .margin .shelves.alone {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+  .margin .shelf {
+    pointer-events: auto;
+    font: inherit;
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    line-height: 1.6;
+    border: 0;
+    border-right: 2px solid transparent;
+    background: none;
+    color: var(--faint);
+    padding: 0.05rem 0.55rem 0.05rem 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .margin .shelf .count {
+    margin-left: 0.35em;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+  .margin .shelf:hover,
+  .margin .shelf:hover .count {
     color: var(--accent);
   }
 

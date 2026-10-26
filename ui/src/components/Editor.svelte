@@ -22,7 +22,7 @@
   import { displayName } from '../lib/vault.svelte.ts'
 
   import { readOutline, type OutlineItem } from '../lib/outline.ts'
-  import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink } from '../lib/editor/page.ts'
+  import { furnitureHost, pageFurniture, renderPageFoot, renderPageHead, type Backlink, type Shelf } from '../lib/editor/page.ts'
   import { attachmentPath, embedUrlFor } from '../lib/attachments.ts'
   import { linkTarget } from '../lib/linktarget.ts'
   import { addTagToFrontMatter, cleanTag } from '../lib/tagedit.ts'
@@ -45,7 +45,9 @@
     onOpenFile,
     onUploadFiles,
     mode = 'live',
+    onShelves,
     jumpTo = $bindable(),
+    jumpToShelf = $bindable(),
   }: {
     session: VaultSession
     noteId: string
@@ -75,6 +77,11 @@
     /** SPEC §8: live preview, plain source, or rendered and read-only. */
     mode?: ViewMode
     jumpTo?: (pos: number) => void
+    /** What the shelves at the foot of the page hold, for the margin index to list them by.
+     *  `files` is absent where there is no Files shelf. */
+    onShelves?: (counts: { files?: number; tags: number; backlinks: number }) => void
+    /** Scroll a shelf at the foot of the page to the top of the view. */
+    jumpToShelf?: (shelf: Shelf) => void
   } = $props()
 
   let host: HTMLDivElement
@@ -125,6 +132,7 @@
       { label: 'In another folder…', run: () => onUploadFiles?.(session.id, null) },
     ])
   }
+  $effect(() => onShelves?.({ files: onOpenFile ? files.length : undefined, tags: tags.length, backlinks: backlinks.length }))
   $effect(() =>
     renderPageFoot(foot, {
       files: onOpenFile ? files : undefined,
@@ -517,6 +525,15 @@
       if (!view) return
       view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 20 }) })
       view.focus()
+    }
+    jumpToShelf = (key: Shelf) => {
+      if (!view) return
+      // The foot is a widget past the last line, and CodeMirror only draws what is near the
+      // viewport: bring the end of the note in first, then the shelf once it is on the page.
+      view.dispatch({ effects: EditorView.scrollIntoView(view.state.doc.length, { y: 'end' }) })
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => foot.querySelector(`[data-shelf="${key}"]`)?.scrollIntoView({ block: 'start' })),
+      )
     }
   })
 
