@@ -41,8 +41,9 @@
     <h1>Lemmate</h1>
     <p>Allow <strong>{request.device}</strong> to use your account, <strong>{me.email}</strong>?</p>
     <p class="muted">
-      It gets an access token that can do whatever you can on this server. It shows under Account → Access tokens, where you can
-      revoke it at any time.
+      It gets an access token with full access: it can do whatever you can on this server — approve Lua filters to run in
+      renders, create and delete vaults — short of managing tokens and your password. It shows under Account → Access tokens,
+      where you can revoke it at any time.
     </p>
     {#if error}<p class="error">{error}</p>{/if}
     <div class="row">

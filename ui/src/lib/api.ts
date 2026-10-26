@@ -103,6 +103,8 @@ export interface AccessToken {
   /** Vault ids it may reach; null = every vault the account can. */
   vaults: string[] | null
   read_only: boolean
+  /** For your own app rather than an agent: may also approve Lua filters and create or delete vaults. */
+  full_access: boolean
   created_ms: number
   expires_ms: number | null
   last_used_ms: number | null
@@ -248,7 +250,7 @@ export const api = {
     post<{ sessions_revoked: number }>('/auth/password', { new_password, current_password: current, email }),
   authConfig: () => get<AuthConfig>('/auth/config'),
   tokens: () => get<AccessToken[]>('/tokens'),
-  createToken: (body: { name: string; vaults?: string[] | null; read_only?: boolean; expires_days?: number }) =>
+  createToken: (body: { name: string; vaults?: string[] | null; read_only?: boolean; full_access?: boolean; expires_days?: number }) =>
     post<AccessToken>('/tokens', body),
   revokeToken: (id: string) => del(`/tokens/${id}`),
   invites: () => get<Invite[]>('/invites'),

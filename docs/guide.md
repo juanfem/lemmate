@@ -703,7 +703,11 @@ setup and *Connect a server…* dialogs) and `lemmate login --browser` can fetch
 they open the server's page, you sign in the usual way — straight through the identity provider,
 if that is how the server signs in, with nothing to type if you already have its session — and
 confirm **Allow Lemmate desktop on <host>**. The app then holds an access token named after the
-device, listed and revocable with the others. The answer only ever goes to the app on the same
+device, listed and revocable with the others. It is a **full-access** token: besides everything
+a token can do, it may approve Lua filters and create or delete vaults. A token made by hand
+under Account → Access tokens is **limited** unless you tick *Full access* — give agents, MCP
+and scripts a limited one. Desktop app tokens from before full access existed were given it; a
+token you pasted into the app by hand stays limited — sign the app in through the browser instead. The answer only ever goes to the app on the same
 machine (a loopback address), and only the app that started the sign-in can redeem it.
 
 **Inviting someone.** An admin mints a single-use link; the person opening it picks their own
@@ -1049,14 +1053,15 @@ code (and, when an earlier version of the same file was approved, what changed s
 - An approval is for **those exact bytes**, in **this vault**. Edit one character of the file
   and it is a new file, to be reviewed again. The same file in another vault is approved
   separately.
-- On a server, only an **owner** of the vault can approve or revoke, signed in to the web app.
-  A personal access token — the CLI's, MCP's, the desktop app's — cannot, even an owner's: an
-  agent that writes a filter must not be able to approve it.
-- In the desktop app (or `lemmate serve`), approving works for that computer: the approval is
-  kept in the app's configuration folder (`filter-approvals/`), never in the vault. The app
-  asks the server to approve it for everyone too, which the server refuses when the app signed
-  in with an access token; approve it in the web app for the others. The server's approvals
-  also run in the desktop app, offline too.
+- On a server, only an **owner** of the vault can approve or revoke: in the web app, or in the
+  desktop app signed in with a **full-access** token — which is what it gets when you allow it
+  in the browser. A plain (limited) access token — the kind to give an agent, MCP or a script —
+  cannot, even an owner's: an agent that writes a filter must not be able to approve it.
+- In the desktop app (or `lemmate serve`), an approval goes to the server, for everyone, and is
+  kept on that computer too (`filter-approvals/` in the app's configuration folder, never in
+  the vault). With a limited token the server refuses it, and it stays that computer's alone;
+  so does one made in a vault with no server. The server's approvals also run in the desktop
+  app, offline too.
 - **Approved filters run in a sandbox**: they can read the vault files the render has and
   nothing else of the machine, write nowhere outside the render, and reach no network. So a
   theme that `@import`s a web font from a CDN loses it in a render that runs filters — put the

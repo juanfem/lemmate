@@ -315,9 +315,9 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 - **Who approves.** Nothing in the vault can: not a file, not the vault doc, not the
   `.lemmate/` sidecar, since anyone who can put a file in the vault could then approve their
   own filter. On the server an approval is a row in `filter_approvals` (vault, hash, path,
-  who, when), made or revoked by a vault **owner in a session** — never with a personal access
-  token, an owner's included, so an agent cannot approve what it wrote; any member can list
-  them. The relay keeps `filter-approvals/<vault>.json` in the configuration directory: the
+  who, when), made or revoked by a vault **owner**, in a session or with a full-access token
+  (the owner's own app, §11.1) — never with a limited token, an owner's included, so an agent
+  cannot approve what it wrote; any member can list them. The relay keeps `filter-approvals/<vault>.json` in the configuration directory: the
   server's list as last fetched (refreshed on each render, so approved filters still run
   offline) and the device's own approvals, for a standalone vault or one whose server refused
   the device's token. `--disable-filters` turns them all off on a server.
@@ -636,6 +636,10 @@ Editing features:
 - Sessions are opaque tokens; native clients store them in the OS keychain (falling back to a
   0600 file where there is none).
 - Personal access tokens for the CLI, API, and MCP, scoped to vaults and optionally read-only.
+  A token is **limited** unless minted with full access: a limited one — what an agent gets —
+  cannot approve Lua filters (§5.6), create a vault (claim one by syncing it) or delete one. A
+  token the user allows an app to take through the browser (`apps.rs`) has full access; no
+  token, full or not, manages tokens or the password.
   A token never carries admin rights and cannot manage tokens or the password.
 - OIDC: authorization code + PKCE; the ID token comes from the token endpoint over TLS and its
   claims (issuer, audience, expiry, nonce) are checked. An identity is tied to an account by its

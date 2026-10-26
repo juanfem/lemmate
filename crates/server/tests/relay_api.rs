@@ -311,7 +311,8 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
         "POST",
         format!("{base}/api/v1/tokens"),
         Some(session),
-        Some(serde_json::json!({"name": "desktop"})),
+        // What the desktop app is given when it signs in through the browser.
+        Some(serde_json::json!({"name": "desktop", "full_access": true})),
     )
     .await
     .unwrap();

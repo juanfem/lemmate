@@ -66,6 +66,8 @@ pub struct TokenScope {
     #[serde(serialize_with = "vault_ids")]
     pub vaults: Option<Vec<VaultId>>,
     pub read_only: bool,
+    /// A token for the user's own app rather than an agent: see [`AuthUser::trusted`].
+    pub full_access: bool,
 }
 
 fn vault_ids<S: serde::Serializer>(v: &Option<Vec<VaultId>>, s: S) -> Result<S::Ok, S::Error> {
@@ -91,13 +93,25 @@ impl AuthUser {
             email: u.email,
             display_name: u.display_name,
             is_admin: false,
-            token: Some(TokenScope { name: t.name, vaults: t.vaults, read_only: t.read_only }),
+            token: Some(TokenScope {
+                name: t.name,
+                vaults: t.vaults,
+                read_only: t.read_only,
+                full_access: t.full_access,
+            }),
         }
     }
 
     /// Whether this request may touch `vault` at all (before any role is looked at).
     pub fn reaches(&self, vault: VaultId) -> bool {
         self.token.as_ref().and_then(|t| t.vaults.as_ref()).is_none_or(|vs| vs.contains(&vault))
+    }
+
+    /// Whether this request may do what is kept from agents: approve Lua filters to run, create
+    /// a vault, delete one. A session may, and so may a full-access token — the user's own app,
+    /// allowed in the browser; a limited token, which is what an agent is given, may not.
+    pub fn trusted(&self) -> bool {
+        self.token.as_ref().is_none_or(|t| t.full_access && !t.read_only)
     }
 
     /// A role as this request may use it: a read-only token is a viewer whatever its user is.
@@ -185,8 +199,8 @@ pub async fn role_or_claim(state: &AppState, user: &AuthUser, vault: VaultId, cl
     if let Some(r) = vault_role(&store, user, vault) {
         return Some(r);
     }
-    // A read-only token creates nothing, and that includes a vault.
-    let may_claim = claim && !user.token.as_ref().is_some_and(|t| t.read_only);
+    // A vault is created by claiming it, which only a session or a full-access token may do.
+    let may_claim = claim && user.trusted();
     if may_claim && store.member_count(vault).ok()? == 0 {
         store.set_membership(vault, &user.id, Role::Owner).ok()?;
         return Some(Role::Owner);
@@ -757,6 +771,10 @@ pub struct TokenIn {
     pub vaults: Option<Vec<String>>,
     #[serde(default)]
     pub read_only: bool,
+    /// For your own app rather than an agent: it may also approve Lua filters and create or
+    /// delete vaults. Not with `read_only`.
+    #[serde(default)]
+    pub full_access: bool,
     /// Lifetime in days; omitted = no expiry.
     #[serde(default)]
     pub expires_days: Option<u32>,
@@ -769,6 +787,7 @@ pub struct TokenOut {
     pub name: String,
     pub vaults: Option<Vec<String>>,
     pub read_only: bool,
+    pub full_access: bool,
     pub created_ms: i64,
     pub expires_ms: Option<i64>,
     pub last_used_ms: Option<i64>,
@@ -782,6 +801,7 @@ fn token_out(t: AccessTokenRow, token: Option<String>) -> TokenOut {
         name: t.name,
         vaults: t.vaults.map(|vs| vs.iter().map(ToString::to_string).collect()),
         read_only: t.read_only,
+        full_access: t.full_access,
         created_ms: t.created_ms,
         expires_ms: t.expires_ms,
         last_used_ms: t.last_used_ms,
@@ -819,7 +839,8 @@ async fn create_token(
 ) -> Result<Json<TokenOut>, StatusCode> {
     session_only(&state, &user)?;
     let name = body.name.trim();
-    if name.is_empty() || name.len() > 100 {
+    // Full access is for writing; a read-only token with it would be a contradiction.
+    if name.is_empty() || name.len() > 100 || (body.full_access && body.read_only) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let vaults = match &body.vaults {
@@ -845,7 +866,17 @@ async fn create_token(
         }
     }
     let row = store
-        .create_access_token(&token_hash(&token), &user.id, name, vaults.as_deref(), body.read_only, expires)
+        .create_access_token(
+            &token_hash(&token),
+            &user.id,
+            name,
+            lemmate_core::store::TokenGrant {
+                vaults: vaults.as_deref(),
+                read_only: body.read_only,
+                full_access: body.full_access,
+                expires_ms: expires,
+            },
+        )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(token_out(row, Some(token))))
 }

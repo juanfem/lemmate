@@ -70,7 +70,9 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
 - Every role decision goes through `auth::role_or_claim` / `auth::note_role`, which apply a
   personal access token's scope (vaults, read-only). A handler that lists vaults by itself
   (`vaults_of`) must filter with `AuthUser::reaches`. Tokens (`lmt_…`) never carry admin rights
-  and cannot reach `/tokens` or the password — `auth::session_only`.
+  and cannot reach `/tokens` or the password — `auth::session_only`. A token is limited unless
+  minted `full_access` (the browser app sign-in does that): what is kept from agents —
+  approving filters, creating (claiming) and deleting vaults — checks `AuthUser::trusted`.
 - Daily-note settings live in the vault doc's `meta` map (`daily_folder`, `daily_format`,
   `daily_template`); the server, the relay and the UI all file a day through them, never a
   hardcoded `Daily/`.
@@ -93,7 +95,7 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
 - Lua filters and shortcodes run only as **approved bytes** (SPEC §5.6): `quarto::Gate` decides
   per render from the blake3 of what it lays out; approvals live in the server's
   `filter_approvals` table or the relay's `config_dir()/filter-approvals/`, never in the vault;
-  approving takes an owner *session* (`filter_owner` in `app.rs`), never a token. A render that
+  approving takes an owner session or full-access token (`filter_owner` in `app.rs`). A render that
   runs one is confined by `sandbox.rs` (Landlock + seccomp on the thread that spawns Quarto) —
   no network, so `embed-resources` cannot inline a CDN file there. Relay tests that touch
   approvals set `LocalOptions::approvals_dir`, or they read the real config directory.

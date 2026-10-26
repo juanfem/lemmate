@@ -19,6 +19,7 @@
   /** Empty = every vault. */
   let tokVaults: string[] = $state([])
   let tokReadOnly = $state(false)
+  let tokFull = $state(false)
   let tokDays = $state('')
   let tokNew = $state('')
   let tokError = $state('')
@@ -42,6 +43,7 @@
         name: tokName.trim(),
         vaults: tokVaults.length ? tokVaults : null,
         read_only: tokReadOnly,
+        full_access: tokFull && !tokReadOnly,
         expires_days: Number.isFinite(days) && days > 0 ? days : undefined,
       })
       tokNew = t.token ?? ''
@@ -181,6 +183,8 @@
       <p class="muted">
         For <code>lemmate login --token</code>, scripts, MCP and the desktop app. A token can be limited to some vaults and to
         reading; it never has admin rights and cannot make more tokens. Changing your password leaves tokens alone — revoke them here.
+        Give an agent a plain token: only one with <em>full access</em> can also approve Lua filters to run, and create or delete
+        vaults. The desktop app gets one of those when you allow it in the browser.
       </p>
       <div class="row">
         <input bind:value={tokName} placeholder="name, e.g. laptop CLI" required maxlength="100" />
@@ -197,6 +201,9 @@
       {/if}
       <div class="row">
         <label class="check"><input type="checkbox" bind:checked={tokReadOnly} /> Read only</label>
+        <label class="check" title="For your own app, not an agent: it may also approve Lua filters, and create or delete vaults">
+          <input type="checkbox" bind:checked={tokFull} disabled={tokReadOnly} /> Full access
+        </label>
         <span class="grow"></span>
         <button type="submit">Create token</button>
       </div>
@@ -210,7 +217,7 @@
           <li>
             <span>{t.name}</span>
             <span class="muted">
-              {t.vaults ? t.vaults.map(vaultLabel).join(', ') : 'all vaults'}{t.read_only ? ' · read only' : ''}
+              {t.vaults ? t.vaults.map(vaultLabel).join(', ') : 'all vaults'}{t.read_only ? ' · read only' : ''}{t.full_access ? ' · full access' : ''}
               · {t.last_used_ms ? `used ${when(t.last_used_ms)}` : 'never used'}{#if t.expires_ms} · {t.expires_ms < Date.now() ? 'expired' : `expires ${when(t.expires_ms)}`}{/if}
             </span>
             <button type="button" onclick={() => revokeToken(t.id)}>Revoke</button>

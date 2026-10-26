@@ -38,7 +38,7 @@
     if (!(e instanceof ApiError)) return String(e)
     if (e.status === 403) {
       return what === 'approve'
-        ? 'Only an owner of this vault, signed in to the web app, can approve filters for everyone.'
+        ? 'Only an owner of this vault can approve filters for everyone — in the web app, or a desktop app with a full-access token.'
         : 'This approval is the server’s: revoke it there, signed in as an owner of the vault.'
     }
     if (e.status === 409) return 'The file has changed since this render. Render again, and review what it is now.'

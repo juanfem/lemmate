@@ -174,7 +174,13 @@ async fn token(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
     store
-        .create_access_token(&auth::token_hash(&token), &user.id, &grant.device, None, false, None)
+        // Allowed by the person in the browser for an app of theirs: a full-access token.
+        .create_access_token(
+            &auth::token_hash(&token),
+            &user.id,
+            &grant.device,
+            lemmate_core::store::TokenGrant { full_access: true, ..Default::default() },
+        )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(TokenOut { token, email: user.email }))
 }

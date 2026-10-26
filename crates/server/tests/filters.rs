@@ -227,6 +227,14 @@ async fn an_owner_in_a_session_approves_these_bytes_for_this_vault() {
     assert_eq!(r.json()["approved_by"], "ann", "by display name");
     let listed = call("GET", addr, &approvals, None, Some(&ann_token)).await.json();
     assert_eq!(listed[0]["hash"], json!(hash), "a token may read the list");
+    // Ann's desktop app holds a full-access token, which may approve as she would.
+    let r = send("POST", addr, "/api/v1/tokens", json!({"name": "desktop", "full_access": true}), &ann).await;
+    let app_token = r.json()["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        send("POST", addr, &approvals, wants.clone(), &app_token).await.status,
+        200,
+        "the owner's app"
+    );
 
     // The same bytes in another vault are not approved there.
     let other = create_note(addr, b, "Deck.qmd", NOTE, &ann).await;
@@ -310,6 +318,9 @@ async fn a_relay_runs_the_servers_approvals_and_its_own() {
         .unwrap()
         .to_owned();
 
+    // Ann's vault, which a limited token can sync but could not have created.
+    let vault = VaultId::new();
+    own(addr, &state, vault, &ann).await;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("vault");
     std::fs::create_dir_all(dir.join("lua")).unwrap();
@@ -324,7 +335,7 @@ async fn a_relay_runs_the_servers_approvals_and_its_own() {
     let opts = lemmate_core::client::SyncOptions {
         vault_dir: dir.clone(),
         server_url: Some(format!("http://{addr}")),
-        vault_id: None,
+        vault_id: Some(vault),
         once: false,
         ca_cert: None,
         token: Some(token),
@@ -338,7 +349,7 @@ async fn a_relay_runs_the_servers_approvals_and_its_own() {
         approvals_dir: Some(tmp.path().join("approvals")),
     };
     let handle = common::remember(lemmate_core::client::start(opts, local).await.unwrap());
-    let vault = handle.vault_id;
+    assert_eq!(handle.vault_id, vault);
     let base = format!("http://{}/api/v1/vaults/{vault}", handle.addr);
     let relay = |method: &'static str, url: String, body: Option<Value>| async move {
         tokio::task::spawn_blocking(move || {
@@ -384,7 +395,8 @@ async fn a_relay_runs_the_servers_approvals_and_its_own() {
     )
     .await;
     assert_eq!(r.status, 200);
-    // The desktop approves the other: its token cannot approve upstream, so it is the device's.
+    // The desktop approves the other: its token is a limited one, which cannot approve
+    // upstream, so it is the device's.
     let (code, body, _) = relay(
         "POST",
         format!("{base}/filter-approvals"),

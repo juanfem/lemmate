@@ -1416,6 +1416,10 @@ async fn delete_vault(
 ) -> Result<StatusCode, StatusCode> {
     let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     auth::require(&state, &user, vault, Role::Owner).await?;
+    // A limited token — an agent's — deletes no vault.
+    if !user.trusted() {
+        return Err(StatusCode::FORBIDDEN);
+    }
     // Drop the room first: a live one would keep answering for a vault that no longer exists,
     // and would write its doc back out on the next update.
     state.rooms.lock().await.remove(&DocId::Vault(vault).to_string());
@@ -1667,12 +1671,13 @@ struct ApproveIn {
     hash: String,
 }
 
-/// Who may approve or revoke a vault's filters: an owner, signed in. A personal access token
-/// approves nothing, not even an owner's — an agent holding one could otherwise approve the
-/// filter it just wrote. 404 for a non-member, 403 for anyone else.
+/// Who may approve or revoke a vault's filters: an owner, in a session or through a full-access
+/// token (the owner's own app). A limited token approves nothing, not even an owner's — an
+/// agent holding one could otherwise approve the filter it just wrote. 404 for a non-member,
+/// 403 for anyone else.
 async fn filter_owner(state: &AppState, user: &AuthUser, vault: VaultId) -> Result<(), StatusCode> {
     let role = auth::role_or_claim(state, user, vault, false).await.ok_or(StatusCode::NOT_FOUND)?;
-    if user.token.is_some() || role < Role::Owner {
+    if !user.trusted() || role < Role::Owner {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(())

@@ -13,7 +13,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::{self, NoteIndex};
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// `meta` key holding the [`markdown::INDEX_VERSION`] the derived rows were written with.
 const INDEX_VERSION_KEY: &str = "index_version";
@@ -130,12 +130,15 @@ CREATE TABLE IF NOT EXISTS invites (
 -- Personal access tokens (SPEC §11.1) for the CLI, the API and MCP. Like a session, only the
 -- hash is kept, and it doubles as the id to list and revoke by. `vaults` narrows the token to
 -- a JSON array of vault ids (NULL = whatever its user can reach); `read_only` caps it at viewer.
+-- `full_access` is a token for the user's own app rather than an agent: it may also approve Lua
+-- filters and create or delete vaults, which a limited token may not.
 CREATE TABLE IF NOT EXISTS access_tokens (
     token_hash   TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL,
     name         TEXT NOT NULL,
     vaults       TEXT,
     read_only    INTEGER NOT NULL DEFAULT 0,
+    full_access  INTEGER NOT NULL DEFAULT 0,
     created_ms   INTEGER NOT NULL,
     expires_ms   INTEGER,
     last_used_ms INTEGER
@@ -239,6 +242,18 @@ pub struct AttachmentRow {
     pub filename_hint: Option<String>,
 }
 
+/// What a new access token may do ([`Store::create_access_token`]); the default is a limited,
+/// writing token for every vault, that never expires.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenGrant<'a> {
+    /// The vaults it may reach; `None` = every vault its user can.
+    pub vaults: Option<&'a [VaultId]>,
+    pub read_only: bool,
+    /// For the user's own app: may also approve Lua filters and create or delete vaults.
+    pub full_access: bool,
+    pub expires_ms: Option<i64>,
+}
+
 /// A Lua filter approved to run in a vault's renders ([`Store::approve_filter`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FilterApproval {
@@ -307,6 +322,8 @@ pub struct AccessTokenRow {
     /// The vaults it may reach; `None` = every vault its user can.
     pub vaults: Option<Vec<VaultId>>,
     pub read_only: bool,
+    /// For the user's own app: may also approve Lua filters and create or delete vaults.
+    pub full_access: bool,
     pub created_ms: i64,
     pub expires_ms: Option<i64>,
     pub last_used_ms: Option<i64>,
@@ -415,6 +432,18 @@ impl Store {
             conn.execute_batch(
                 "CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users (oidc_subject) WHERE oidc_subject IS NOT NULL;",
             )?;
+            // v11: `access_tokens.full_access`. Tokens minted before it are limited ones — except
+            // the desktop app's, allowed in the browser and named for it, which would otherwise
+            // lose what it could do until signed in again.
+            let has_full = conn
+                .prepare("SELECT 1 FROM pragma_table_info('access_tokens') WHERE name = 'full_access'")?
+                .exists([])?;
+            if !has_full {
+                conn.execute_batch(
+                    "ALTER TABLE access_tokens ADD COLUMN full_access INTEGER NOT NULL DEFAULT 0;
+                     UPDATE access_tokens SET full_access = 1 WHERE name LIKE 'Lemmate desktop on %';",
+                )?;
+            }
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })
@@ -1454,18 +1483,17 @@ impl Store {
         token_hash: &str,
         user_id: &str,
         name: &str,
-        vaults: Option<&[VaultId]>,
-        read_only: bool,
-        expires_ms: Option<i64>,
+        scope: TokenGrant<'_>,
     ) -> Result<AccessTokenRow> {
+        let TokenGrant { vaults, read_only, full_access, expires_ms } = scope;
         let now = now_ms();
         let json = vaults.map(|v| {
             serde_json::to_string(&v.iter().map(ToString::to_string).collect::<Vec<_>>()).expect("strings")
         });
         self.conn.execute(
-            "INSERT INTO access_tokens (token_hash, user_id, name, vaults, read_only, created_ms, expires_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![token_hash, user_id, name, json, read_only as i32, now, expires_ms],
+            "INSERT INTO access_tokens (token_hash, user_id, name, vaults, read_only, full_access, created_ms, expires_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![token_hash, user_id, name, json, read_only as i32, full_access as i32, now, expires_ms],
         )?;
         Ok(AccessTokenRow {
             token_hash: token_hash.to_owned(),
@@ -1473,6 +1501,7 @@ impl Store {
             name: name.to_owned(),
             vaults: vaults.map(<[VaultId]>::to_vec),
             read_only,
+            full_access,
             created_ms: now,
             expires_ms,
             last_used_ms: None,
@@ -1482,7 +1511,7 @@ impl Store {
     /// A user's tokens, newest first, expired ones included (so they can be seen and removed).
     pub fn access_tokens_of(&self, user_id: &str) -> Result<Vec<AccessTokenRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT token_hash, user_id, name, vaults, read_only, created_ms, expires_ms, last_used_ms
+            "SELECT token_hash, user_id, name, vaults, read_only, created_ms, expires_ms, last_used_ms, full_access
              FROM access_tokens WHERE user_id = ?1 ORDER BY created_ms DESC",
         )?;
         let rows =
@@ -1507,7 +1536,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT u.id, u.email, u.display_name, u.password_hash, u.is_admin,
-                        t.token_hash, t.user_id, t.name, t.vaults, t.read_only, t.created_ms, t.expires_ms, t.last_used_ms
+                        t.token_hash, t.user_id, t.name, t.vaults, t.read_only, t.created_ms, t.expires_ms, t.last_used_ms,
+                        t.full_access
                  FROM access_tokens t JOIN users u ON u.id = t.user_id
                  WHERE t.token_hash = ?1 AND (t.expires_ms IS NULL OR t.expires_ms > ?2)",
                 params![token_hash, now],
@@ -1519,6 +1549,7 @@ impl Store {
                         name: r.get(7)?,
                         vaults: parse_vault_list(r.get(8)?),
                         read_only: r.get::<_, i32>(9)? != 0,
+                        full_access: r.get::<_, i32>(13)? != 0,
                         created_ms: r.get(10)?,
                         expires_ms: r.get(11)?,
                         last_used_ms: r.get(12)?,
@@ -1888,6 +1919,7 @@ fn row_to_access_token(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccessTokenRow
         name: r.get(2)?,
         vaults: parse_vault_list(r.get(3)?),
         read_only: r.get::<_, i32>(4)? != 0,
+        full_access: r.get::<_, i32>(8)? != 0,
         created_ms: r.get(5)?,
         expires_ms: r.get(6)?,
         last_used_ms: r.get(7)?,
@@ -2466,9 +2498,12 @@ mod tests {
         store.create_user("u1", "ann@example.org", "Ann", Some("h"), true).unwrap();
         store.create_user("u2", "bob@example.org", "Bob", Some("h"), false).unwrap();
         let v = VaultId::new();
-        store.create_access_token("h-all", "u1", "laptop", None, false, None).unwrap();
-        store.create_access_token("h-one", "u1", "mcp", Some(&[v]), true, None).unwrap();
-        store.create_access_token("h-old", "u1", "old", None, false, Some(now_ms() - 1)).unwrap();
+        let full = TokenGrant { full_access: true, ..Default::default() };
+        store.create_access_token("h-all", "u1", "laptop", full).unwrap();
+        let mcp = TokenGrant { vaults: Some(&[v]), read_only: true, ..Default::default() };
+        store.create_access_token("h-one", "u1", "mcp", mcp).unwrap();
+        let old = TokenGrant { expires_ms: Some(now_ms() - 1), ..Default::default() };
+        store.create_access_token("h-old", "u1", "old", old).unwrap();
 
         let (user, all) = store.access_token_user("h-all").unwrap().unwrap();
         assert_eq!(user.id, "u1");
@@ -2530,5 +2565,27 @@ mod tests {
         s.approve_filter(a, "h2", "y.lua", "u1").unwrap();
         s.delete_vault(a).unwrap();
         assert!(s.filter_approvals(a).unwrap().is_empty(), "a vault's approvals go with it");
+    }
+
+    #[test]
+    fn tokens_from_before_full_access_are_limited_but_the_desktop_apps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.conn
+                .execute_batch(
+                    "ALTER TABLE access_tokens DROP COLUMN full_access;
+                     INSERT INTO access_tokens (token_hash, user_id, name, created_ms) VALUES
+                       ('h1', 'u', 'Lemmate desktop on laptop', 1), ('h2', 'u', 'claude code', 1);
+                     PRAGMA user_version = 10;",
+                )
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let full: Vec<(String, bool)> =
+            s.access_tokens_of("u").unwrap().into_iter().map(|t| (t.name, t.full_access)).collect();
+        assert!(full.contains(&("Lemmate desktop on laptop".into(), true)), "{full:?}");
+        assert!(full.contains(&("claude code".into(), false)), "{full:?}");
     }
 }

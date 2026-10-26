@@ -802,6 +802,29 @@ async fn access_tokens_are_scoped_and_cannot_mint_more() {
     assert_eq!(get(addr, &format!("/api/v1/vaults/{a}/notes"), Some(&only_b)).await.0, 404);
     assert_eq!(get(addr, &format!("/api/v1/vaults/{b}/notes"), Some(&only_b)).await.0, 200);
 
+    // An agent's token — limited, the default — creates no vault and deletes none; a
+    // full-access one, for the user's own app, may. Full access is for writing.
+    let full_ro = json!({"name": "x", "full_access": true, "read_only": true});
+    assert_eq!(post(addr, "/api/v1/tokens", full_ro, Some(&ann)).await.0, 400);
+    let (_, app) =
+        post(addr, "/api/v1/tokens", json!({"name": "desktop", "full_access": true}), Some(&ann)).await;
+    assert_eq!(app["full_access"], true);
+    let app = app["token"].as_str().unwrap().to_owned();
+    let fresh = VaultId::new();
+    let fresh_doc = format!("vault:{fresh}");
+    let mut agent = connect(addr, &full).await;
+    send(&mut agent, &fresh_doc, Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector()))).await;
+    assert!(
+        matches!(recv(&mut agent).await, Some((_, Message::Auth(Some(_))))),
+        "a limited token claims nothing"
+    );
+    let mut desktop = connect(addr, &app).await;
+    send(&mut desktop, &fresh_doc, Message::Sync(SyncMessage::SyncStep1(NoteDoc::new().state_vector())))
+        .await;
+    assert!(matches!(recv(&mut desktop).await, Some((_, Message::Sync(SyncMessage::SyncStep2(_))))));
+    assert_eq!(del(addr, &format!("/api/v1/vaults/{b}"), &full).await, 403, "nor deletes one");
+    assert_eq!(del(addr, &format!("/api/v1/vaults/{fresh}"), &app).await, 204);
+
     // No token can manage tokens or the password, however wide it is.
     assert_eq!(get(addr, "/api/v1/tokens", Some(&full)).await.0, 403);
     assert_eq!(post(addr, "/api/v1/tokens", json!({"name": "wider"}), Some(&ro)).await.0, 403);
