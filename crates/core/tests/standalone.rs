@@ -34,6 +34,7 @@ async fn relay_with_config(root: &Path, config_path: Option<PathBuf>) -> LocalHa
         vault_root: Some(root.to_path_buf()),
         config_path,
         allow_remote: false,
+        approvals_dir: Some(root.join("approvals")),
     };
     remember(start(opts, local).await.unwrap())
 }
@@ -609,5 +610,80 @@ async fn connecting_a_server_is_answered_by_the_shell() {
     .await;
     assert_eq!(code, 400);
 
+    handle.abort();
+}
+
+/// A vault with no server approves its filters on the device (SPEC §5.6), and nothing in the
+/// vault — a file where the approvals live, a copy in the sidecar — approves anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standalone_vault_approves_its_filters_on_the_device() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = relay(tmp.path()).await;
+    let base = format!("http://{}", handle.addr);
+    let vault = handle.vault_id;
+    let api = format!("{base}/api/v1/vaults/{vault}");
+    let notes = tmp.path().join("notes");
+    let shortcode = "return { stamp = function() return pandoc.Str('STAMPED-BY-LUA') end }\n";
+    let hash = lemmate_core::attachments::hash_bytes(shortcode.as_bytes());
+    std::fs::create_dir_all(notes.join("lua")).unwrap();
+    std::fs::write(notes.join("lua/stamp.lua"), shortcode).unwrap();
+    // The vault pretending to approve its own filter, where the device keeps approvals and in
+    // the sidecar.
+    let forged = serde_json::json!({"device": [{"hash": hash, "path": "lua/stamp.lua", "approved_by": "me", "approved_ms": 1}]});
+    for dir in [notes.join("filter-approvals"), notes.join(".lemmate/filter-approvals")] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{vault}.json")), forged.to_string()).unwrap();
+    }
+    let (code, note) = call(
+        "POST",
+        format!("{api}/notes"),
+        Some(serde_json::json!({
+            "path": "Deck.qmd",
+            "content": "---\ntitle: Deck\nshortcodes: [lua/stamp.lua]\n---\n\n{{< stamp >}}\n",
+        })),
+    )
+    .await;
+    assert_eq!(code, 201, "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    assert_eq!(get(format!("{api}/filter-approvals")).await, (200, serde_json::json!([])));
+    let renders =
+        lemmate_core::quarto::quarto_available(None) && lemmate_core::sandbox::confinement().is_ok();
+    let render = format!("{api}/notes/{id}/render");
+    if renders {
+        until("the render to ask for the shortcode", async || {
+            let (code, page) = post_text(render.clone(), serde_json::json!({"format": "html"})).await;
+            code == 200 && !page.contains("STAMPED-BY-LUA") && page.contains("Deck")
+        })
+        .await;
+    }
+
+    let wrong = serde_json::json!({"path": "lua/stamp.lua", "hash": "0".repeat(64)});
+    assert_eq!(post_text(format!("{api}/filter-approvals"), wrong).await.0, 409, "not these bytes");
+    let missing = serde_json::json!({"path": "lua/none.lua", "hash": hash});
+    assert_eq!(post_text(format!("{api}/filter-approvals"), missing).await.0, 404);
+    let (code, body) = post_text(
+        format!("{api}/filter-approvals"),
+        serde_json::json!({"path": "lua/stamp.lua", "hash": hash}),
+    )
+    .await;
+    assert_eq!(code, 200, "{body}");
+    let (_, listed) = get(format!("{api}/filter-approvals")).await;
+    assert_eq!(listed[0]["source"], "device");
+    assert_eq!(listed[0]["hash"], serde_json::json!(hash));
+    if renders {
+        let (code, page) = post_text(render.clone(), serde_json::json!({"format": "html"})).await;
+        assert_eq!(code, 200, "{page}");
+        assert!(page.contains("STAMPED-BY-LUA"), "approved on the device: run");
+    }
+    let revoke = format!("{api}/filter-approvals/{hash}");
+    let (code, _) = tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let r = keyed(agent.delete(&revoke), &revoke).call().unwrap();
+        (r.status().as_u16(), ())
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 204);
+    assert_eq!(get(format!("{api}/filter-approvals")).await, (200, serde_json::json!([])));
     handle.abort();
 }

@@ -564,7 +564,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 Some(bind) => rt.block_on(async {
                     let handle = client::start(
                         opts,
-                        LocalOptions { bind, web_dir, vault_root: None, config_path: None, allow_remote },
+                        LocalOptions {
+                            bind,
+                            web_dir,
+                            vault_root: None,
+                            config_path: None,
+                            allow_remote,
+                            approvals_dir: None,
+                        },
                     )
                     .await?;
                     // The key is the relay's only lock: this address is the way in, once.
@@ -608,6 +615,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     vault_root: Some(root.clone()),
                     config_path: None,
                     allow_remote,
+                    approvals_dir: None,
                 };
                 let handle = client::start_many(opts, local).await?;
                 println!("serving {} vault(s) on {}", handle.vaults.len(), handle.page_url(""));

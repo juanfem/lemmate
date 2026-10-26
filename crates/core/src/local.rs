@@ -212,6 +212,9 @@ pub struct LocalOptions {
     /// for every vault it holds, so reaching it from the network is a decision, not a default.
     /// Every request still needs the relay's key.
     pub allow_remote: bool,
+    /// Where this device keeps which Lua filters its renders may run (`approvals.rs`). `None`:
+    /// `filter-approvals/` under the configuration directory.
+    pub approvals_dir: Option<PathBuf>,
 }
 
 /// A loopback port for `vault_dir`, the same one every time.
@@ -271,6 +274,9 @@ pub(crate) struct LocalState {
     next_peer: AtomicU64,
     /// Renders made for viewing, to be opened again without rendering again.
     renders: crate::quarto::RenderCache,
+    /// Which Lua filters renders may run, per vault; `None` when there is nowhere to keep that,
+    /// and then none runs.
+    approvals: Option<crate::approvals::ApprovalFiles>,
 }
 
 impl LocalState {
@@ -610,6 +616,11 @@ pub(crate) async fn serve(
         sign_out: reconfigurable.then_some(sign_out_tx),
         next_peer: AtomicU64::new(1),
         renders: crate::quarto::RenderCache::new(),
+        approvals: opts
+            .approvals_dir
+            .clone()
+            .or_else(crate::approvals::ApprovalFiles::default_dir)
+            .map(crate::approvals::ApprovalFiles::new),
     });
     let registrar = Registrar(state.clone());
     if !opts.bind.ip().is_loopback() {
@@ -654,6 +665,8 @@ pub(crate) async fn serve(
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render/{render}", get(kept_render))
+        .route("/api/v1/vaults/{vault}/filter-approvals", get(filter_approvals).post(approve_filter))
+        .route("/api/v1/vaults/{vault}/filter-approvals/{hash}", axum::routing::delete(revoke_filter))
         .route("/api/v1/vaults/{vault}/files", get(list_files).put(put_file).delete(delete_file))
         .route("/api/v1/vaults/{vault}/files/move", axum::routing::post(move_file))
         .route("/api/v1/vaults/{vault}/trash", get(trash))
@@ -1211,7 +1224,13 @@ async fn render_note(
         _ => format,
     };
     let view = body.view;
-    let opts = crate::quarto::RenderOptions { viewing: view, ..Default::default() };
+    let approved = match vault.parse::<VaultId>() {
+        Ok(v) => Some(device_approvals(&s, v).await.hashes()),
+        Err(_) => None,
+    };
+    let unconfined = std::env::var_os("LEMMATE_UNSANDBOXED_FILTERS")
+        .is_some_and(|v| matches!(v.to_str(), Some("1" | "true" | "yes" | "on")));
+    let opts = crate::quarto::RenderOptions { viewing: view, approved, unconfined, ..Default::default() };
     let rendered = tokio::task::spawn_blocking(move || {
         // A deck's PDF also needs a Chrome to print it; without one the UI falls back to the
         // browser's print dialog, as it does without Quarto.
@@ -1227,7 +1246,7 @@ async fn render_note(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match rendered {
-        Ok(Some(((bytes, mime), path))) => {
+        Ok(Some((crate::quarto::Rendered { bytes, mime, filters }, path))) => {
             let disposition = crate::quarto::disposition(&path, format);
             let kept = view.then(crate::quarto::RenderCache::new_id);
             let bytes = match (&kept, format) {
@@ -1246,6 +1265,9 @@ async fn render_note(
                 .into_response();
             if let Some(kept) = kept.and_then(|k| axum::http::HeaderValue::from_str(&k).ok()) {
                 response.headers_mut().insert("x-render-id", kept);
+            }
+            if let Some(report) = filters.header().and_then(|h| axum::http::HeaderValue::from_str(&h).ok()) {
+                response.headers_mut().insert("x-lemmate-filters", report);
             }
             Ok(response)
         }
@@ -2181,6 +2203,204 @@ async fn upstream_proxy(
     }
 }
 
+/// A request to the server this relay syncs with, as its signed-in user: the status and body,
+/// or why there was no answer. `quick` gives up after a few seconds — for a question a render is
+/// waiting on, whose answer the relay can do without.
+fn upstream_call(
+    up: &Upstream,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    quick: bool,
+) -> std::result::Result<(u16, Vec<u8>), String> {
+    let agent = crate::tls::http_agent(up.ca_cert.as_deref()).map_err(|e| e.to_string())?;
+    let url = format!("{}{path}", crate::credentials::key(&up.url));
+    let mut req = ureq::http::Request::builder().method(method).uri(&url);
+    if let Some(t) = &up.token {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let req =
+        req.body(body.map(|b| b.to_string().into_bytes()).unwrap_or_default()).map_err(|e| e.to_string())?;
+    let mut config = agent.configure_request(req).http_status_as_error(false);
+    if quick {
+        config = config.timeout_global(Some(std::time::Duration::from_secs(5)));
+    }
+    let mut r = agent.run(config.build()).map_err(|e| e.to_string())?;
+    let bytes = r.body_mut().read_to_vec().map_err(|e| e.to_string())?;
+    Ok((r.status().as_u16(), bytes))
+}
+
+/// One vault's approved filters on this device (`approvals.rs`), with the server's list fetched
+/// afresh first when there is a server: fetched, it replaces the copy kept here; unreachable,
+/// the copy stands, so what was approved still runs offline.
+async fn device_approvals(s: &LocalState, vault: VaultId) -> crate::approvals::DeviceApprovals {
+    let Some(files) = s.approvals.clone() else { return Default::default() };
+    let upstream = s.upstream.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(up) = upstream {
+            let path = format!("/api/v1/vaults/{vault}/filter-approvals");
+            match upstream_call(&up, "GET", &path, None, true) {
+                Ok((200, body)) => match serde_json::from_slice::<Vec<crate::store::FilterApproval>>(&body) {
+                    Ok(list) => {
+                        if let Err(e) = files.update(vault, |a| a.server = list) {
+                            tracing::warn!(%e, "keeping the server's filter approvals");
+                        }
+                    }
+                    Err(e) => tracing::warn!(%e, "the server's filter approvals"),
+                },
+                Ok((status, _)) => tracing::debug!(status, "the server's filter approvals"),
+                Err(e) => tracing::debug!(%e, "the server's filter approvals: offline, using the copy"),
+            }
+        }
+        files.load(vault)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// An approval as the relay lists it: where it lives — on the server, or on this device only.
+#[derive(Serialize)]
+struct ApprovalOut {
+    #[serde(flatten)]
+    approval: crate::store::FilterApproval,
+    source: &'static str,
+}
+
+/// The Lua filters this vault's renders may run here: the server's and this device's, the
+/// server's first (an approval in both is the server's).
+async fn filter_approvals(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+) -> std::result::Result<axum::Json<Vec<ApprovalOut>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    s.sender(vault).ok_or(StatusCode::NOT_FOUND)?;
+    let all = device_approvals(&s, vault).await;
+    let mut out: Vec<ApprovalOut> =
+        all.server.into_iter().map(|approval| ApprovalOut { approval, source: "server" }).collect();
+    for approval in all.device {
+        if !out.iter().any(|o| o.approval.hash == approval.hash) {
+            out.push(ApprovalOut { approval, source: "device" });
+        }
+    }
+    Ok(axum::Json(out))
+}
+
+#[derive(Deserialize)]
+struct ApproveIn {
+    path: String,
+    hash: String,
+}
+
+/// Approve the Lua file at `path` to run in this vault's renders on this device — the bytes on
+/// disk now, which must be the ones `hash` names (409 otherwise). With a server, it is asked to
+/// approve them too, for everyone; it refuses an access token, and then the approval is this
+/// device's alone.
+async fn approve_filter(
+    State(s): State<Arc<LocalState>>,
+    Path(vault): Path<String>,
+    axum::Json(body): axum::Json<ApproveIn>,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    let vault_id: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !body.path.to_ascii_lowercase().ends_with(".lua") || !crate::attachments::is_valid_hash(&body.hash) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let files = s.approvals.clone().ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let LocalReply::File(found) = ask(&s, &vault, LocalQuery::ReadFile(body.path.clone())).await? else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let bytes = found.ok_or(StatusCode::NOT_FOUND)?;
+    if crate::attachments::hash_bytes(&bytes) != body.hash {
+        return Err(StatusCode::CONFLICT);
+    }
+    let approval = crate::store::FilterApproval {
+        hash: body.hash.clone(),
+        path: body.path.clone(),
+        approved_by: "this device".into(),
+        approved_ms: crate::store::now_ms(),
+    };
+    let upstream = s.upstream.clone();
+    let wants = serde_json::json!({ "path": body.path, "hash": body.hash });
+    let out = tokio::task::spawn_blocking(move || {
+        let path = format!("/api/v1/vaults/{vault_id}/filter-approvals");
+        let shared = upstream.as_ref().and_then(|up| match upstream_call(up, "POST", &path, Some(&wants), false) {
+            Ok((200, b)) => serde_json::from_slice::<crate::store::FilterApproval>(&b).ok(),
+            Ok((status, _)) => {
+                tracing::info!(status, "the server did not take the filter approval: kept on this device");
+                None
+            }
+            Err(e) => {
+                tracing::info!(%e, "the server was not reached: the filter approval is kept on this device");
+                None
+            }
+        });
+        files.update(vault_id, |a| {
+            a.device.retain(|d| d.hash != approval.hash);
+            match shared {
+                Some(on_server) => {
+                    a.server.retain(|d| d.hash != on_server.hash);
+                    a.server.insert(0, on_server.clone());
+                    ApprovalOut { approval: on_server, source: "server" }
+                }
+                None => {
+                    a.device.insert(0, approval.clone());
+                    ApprovalOut { approval, source: "device" }
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::info!(vault = %vault_id, path = %out.approval.path, source = out.source, "filter approved");
+    Ok(axum::Json(out).into_response())
+}
+
+/// Revoke an approval. This device's own goes at once; the server's is the server's to revoke —
+/// asked, and if it refuses (403), it stands, here as everywhere.
+async fn revoke_filter(
+    State(s): State<Arc<LocalState>>,
+    Path((vault, hash)): Path<(String, String)>,
+) -> std::result::Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    s.sender(vault).ok_or(StatusCode::NOT_FOUND)?;
+    let files = s.approvals.clone().ok_or(StatusCode::NOT_FOUND)?;
+    let upstream = s.upstream.clone();
+    tokio::task::spawn_blocking(move || {
+        let current = files.load(vault);
+        let on_device = current.device.iter().any(|a| a.hash == hash);
+        let on_server = current.server.iter().any(|a| a.hash == hash);
+        if !on_device && !on_server {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let upstream_answer = match (&upstream, on_server) {
+            (Some(up), true) => {
+                let path = format!("/api/v1/vaults/{vault}/filter-approvals/{hash}");
+                upstream_call(up, "DELETE", &path, None, false).ok().map(|(status, _)| status)
+            }
+            _ => None,
+        };
+        let revoked_upstream = matches!(upstream_answer, Some(204 | 404));
+        files
+            .update(vault, |a| {
+                a.device.retain(|d| d.hash != hash);
+                if revoked_upstream {
+                    a.server.retain(|d| d.hash != hash);
+                }
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        match (on_server, revoked_upstream, upstream_answer) {
+            (true, false, Some(403)) => Err(StatusCode::FORBIDDEN),
+            (true, false, _) => Err(StatusCode::BAD_GATEWAY),
+            _ => Ok(StatusCode::NO_CONTENT),
+        }
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
 /// A request from the UI to sign out of the server, for the shell to carry out — revoke the
 /// token upstream, forget it here, and restart signed out — with the channel it answers on.
 #[derive(Debug)]
@@ -2296,6 +2516,7 @@ mod tests {
             vault_root: None,
             config_path: None,
             allow_remote: false,
+            approvals_dir: None,
         };
         let mut served = serve(&opts, &[vault], None).await.unwrap();
         let mut old = served.events.remove(0);

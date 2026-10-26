@@ -3,16 +3,22 @@
 //!
 //! A render never runs code: `--no-execute` is always passed, so a `{python}` cell is shown,
 //! not run (SPEC §14). The note's own front matter *is* honoured — that is the point of Quarto —
-//! except what would run code or read files on the host at an editor's say-so: Lua filters and
-//! shortcodes, include files, templates, paths out of the project, and the shortcodes that read
-//! files or the environment (see [`DENIED_KEYS`] and [`GUARD`]). The render sees only a cleared
-//! environment. A server can still switch rendering off altogether.
+//! except what would run code or read files on the host at an editor's say-so: include files,
+//! templates, paths out of the project, and the shortcodes that read files or the environment
+//! (see [`DENIED_KEYS`] and [`GUARD`]). The render sees only a cleared environment. A server can
+//! still switch rendering off altogether.
+//!
+//! Lua filters and shortcodes are the one exception, and only for bytes somebody allowed to has
+//! approved ([`RenderOptions::approved`]): a vault file can name a filter, but nothing in the
+//! vault can approve one. A render that runs any runs confined ([`crate::sandbox`]); one that
+//! names others gets them dropped, and says which ([`FilterReport`]).
 //!
 //! Quarto wants a project on disk, so a render builds one in a temporary directory: the note
 //! at its vault path (as `.qmd`, since Quarto refuses code cells in a `.md`), the attachments
 //! it references at theirs — so a relative image link resolves exactly as it does in the vault
 //! — and a `_quarto.yml` that makes HTML self-contained and supplies the vault's bibliography.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -280,11 +286,78 @@ pub struct RenderOptions {
     pub viewing: bool,
     /// The Chrome a [`Format::SlidesPdf`] is printed with; `None` → [`crate::chrome::chrome_bin`].
     pub chrome: Option<PathBuf>,
+    /// The Lua filters and shortcodes this render may run, as the blake3 hashes of their bytes
+    /// ([`crate::attachments::hash_bytes`]): what the vault's owners approved. One the note
+    /// names that is not among them is dropped and reported. `None`: none runs, and none is
+    /// asked about — filters are switched off.
+    pub approved: Option<HashSet<String>>,
+    /// Run approved filters even where nothing can confine them ([`crate::sandbox`]). Unsafe:
+    /// for a machine that is a sandbox already, and knows it.
+    pub unconfined: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { quarto: None, timeout: Duration::from_secs(120), viewing: false, chrome: None }
+        Self {
+            quarto: None,
+            timeout: Duration::from_secs(120),
+            viewing: false,
+            chrome: None,
+            approved: None,
+            unconfined: false,
+        }
+    }
+}
+
+/// A render: the bytes, their MIME type, and what became of the filters the note asked for.
+#[derive(Debug, Clone)]
+pub struct Rendered {
+    pub bytes: Vec<u8>,
+    pub mime: &'static str,
+    pub filters: FilterReport,
+}
+
+/// A Lua file a render was asked to run and did not, because nobody has approved its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Unapproved {
+    /// Its vault path.
+    pub path: String,
+    /// The blake3 hash of the bytes the render had: what an approval names.
+    pub hash: String,
+}
+
+/// What became of the Lua filters and shortcodes a note named.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FilterReport {
+    /// The vault paths of the approved ones that ran.
+    pub ran: Vec<String>,
+    /// Named, and in the vault, but not approved: what an owner could approve.
+    pub unapproved: Vec<Unapproved>,
+    /// Why approved ones did not run, when they did not: switched off, or nothing here to
+    /// confine them.
+    pub withheld: Option<String>,
+}
+
+impl FilterReport {
+    /// The report as the `x-lemmate-filters` header carries it — JSON, with anything outside
+    /// ASCII escaped, as a header value must be — or `None` when there is nothing to say.
+    pub fn header(&self) -> Option<String> {
+        if self.ran.is_empty() && self.unapproved.is_empty() && self.withheld.is_none() {
+            return None;
+        }
+        let json = serde_json::to_string(self).ok()?;
+        let mut out = String::with_capacity(json.len());
+        for c in json.chars() {
+            if c.is_ascii() && !c.is_ascii_control() {
+                out.push(c);
+            } else {
+                let mut units = [0u16; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{u:04x}"));
+                }
+            }
+        }
+        Some(out)
     }
 }
 
@@ -310,7 +383,7 @@ const CSL: &str = "export/style.csl";
 
 /// Render the note at vault path `note_path`. `attachments` are the vault's attachment paths
 /// and `read` fetches any vault file by path — only the ones the note references, and the
-/// vault's bibliography, are asked for. Returns the bytes and their MIME type.
+/// vault's bibliography, are asked for.
 pub fn render(
     note_path: &str,
     text: &str,
@@ -318,7 +391,7 @@ pub fn render(
     attachments: &[String],
     read: impl Fn(&str) -> Option<Vec<u8>>,
     opts: &RenderOptions,
-) -> Result<(Vec<u8>, &'static str)> {
+) -> Result<Rendered> {
     let work = crate::pandoc::tempdir()?;
     render_in(&work, note_path, text, format, attachments, read, opts)
 }
@@ -331,7 +404,7 @@ fn render_in(
     attachments: &[String],
     read: impl Fn(&str) -> Option<Vec<u8>>,
     opts: &RenderOptions,
-) -> Result<(Vec<u8>, &'static str)> {
+) -> Result<Rendered> {
     let project = work.join("project");
     let rel = source_path(note_path);
     // The note's place in the project, which is what every path in it is relative to.
@@ -347,23 +420,55 @@ fn render_in(
             files.push(p);
         }
     }
-    let mut vault_project = None;
-    for path in &files {
-        // An extension is Lua to run: a render never has one.
+    // Each read once: a Lua file is judged by the bytes that are then written, not by bytes
+    // read a moment earlier.
+    let mut loaded: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
+    for path in files.iter() {
+        // An extension is Lua to run, and approved one file at a time: a render never has one.
         if path.split('/').any(|seg| seg == "_extensions") {
             continue;
         }
-        let (Some(safe), Some(bytes)) = (safe_relative(path), read(path)) else { continue };
+        if let (Some(safe), Some(bytes)) = (safe_relative(path), read(path)) {
+            loaded.push((path.clone(), safe, bytes));
+        }
+    }
+    let lua: HashMap<String, String> = loaded
+        .iter()
+        .filter(|(p, ..)| is_lua(p))
+        .map(|(p, _, b)| (p.clone(), crate::attachments::hash_bytes(b)))
+        .collect();
+    let gate = Gate {
+        lua,
+        blocked: match (&opts.approved, opts.unconfined) {
+            (Some(a), false) if !a.is_empty() => crate::sandbox::confinement().err(),
+            _ => None,
+        },
+        approved: opts.approved.clone(),
+        report: Default::default(),
+    };
+    let mut vault_project = None;
+    for (path, safe, bytes) in loaded {
         if matches!(path.as_str(), "_quarto.yml" | "_quarto.yaml") {
             // Merged into the project file below rather than written as it is.
             vault_project = Some(String::from_utf8_lossy(&bytes).into_owned());
             continue;
         }
-        let bytes = if is_yaml(path) {
-            let Some(guarded) = guard_yaml(path, &String::from_utf8_lossy(&bytes)) else { continue };
+        let bytes = if is_lua(&path) {
+            // Only what may run is there to be run, or to be loaded by what runs.
+            if !gate.runs(&gate.lua[&path]) {
+                continue;
+            }
+            bytes
+        } else if is_yaml(&path) {
+            // The `_metadata.yml` of a folder the note is in may name filters, as the vault's
+            // `_quarto.yml` and the note may; any other YAML file — data, a brand, another
+            // folder's metadata, which Quarto does not read for this note — may not.
+            let names_code = metadata_for(note_path, &path);
+            let gate = if names_code { &gate } else { &Gate::closed() };
+            let Some(guarded) = guard_yaml(&path, &String::from_utf8_lossy(&bytes), gate) else { continue };
             serde_yaml_ng::to_string(&guarded).map_err(|e| Error::Export(e.to_string()))?.into_bytes()
-        } else if is_stylesheet(path) {
-            guard_stylesheet(path, &String::from_utf8_lossy(&bytes)).into_bytes()
+        } else if is_stylesheet(&path) {
+            guard_stylesheet(&path, &String::from_utf8_lossy(&bytes)).into_bytes()
         } else {
             bytes
         };
@@ -377,14 +482,39 @@ fn render_in(
     let guard = work.join("guard.lua");
     let depth = rel.components().count().saturating_sub(1);
     write(&guard, GUARD.replace("__DEPTH__", &depth.to_string()).as_bytes())?;
-    write(&project.join("_quarto.yml"), project_yaml(vault_project.as_deref(), &extra, &guard)?.as_bytes())?;
-    let text = guard_metadata(&base, text)?;
+    let project_file = project_yaml(vault_project.as_deref(), &extra, &guard, &gate)?;
+    write(&project.join("_quarto.yml"), project_file.as_bytes())?;
+    let text = guard_metadata(&base, text, &gate)?;
     write(&project.join(&rel), defuse_shortcodes(&prepare(&text, note_path, attachments)).as_bytes())?;
+    let report = gate.report.into_inner();
 
     let bin = quarto_bin(opts.quarto.as_deref());
     let log = work.join("quarto.log");
-    let mut cmd = Command::new(&bin);
+    // A render that runs Lua runs confined: it writes to `work` alone, so its home, temporary
+    // files and caches are in there too, fresh each time — a cache shared with the next
+    // render would be a way to leave something behind for it.
+    let jail = (!report.ran.is_empty() && !opts.unconfined).then(|| crate::sandbox::Jail {
+        work: work.to_path_buf(),
+        read: install_root(&bin).into_iter().collect(),
+    });
+    let mut cmd = match &jail {
+        Some(jail) => crate::sandbox::command(&bin, jail),
+        None => Command::new(&bin),
+    };
     cmd.env_clear().envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(kept_env)));
+    if jail.is_some() {
+        let own = |name: &str| -> Result<PathBuf> {
+            let dir = work.join(name);
+            std::fs::create_dir_all(&dir)?;
+            Ok(dir)
+        };
+        cmd.env("HOME", own("home")?)
+            .env("TMPDIR", own("tmp")?)
+            .env("XDG_CACHE_HOME", own("cache")?)
+            .env("XDG_CONFIG_HOME", own("config")?)
+            .env("XDG_DATA_HOME", own("data")?)
+            .env_remove("XDG_RUNTIME_DIR");
+    }
     cmd.current_dir(&project)
         .arg("render")
         .arg(&rel)
@@ -400,7 +530,11 @@ fn render_in(
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log)?);
     // Killed with what it started — pandoc, Typst, Deno — if it runs too long.
-    let status = crate::pandoc::run_bounded(&mut cmd, None, opts.timeout)
+    let ran = match &jail {
+        Some(jail) => crate::sandbox::run(&mut cmd, jail, opts.timeout),
+        None => crate::pandoc::run_bounded(&mut cmd, None, opts.timeout),
+    };
+    let status = ran
         .map_err(|e| Error::Export(format!("running {}: {e}", bin.display())))?
         .ok_or_else(|| Error::Export(format!("quarto did not finish within {}s", opts.timeout.as_secs())))?
         .status;
@@ -421,7 +555,113 @@ fn render_in(
         (true, Format::Html | Format::RevealJs) => with_storage(bytes),
         _ => bytes,
     };
-    Ok((bytes, format.mime()))
+    Ok(Rendered { bytes, mime: format.mime(), filters: report })
+}
+
+/// Whether `path` is a `_metadata.yml` Quarto reads for the note at `note_path`: one in the
+/// note's folder or a folder above it.
+fn metadata_for(note_path: &str, path: &str) -> bool {
+    let Some(dir) = path.strip_suffix("_metadata.yml") else { return false };
+    if !(dir.is_empty() || dir.ends_with('/')) {
+        return false;
+    }
+    let note_dir = note_path.rsplit_once('/').map_or("", |(d, _)| d);
+    dir.is_empty() || format!("{note_dir}/").starts_with(dir)
+}
+
+/// Where the Quarto that `bin` names is installed — the folder above its `bin/` — for a
+/// confined render to read: Quarto runs its own Deno, pandoc and Typst from there.
+fn install_root(bin: &Path) -> Option<PathBuf> {
+    let found = if bin.components().count() > 1 {
+        bin.to_path_buf()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(bin)).find(|p| p.is_file())?
+    };
+    let real = std::fs::canonicalize(found).ok()?;
+    real.ancestors().find(|a| a.file_name().is_some_and(|n| n == "bin"))?.parent().map(Path::to_path_buf)
+}
+
+/// The Lua files laid out for a render, and which of them it may run. Asked about every entry
+/// of every `filters:` and `shortcodes:` list Quarto would read; keeps the [`FilterReport`].
+struct Gate {
+    /// Each Lua file read for the render, by vault path: the hash of its bytes.
+    lua: HashMap<String, String>,
+    /// [`RenderOptions::approved`].
+    approved: Option<HashSet<String>>,
+    /// Why approved filters may not run here — nothing to confine them — or `None` if they may.
+    blocked: Option<String>,
+    report: std::cell::RefCell<FilterReport>,
+}
+
+impl Gate {
+    /// A gate nothing passes, and that reports nothing: for files that may not name code.
+    fn closed() -> Gate {
+        Gate { lua: HashMap::new(), approved: None, blocked: None, report: Default::default() }
+    }
+
+    /// Whether the Lua file with this hash may run in this render.
+    fn runs(&self, hash: &str) -> bool {
+        self.blocked.is_none() && self.approved.as_ref().is_some_and(|a| a.contains(hash))
+    }
+
+    /// One entry of a `filters:` (or, with `shortcodes`, a `shortcodes:`) list in the file at
+    /// vault path `base`, as the render may have it: a Lua file that may run, by its path
+    /// relative to `base`, and `at:` kept short of the guard's place (last of all). Quarto's
+    /// own `quarto` marker stays where it is. Anything else — a JSON filter (a program), an
+    /// extension's name, a file that may not run — is `None`.
+    fn entry(
+        &self,
+        base: &str,
+        entry: &serde_yaml_ng::Value,
+        shortcodes: bool,
+    ) -> Option<serde_yaml_ng::Value> {
+        use serde_yaml_ng::{Mapping, Value};
+        match entry {
+            Value::String(s) if !shortcodes && s == "quarto" => Some(entry.clone()),
+            Value::String(s) => self.lua_file(base, s).map(Value::String),
+            Value::Mapping(m) => {
+                let kind = m.get("type").and_then(Value::as_str);
+                if kind.is_some_and(|t| t != "lua") {
+                    return None;
+                }
+                let path = self.lua_file(base, m.get("path")?.as_str()?)?;
+                let mut out = Mapping::new();
+                out.insert("path".into(), path.into());
+                if let Some(at) = m.get("at").and_then(Value::as_str) {
+                    out.insert("at".into(), (if at == "post-finalize" { "pre-finalize" } else { at }).into());
+                }
+                Some(Value::Mapping(out))
+            }
+            _ => None,
+        }
+    }
+
+    /// `target`, named in the file at `base`, as the path to give Quarto: if it is a Lua file
+    /// of the vault's, read for this render, whose bytes are approved — and approved filters
+    /// may run here. Every other answer goes into the report.
+    fn lua_file(&self, base: &str, target: &str) -> Option<String> {
+        let path = crate::projection::Projection::normalize_relative(base, target.trim())?;
+        let hash = self.lua.get(&path)?;
+        let mut report = self.report.borrow_mut();
+        let Some(approved) = &self.approved else {
+            report.withheld.get_or_insert_with(|| "Lua filters are switched off here".into());
+            return None;
+        };
+        if !approved.contains(hash) {
+            if !report.unapproved.iter().any(|u| u.path == path && u.hash == *hash) {
+                report.unapproved.push(Unapproved { path, hash: hash.clone() });
+            }
+            return None;
+        }
+        if let Some(why) = &self.blocked {
+            report.withheld.get_or_insert_with(|| format!("approved filters cannot run here: {why}"));
+            return None;
+        }
+        if !report.ran.contains(&path) {
+            report.ran.push(path.clone());
+        }
+        Some(relative_from(base, &path))
+    }
 }
 
 /// Web storage that lives in memory, for a page that has none. A render made for viewing runs
@@ -509,13 +749,13 @@ fn safe_relative(path: &str) -> Option<PathBuf> {
 /// - The vault's `export/references.bib` and `style.csl` are the bibliography and style unless
 ///   the vault's file names its own — and a note's front matter wins over both, as Quarto
 ///   always lets a document override its project.
-fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)], guard: &Path) -> Result<String> {
+fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)], guard: &Path, gate: &Gate) -> Result<String> {
     use serde_yaml_ng::{Mapping, Value};
     let mut root = match vault {
         Some(text) if !text.trim().is_empty() => match serde_yaml_ng::from_str::<Value>(text) {
             Ok(mut v) => {
                 v.apply_merge().map_err(|e| Error::Export(format!("the vault's _quarto.yml: {e}")))?;
-                guard_value("_quarto.yml", &mut v);
+                guard_value("_quarto.yml", &mut v, gate);
                 match v {
                     Value::Mapping(m) => m,
                     _ => Mapping::new(),
@@ -553,11 +793,17 @@ fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)], guard: &Path) ->
         format.insert(key(name), Value::Mapping(options));
     }
     root.insert(key("format"), Value::Mapping(format));
-    // Ours, and the only one: [`DENIED_KEYS`] took any the vault named.
+    // Ours, after whatever approved ones the vault's file names ([`Gate`]): at the last place
+    // a filter can run, which no other may take, so it sees what they made too.
+    let mut filters = match root.remove("filters") {
+        Some(Value::Sequence(fs)) => fs,
+        _ => Vec::new(),
+    };
     let mut filter = Mapping::new();
     filter.insert(key("path"), key(&guard.to_string_lossy()));
-    filter.insert(key("at"), key("post-render"));
-    root.insert(key("filters"), Value::Sequence(vec![Value::Mapping(filter)]));
+    filter.insert(key("at"), key("post-finalize"));
+    filters.push(Value::Mapping(filter));
+    root.insert(key("filters"), Value::Sequence(filters));
 
     for (name, path) in extra {
         if !root.contains_key(*name) {
@@ -572,10 +818,18 @@ fn project_yaml(vault: Option<&str>, extra: &[(&str, PathBuf)], guard: &Path) ->
 fn tail(stderr: &str) -> String {
     let plain = strip_ansi(stderr);
     let lines: Vec<&str> = plain.lines().map(str::trim_end).collect();
-    let picked: Vec<&str> = match lines.iter().position(|l| l.trim_start().starts_with("ERROR")) {
-        Some(at) => {
-            lines[at..].iter().take_while(|l| !l.starts_with("Stack trace:")).take(12).copied().collect()
-        }
+    // A Lua filter's error comes before the traceback, with no `ERROR` in front of it.
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("ERROR"))
+        .or_else(|| lines.iter().position(|l| l.trim_start().starts_with("Error running filter")));
+    let picked: Vec<&str> = match start {
+        Some(at) => lines[at..]
+            .iter()
+            .take_while(|l| !l.starts_with("Stack trace:") && !l.trim_start().starts_with("stack traceback:"))
+            .take(12)
+            .copied()
+            .collect(),
         None => {
             let kept: Vec<&str> = lines
                 .iter()
@@ -739,13 +993,12 @@ fn escape_inline(s: &str) -> String {
 // `_metadata.yml` files, the vault's `_quarto.yml`, its stylesheets — and the page Quarto makes
 // passes through [`GUARD`] before it is written.
 
-/// Metadata keys that make a render run a program, or read or write files named in them: Lua
-/// filters and shortcodes, engines and their settings, include files, templates, other
-/// metadata files, PDF engines, LaTeX installs. Dropped wherever they appear — under `format:`
-/// too. (`latex-*` goes as well, by prefix.)
+/// Metadata keys that make a render run a program, or read or write files named in them:
+/// engines and their settings, include files, templates, PDF engines, LaTeX installs, and the
+/// older spellings of filters. Dropped wherever they appear — under `format:` too. (`latex-*`
+/// goes as well, by prefix.) `filters` and `shortcodes` go through the [`Gate`] instead, and
+/// `metadata-files` keeps the YAML files inside the project ([`guard_value`]).
 const DENIED_KEYS: &[&str] = &[
-    "filters",
-    "shortcodes",
     "lua-filters",
     "ipynb-filters",
     "engine",
@@ -761,8 +1014,6 @@ const DENIED_KEYS: &[&str] = &[
     "pdf-engine-opts",
     "template",
     "template-partials",
-    "metadata-files",
-    "metadata-file",
     "include-in-header",
     "include-before-body",
     "include-after-body",
@@ -787,12 +1038,21 @@ fn is_yaml(path: &str) -> bool {
     extension_is(path, &["yml", "yaml"])
 }
 
+fn is_lua(path: &str) -> bool {
+    extension_is(path, &["lua"])
+}
+
 fn is_stylesheet(path: &str) -> bool {
     extension_is(path, &["css", "scss", "sass"])
 }
 
+/// A metadata key as Quarto might be meant to read it: `Lua_Filters` is `lua-filters`.
+fn key_name(key: &str) -> String {
+    key.to_ascii_lowercase().replace('_', "-")
+}
+
 fn denied_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase().replace('_', "-");
+    let key = key_name(key);
     DENIED_KEYS.contains(&key.as_str()) || key.starts_with("latex-")
 }
 
@@ -852,14 +1112,17 @@ fn percent_decoded(s: &str) -> String {
 }
 
 /// Whether `target`, named in the file at vault path `base`, reaches out of the project: a
-/// `file:` URL, an absolute, home (`~`), drive or UNC path, or `..` past the vault root. Web and
-/// `data:` URLs do not; nor does a plain relative path.
+/// `file:` URL, an absolute, home (`~`, `~/…`, `~user/…`), drive or UNC path, or `..` past the
+/// vault root. Web and `data:` URLs do not; nor does a plain relative path — nor `~25`, which
+/// is a number to whoever wrote it, and names no file.
 fn escapes(base: &str, target: &str) -> bool {
     let t = percent_decoded(target.trim()).replace('\\', "/");
     let lower = t.to_ascii_lowercase();
     let b = lower.as_bytes();
+    let home = t == "~" || (t.starts_with('~') && t.contains('/'));
     if lower.starts_with("file:")
-        || t.starts_with(['/', '~'])
+        || t.starts_with('/')
+        || home
         || (b.len() > 1 && b[0].is_ascii_alphabetic() && b[1] == b':')
     {
         return true;
@@ -932,14 +1195,41 @@ fn guard_string(base: &str, s: &str) -> Option<String> {
 }
 
 /// Metadata from the file at vault path `base` without [`DENIED_KEYS`] and with every string
-/// through [`guard_string`]. A `from:` reader keeps pandoc off YAML blocks ([`READER`]).
-fn guard_value(base: &str, value: &mut serde_yaml_ng::Value) {
+/// through [`guard_string`]. A `from:` reader keeps pandoc off YAML blocks ([`READER`]);
+/// `filters:` and `shortcodes:` keep what the [`Gate`] lets through; `metadata-files:` keeps
+/// the YAML files inside the project (each laid out through [`guard_yaml`], so one cannot name
+/// what this one may not).
+fn guard_value(base: &str, value: &mut serde_yaml_ng::Value, gate: &Gate) {
     use serde_yaml_ng::Value;
     match value {
         Value::Mapping(m) => {
             m.retain(|k, _| !k.as_str().is_some_and(denied_key));
             let keys: Vec<Value> = m.keys().cloned().collect();
             for k in keys {
+                let name = k.as_str().map(key_name).unwrap_or_default();
+                if matches!(name.as_str(), "filters" | "shortcodes" | "metadata-files" | "metadata-file") {
+                    let items = match m.remove(&k) {
+                        Some(Value::Sequence(items)) => items,
+                        Some(one) => vec![one],
+                        None => Vec::new(),
+                    };
+                    let kept: Vec<Value> = match name.as_str() {
+                        "filters" | "shortcodes" => {
+                            items.iter().filter_map(|i| gate.entry(base, i, name == "shortcodes")).collect()
+                        }
+                        _ => items
+                            .into_iter()
+                            .filter_map(|i| {
+                                let path = i.as_str().filter(|p| is_yaml(p))?;
+                                guard_string(base, path).map(Value::String)
+                            })
+                            .collect(),
+                    };
+                    if !kept.is_empty() {
+                        m.insert(k, Value::Sequence(kept));
+                    }
+                    continue;
+                }
                 let reader = k.as_str().is_some_and(|k| matches!(k, "from" | "reader"));
                 let keep = match m.get_mut(&k) {
                     Some(Value::String(s)) if reader => {
@@ -956,7 +1246,7 @@ fn guard_value(base: &str, value: &mut serde_yaml_ng::Value) {
                         None => false,
                     },
                     Some(v) => {
-                        guard_value(base, v);
+                        guard_value(base, v, gate);
                         true
                     }
                     None => true,
@@ -977,22 +1267,22 @@ fn guard_value(base: &str, value: &mut serde_yaml_ng::Value) {
                     None => false,
                 },
                 v => {
-                    guard_value(base, v);
+                    guard_value(base, v, gate);
                     true
                 }
             });
         }
-        Value::Tagged(t) => guard_value(base, &mut t.value),
+        Value::Tagged(t) => guard_value(base, &mut t.value, gate),
         _ => {}
     }
 }
 
 /// A YAML file from the vault (a `_metadata.yml`, the `_quarto.yml`, a brand file) through
 /// [`guard_value`]; `None` if it is not YAML we can read — then it is not laid out at all.
-fn guard_yaml(base: &str, text: &str) -> Option<serde_yaml_ng::Value> {
+fn guard_yaml(base: &str, text: &str, gate: &Gate) -> Option<serde_yaml_ng::Value> {
     let mut value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).ok()?;
     value.apply_merge().ok()?;
-    guard_value(base, &mut value);
+    guard_value(base, &mut value, gate);
     Some(value)
 }
 
@@ -1001,7 +1291,7 @@ fn guard_yaml(base: &str, text: &str) -> Option<serde_yaml_ng::Value> {
 /// changed is written anew. Front matter that is not YAML we can read fails the render (Quarto
 /// would fail it too); a later block that is not becomes a rule and text, as pandoc reads it then.
 /// Fenced code is skipped, as Quarto skips it.
-fn guard_metadata(note_path: &str, text: &str) -> Result<String> {
+fn guard_metadata(note_path: &str, text: &str, gate: &Gate) -> Result<String> {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let bare = |l: &str| l.trim_end_matches(['\n', '\r']).trim_end().to_owned();
     let mut out = String::with_capacity(text.len());
@@ -1026,7 +1316,7 @@ fn guard_metadata(note_path: &str, text: &str) -> Result<String> {
             match parsed {
                 Some(v) => {
                     let mut guarded = v.clone();
-                    guard_value(note_path, &mut guarded);
+                    guard_value(note_path, &mut guarded, gate);
                     if guarded == v {
                         out.push_str(&lines[i..=end].concat());
                     } else if guarded.as_mapping().is_some_and(|m| !m.is_empty()) {
@@ -1137,7 +1427,7 @@ fn guard_stylesheet(base: &str, css: &str) -> String {
     out
 }
 
-/// The filter every render runs through, last before the page is written (`at: post-render`):
+/// The filter every render runs through, last before the page is written (`at: post-finalize`):
 /// an image, raw HTML, or an attribute (a slide's `data-background-image`, say) that names a
 /// file out of the project is dropped — `embed-resources` would read it into the page. The same
 /// tests as [`escapes`] and [`raw_escapes`]; `__DEPTH__` is how many folders down the note is.
@@ -1149,7 +1439,9 @@ local function escapes(t)
   t = t:gsub('%%(%x%x)', function(h) return string.char(tonumber(h, 16)) end)
   t = t:gsub('\\', '/')
   local lower = t:lower()
-  if lower:find('^file:') or t:find('^[/~]') or t:find('^%a:') then return true end
+  if lower:find('^file:') or t:find('^/') or t == '~' or t:find('^~[^/]*/') or t:find('^%a:') then
+    return true
+  end
   if lower:find('^[%w+.-]+:') then return false end
   local depth = DEPTH
   for seg in t:gmatch('[^/]+') do
@@ -1395,6 +1687,7 @@ mod tests {
             None,
             &[("bibliography", PathBuf::from("/tmp/it's/references.bib"))],
             Path::new("/g.lua"),
+            &Gate::closed(),
         )
         .unwrap();
         let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(&y).unwrap();
@@ -1413,9 +1706,10 @@ mod tests {
             ("bibliography", PathBuf::from("/p/export/references.bib")),
             ("csl", PathBuf::from("/p/export/style.csl")),
         ];
-        let v: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&project_yaml(Some(vault), &extra, Path::new("/g.lua")).unwrap())
-                .unwrap();
+        let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &project_yaml(Some(vault), &extra, Path::new("/g.lua"), &Gate::closed()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["project"].as_mapping().unwrap().len(), 1, "only `type` survives: {v:?}");
         assert_eq!(v["project"]["type"], "default");
         assert_eq!(v["format"]["html"]["theme"][1], "styles/custom.scss", "the shared theme stays");
@@ -1424,12 +1718,13 @@ mod tests {
         assert_eq!(v["csl"], "/p/export/style.csl");
         assert_eq!(v["author"], "Juan");
         // A bare format name still gets its options.
-        let v: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&project_yaml(Some("format: html\n"), &[], Path::new("/g.lua")).unwrap())
-                .unwrap();
+        let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &project_yaml(Some("format: html\n"), &[], Path::new("/g.lua"), &Gate::closed()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["format"]["html"]["embed-resources"], true);
         assert!(
-            project_yaml(Some("format: [\n"), &[], Path::new("/g.lua"))
+            project_yaml(Some("format: [\n"), &[], Path::new("/g.lua"), &Gate::closed())
                 .unwrap_err()
                 .to_string()
                 .contains("not valid YAML")
@@ -1445,6 +1740,11 @@ mod tests {
             "quarto: pandoc\n  to: html\nsomething went wrong"
         );
         assert_eq!(tail(""), "quarto failed without saying why");
+        let lua = "pandoc\n  to: html\nError running filter /q/main.lua:\n../lua/cycle.lua:12: attempt to index a nil value\n                   stack traceback:\n\t/q/main.lua:2: in field 'Pandoc'\nWARN: Error encountered when rendering files\n";
+        assert_eq!(
+            tail(lua),
+            "quarto: Error running filter /q/main.lua:\n../lua/cycle.lua:12: attempt to index a nil value"
+        );
     }
 
     #[test]
@@ -1474,21 +1774,25 @@ mod tests {
         let md =
             "---\ntitle: Rendered\n---\n\nSee [[Other]].\n\n![[pic.png]]\n\n```{python}\nprint(6 * 7)\n```\n";
         let atts = vec!["attachments/pic.png".to_owned()];
-        let (html, mime) = render("dir/Talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        let Rendered { bytes: html, mime, .. } =
+            render("dir/Talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
         let html = String::from_utf8(html).unwrap();
         assert!(mime.starts_with("text/html"));
         assert!(html.contains("Rendered") && html.contains("wikilink"), "title and link label");
         assert!(html.contains("data:image/png"), "the image is embedded");
         assert!(!html.contains("note_files") && !html.contains("Talk_files"), "self-contained");
         assert!(!html.contains(">42<"), "code cells are not executed");
-        let (pdf, mime) = render("dir/Talk.qmd", md, Format::Pdf, &atts, read, &opts).unwrap();
+        let Rendered { bytes: pdf, mime, .. } =
+            render("dir/Talk.qmd", md, Format::Pdf, &atts, read, &opts).unwrap();
         assert_eq!(mime, "application/pdf");
         assert!(pdf.starts_with(b"%PDF"));
-        let (docx, _) = render("dir/Talk.qmd", md, Format::Docx, &atts, read, &opts).unwrap();
+        let Rendered { bytes: docx, .. } =
+            render("dir/Talk.qmd", md, Format::Docx, &atts, read, &opts).unwrap();
         assert!(docx.starts_with(b"PK"));
         let deck =
             "---\ntitle: Deck\n---\n\n## One\n\nFirst slide.\n\n. . .\n\nLater.\n\n## Two\n\n![[pic.png]]\n";
-        let (pptx, mime) = render("dir/Talk.qmd", deck, Format::Pptx, &atts, read, &opts).unwrap();
+        let Rendered { bytes: pptx, mime, .. } =
+            render("dir/Talk.qmd", deck, Format::Pptx, &atts, read, &opts).unwrap();
         assert!(mime.contains("presentationml"));
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
         let slides = zip.file_names().filter(|n| n.as_ref().unwrap().starts_with("ppt/slides/slide")).count();
@@ -1515,7 +1819,8 @@ mod tests {
         let opts = RenderOptions { quarto: Some(bin), ..Default::default() };
         let md = "---\ntitle: Deck\nformat:\n  revealjs:\n    width: 1280\n    height: 720\n    \
                   slide-number: c/t\n    footer: A footer\n---\n\n## One\n\nFirst.\n\n## Two\n\nSecond.\n";
-        let (pdf, mime) = render("Deck.qmd", md, Format::SlidesPdf, &[], |_| None, &opts).unwrap();
+        let Rendered { bytes: pdf, mime, .. } =
+            render("Deck.qmd", md, Format::SlidesPdf, &[], |_| None, &opts).unwrap();
         assert_eq!(mime, "application/pdf");
         assert!(pdf.starts_with(b"%PDF"));
         let text = String::from_utf8_lossy(&pdf);
@@ -1558,7 +1863,8 @@ mod tests {
         let atts: Vec<String> = files.keys().map(|k| (*k).to_owned()).collect();
         let read = |p: &str| files.get(p).map(|c| c.as_bytes().to_vec());
         let md = "---\ntitle: Themed\nformat:\n  html:\n    theme: [cosmo, custom.scss]\n---\n\nBody.\n";
-        let (html, _) = render("dir/Talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        let Rendered { bytes: html, .. } =
+            render("dir/Talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
         let html = String::from_utf8(html).unwrap().to_ascii_lowercase();
         // Embedded stylesheets arrive as `data:text/css,…` URLs, where `#` is `%23`.
         let has =
@@ -1570,12 +1876,22 @@ mod tests {
 
     #[test]
     fn what_reaches_out_of_the_project() {
-        for out in ["/etc/passwd", "~/x", "file:///etc/x", "C:\\x", "../x", "a/../../x", "%2e%2e/x", "..\\x"]
-        {
+        for out in [
+            "/etc/passwd",
+            "~/x",
+            "~",
+            "~root/.ssh/id_rsa",
+            "file:///etc/x",
+            "C:\\x",
+            "../x",
+            "a/../../x",
+            "%2e%2e/x",
+            "..\\x",
+        ] {
             assert!(escapes("n.md", out), "{out}");
         }
         for inside in
-            ["x.png", "./a/b.css", "https://example.com/x.png", "data:image/png;base64,AA", "a/../b"]
+            ["x.png", "./a/b.css", "https://example.com/x.png", "data:image/png;base64,AA", "a/../b", "~25"]
         {
             assert!(!escapes("n.md", inside), "{inside}");
         }
@@ -1595,7 +1911,7 @@ mod tests {
                     format:\n  html:\n    filters: [evil.lua]\n    theme: [cosmo, custom.scss]\n    from: markdown+emoji\n  \
                     pdf:\n    latex-auto-install: true\n---\n\nBody.\n\n---\nlua_filters: [x.lua]\nfilters: [evil.lua]\n---\n\n\
                     ```\n---\nfilters: shown, not run\n---\n```\n\n---\nkept: as it was # a comment\n---\n";
-        let out = guard_metadata("dir/n.qmd", note).unwrap();
+        let out = guard_metadata("dir/n.qmd", note, &Gate::closed()).unwrap();
         let front: serde_yaml_ng::Value = serde_yaml_ng::from_str(&note_front(&out)).unwrap();
         assert_eq!(front["title"], "Kept");
         for gone in ["filters", "shortcodes", "include-in-header", "csl", "header-includes"] {
@@ -1610,14 +1926,20 @@ mod tests {
         assert!(out.contains("filters: shown, not run"), "code is code: {out}");
         assert!(out.contains("kept: as it was # a comment"), "a harmless block stays as written");
         // A block we cannot read is no metadata to anyone; front matter we cannot read fails.
-        assert_eq!(guard_metadata("n.md", "x\n\n---\na: [\n---\n").unwrap(), "x\n\n* * *\na: [\n---\n");
-        assert!(guard_metadata("n.md", "---\na: [\n---\n").is_err());
         assert_eq!(
-            guard_metadata("n.md", "x\n\n---\nfilters: [a.lua]\n---\ny\n").unwrap(),
+            guard_metadata("n.md", "x\n\n---\na: [\n---\n", &Gate::closed()).unwrap(),
+            "x\n\n* * *\na: [\n---\n"
+        );
+        assert!(guard_metadata("n.md", "---\na: [\n---\n", &Gate::closed()).is_err());
+        assert_eq!(
+            guard_metadata("n.md", "x\n\n---\nfilters: [a.lua]\n---\ny\n", &Gate::closed()).unwrap(),
             "x\n\ny\n",
             "emptied: gone"
         );
-        assert_eq!(guard_metadata("n.md", "Title\n---\n\ntext\n").unwrap(), "Title\n---\n\ntext\n");
+        assert_eq!(
+            guard_metadata("n.md", "Title\n---\n\ntext\n", &Gate::closed()).unwrap(),
+            "Title\n---\n\ntext\n"
+        );
     }
 
     fn note_front(text: &str) -> String {
@@ -1653,12 +1975,13 @@ mod tests {
     #[test]
     fn the_project_runs_only_our_filter() {
         let vault = "filters: [evil.lua]\nformat:\n  html:\n    include-in-header: /etc/hostname\n";
-        let v: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&project_yaml(Some(vault), &[], Path::new("/w/guard.lua")).unwrap())
-                .unwrap();
+        let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &project_yaml(Some(vault), &[], Path::new("/w/guard.lua"), &Gate::closed()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["filters"].as_sequence().unwrap().len(), 1);
         assert_eq!(v["filters"][0]["path"], "/w/guard.lua");
-        assert_eq!(v["filters"][0]["at"], "post-render");
+        assert_eq!(v["filters"][0]["at"], "post-finalize");
         assert!(v["format"]["html"].get("include-in-header").is_none());
         for f in ["html", "revealjs", "typst", "docx", "pptx"] {
             assert_eq!(v["format"][f]["from"], READER, "{f}");
@@ -1740,7 +2063,7 @@ mod tests {
              <img src=\"{deep}{s}\">\n\n![x]({deep}{s})\n\n---\nfilters: [evil.lua]\n---\n"
         );
         for format in [Format::Html, Format::RevealJs] {
-            let (bytes, _) = render("dir/Talk.qmd", &md, format, &atts, read, &opts).unwrap();
+            let Rendered { bytes, .. } = render("dir/Talk.qmd", &md, format, &atts, read, &opts).unwrap();
             assert!(!marker.exists(), "{format:?}: no filter ran");
             let page = String::from_utf8_lossy(&bytes);
             assert!(!page.contains("HOST-SECRET") && !page.contains("SE9TVC1TRUNSRVQ"), "{format:?}");
@@ -1752,5 +2075,201 @@ mod tests {
                 assert!(page.contains("Guarded"), "and it still renders");
             }
         }
+    }
+
+    fn gate(lua: &[(&str, &str)], approved: Option<&[&str]>) -> Gate {
+        Gate {
+            lua: lua.iter().map(|(p, h)| ((*p).to_owned(), (*h).to_owned())).collect(),
+            approved: approved.map(|a| a.iter().map(|h| (*h).to_owned()).collect()),
+            blocked: None,
+            report: Default::default(),
+        }
+    }
+
+    #[test]
+    fn only_approved_lua_is_named_to_quarto() {
+        let g = gate(
+            &[("deck/lua/ok.lua", "h-ok"), ("deck/lua/new.lua", "h-new"), ("shared/s.lua", "h-s")],
+            Some(&["h-ok", "h-s"]),
+        );
+        let note = "---\ntitle: T\nfilters:\n  - lua/ok.lua\n  - quarto\n  - lua/new.lua\n  - ../shared/s.lua\n  \
+                    - wordcount\n  - {path: lua/ok.lua, at: post-finalize}\n  - {path: lua/ok.lua, type: json}\n  \
+                    - /etc/x.lua\n  - lua/missing.lua\nshortcodes: [lua/ok.lua, quarto, lua/new.lua]\n\
+                    metadata-files: [data/a.yml, ../../outside.yml, data/b.txt, /data/root.yml]\n---\n";
+        let out = guard_metadata("deck/talk.qmd", note, &g).unwrap();
+        let front: serde_yaml_ng::Value = serde_yaml_ng::from_str(&note_front(&out)).unwrap();
+        let filters: Vec<String> = front["filters"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|f| match f {
+                serde_yaml_ng::Value::String(s) => s.clone(),
+                f => format!("{}@{}", f["path"].as_str().unwrap(), f["at"].as_str().unwrap()),
+            })
+            .collect();
+        assert_eq!(
+            filters,
+            ["../deck/lua/ok.lua", "quarto", "../shared/s.lua", "../deck/lua/ok.lua@pre-finalize"],
+            "approved files in order, `quarto` kept, nothing after the guard: {out}"
+        );
+        assert_eq!(front["shortcodes"].as_sequence().unwrap().len(), 1, "a shortcode is no `quarto`");
+        assert_eq!(front["metadata-files"][0], "data/a.yml");
+        assert_eq!(front["metadata-files"][1], "../data/root.yml", "from the vault root");
+        assert_eq!(front["metadata-files"].as_sequence().unwrap().len(), 2, "YAML in the project only");
+        let report = g.report.into_inner();
+        assert_eq!(report.ran, ["deck/lua/ok.lua", "shared/s.lua"]);
+        assert_eq!(
+            report.unapproved,
+            [Unapproved { path: "deck/lua/new.lua".into(), hash: "h-new".into() }],
+            "once, though named twice"
+        );
+        assert_eq!(report.withheld, None);
+    }
+
+    #[test]
+    fn without_approvals_or_a_sandbox_nothing_runs_and_the_report_says_why() {
+        let note = "---\nfilters: [a.lua]\nformat:\n  html:\n    shortcodes: [a.lua]\n---\n";
+        let off = gate(&[("a.lua", "h")], None);
+        let out = guard_metadata("n.qmd", note, &off).unwrap();
+        assert!(!out.contains("a.lua"), "{out}");
+        let report = off.report.into_inner();
+        assert!(report.unapproved.is_empty(), "switched off: nothing to approve");
+        assert_eq!(report.withheld.as_deref(), Some("Lua filters are switched off here"));
+
+        let mut blocked = gate(&[("a.lua", "h")], Some(&["h"]));
+        blocked.blocked = Some("no Landlock".into());
+        assert!(!guard_metadata("n.qmd", note, &blocked).unwrap().contains("a.lua"));
+        assert!(!blocked.runs("h"));
+        let report = blocked.report.into_inner();
+        assert!(report.ran.is_empty() && report.withheld.unwrap().contains("no Landlock"));
+
+        // A data file may name no code, approved or not.
+        let data = guard_yaml("data/x.yml", "filters: [../a.lua]\nvalue: 3\n", &Gate::closed()).unwrap();
+        assert!(data.get("filters").is_none() && data["value"] == 3);
+    }
+
+    #[test]
+    fn only_the_notes_own_folders_metadata_names_filters() {
+        assert!(metadata_for("a/b/n.qmd", "_metadata.yml"));
+        assert!(
+            metadata_for("a/b/n.qmd", "a/_metadata.yml") && metadata_for("a/b/n.qmd", "a/b/_metadata.yml")
+        );
+        assert!(
+            !metadata_for("a/b/n.qmd", "c/_metadata.yml") && !metadata_for("a/b/n.qmd", "a/bc/_metadata.yml")
+        );
+        assert!(!metadata_for("n.qmd", "a/_metadata.yml") && !metadata_for("n.qmd", "x_metadata.yml"));
+        assert!(!metadata_for("n.qmd", "data.yml"));
+    }
+
+    #[test]
+    fn the_vaults_approved_filters_run_before_the_guard() {
+        let g = gate(&[("lua/site.lua", "h")], Some(&["h"]));
+        let vault = "filters: [lua/site.lua, evil.lua]\n";
+        let v: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&project_yaml(Some(vault), &[], Path::new("/w/guard.lua"), &g).unwrap())
+                .unwrap();
+        let filters = v["filters"].as_sequence().unwrap();
+        assert_eq!(filters.len(), 2, "{v:?}");
+        assert_eq!(filters[0], "lua/site.lua");
+        assert_eq!(filters[1]["path"], "/w/guard.lua");
+    }
+
+    #[test]
+    fn the_filter_report_is_a_header_value() {
+        assert_eq!(FilterReport::default().header(), None);
+        let r = FilterReport {
+            ran: vec![],
+            unapproved: vec![Unapproved { path: "Müller/ü 😀.lua".into(), hash: "ab".into() }],
+            withheld: None,
+        };
+        let h = r.header().unwrap();
+        assert!(h.is_ascii() && !h.contains('\n'), "{h}");
+        let back: serde_json::Value = serde_json::from_str(&h).unwrap();
+        assert_eq!(back["unapproved"][0]["path"], "Müller/ü 😀.lua");
+    }
+
+    /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary, on a machine that can
+    /// confine a render. An approved shortcode and filter run; the same file one byte changed
+    /// does not, and is reported; what runs cannot write outside its render, read the host's
+    /// files, or get a file out of the project into the page — the guard still has the last
+    /// word.
+    #[test]
+    fn approved_lua_runs_confined_and_nothing_else_does() {
+        let Some(bin) = quarto() else {
+            eprintln!("skipped: set LEMMATE_TEST_QUARTO");
+            return;
+        };
+        if let Err(why) = crate::sandbox::confinement() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let outside = crate::pandoc::tempdir().unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "HOST-SECRET-7731\n").unwrap();
+        let marker = outside.join("ran");
+        let s = secret.display().to_string();
+        let m = marker.display().to_string();
+        let shortcode = format!(
+            "return {{ stamp = function(args)\n  \
+               local f = io.open({m:?}, 'w'); if f then f:write('x'); f:close() end\n  \
+               local r = io.open({s:?}, 'r'); local leaked = r and r:read('a') or 'unread'\n  \
+               local svg = io.open(pandoc.path.join({{ pandoc.path.directory(quarto.doc.input_file), \
+                 pandoc.utils.stringify(args[1]) }}), 'r'):read('a')\n  \
+               return {{ pandoc.RawInline('html', '<b>STAMP-' .. pandoc.utils.stringify(quarto.metadata.get('word')) \
+                 .. '</b>' .. svg .. '<i>' .. leaked .. '</i>'), pandoc.Space(), \
+                 pandoc.RawInline('html', '<img id=\"out\" src=\"' .. {s:?} .. '\">') }}\n\
+             end }}\n"
+        );
+        let filter = "function Para(p) return p end\n".to_owned();
+        let files: std::collections::HashMap<String, String> = [
+            ("deck/lua/stamp.lua".to_owned(), shortcode.clone()),
+            ("deck/lua/para.lua".to_owned(), filter.clone()),
+            (
+                "deck/data/words.yml".to_owned(),
+                "word: from-metadata\nfilters: [../lua/para.lua]\n".to_owned(),
+            ),
+            ("deck/figures/pic.svg".to_owned(), "<svg id=\"from-svg\"></svg>".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let atts: Vec<String> = files.keys().cloned().collect();
+        let read = |p: &str| files.get(p).map(|c| c.as_bytes().to_vec());
+        let md = "---\ntitle: Approved\nshortcodes: [lua/stamp.lua]\nfilters: [lua/para.lua]\n\
+                  metadata-files: [data/words.yml]\n---\n\n{{< stamp figures/pic.svg >}}\n";
+        let hash = |p: &str| crate::attachments::hash_bytes(files[p].as_bytes());
+        let approved: HashSet<String> = [hash("deck/lua/stamp.lua"), hash("deck/lua/para.lua")].into();
+        let opts =
+            RenderOptions { quarto: Some(bin.clone()), approved: Some(approved), ..Default::default() };
+        let out = render("deck/talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        let page = String::from_utf8_lossy(&out.bytes);
+        assert!(page.contains("STAMP-from-metadata"), "the shortcode ran, with the metadata file's data");
+        assert!(page.contains("from-svg"), "and read a file of the project's");
+        assert_eq!(out.filters.ran, ["deck/lua/stamp.lua", "deck/lua/para.lua"]);
+        assert!(out.filters.unapproved.is_empty());
+        assert!(!marker.exists(), "it wrote nothing outside its render");
+        assert!(!page.contains("HOST-SECRET") && !page.contains("SE9TVC1TRUNSRVQ"), "nor read the host");
+        assert!(page.contains("unread"), "the read failed, rather than the render");
+        assert!(!page.contains("id=\"out\""), "and the guard still dropped what reached out");
+
+        // One byte changed: not the approved bytes, so not run, and named for approval.
+        let mut changed = files.clone();
+        changed.insert("deck/lua/stamp.lua".into(), shortcode.replace("STAMP-", "STAMP!"));
+        let read = |p: &str| changed.get(p).map(|c| c.as_bytes().to_vec());
+        let out = render("deck/talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        let page = String::from_utf8_lossy(&out.bytes);
+        assert!(!page.contains("STAMP"), "not run");
+        assert_eq!(out.filters.ran, ["deck/lua/para.lua"]);
+        assert_eq!(out.filters.unapproved.len(), 1);
+        assert_eq!(out.filters.unapproved[0].path, "deck/lua/stamp.lua");
+        assert_eq!(
+            out.filters.unapproved[0].hash,
+            crate::attachments::hash_bytes(changed["deck/lua/stamp.lua"].as_bytes())
+        );
+
+        // Approvals switched off: today's render, and no question asked.
+        let opts = RenderOptions { quarto: Some(bin), ..Default::default() };
+        let out = render("deck/talk.qmd", md, Format::Html, &atts, read, &opts).unwrap();
+        assert!(out.filters.ran.is_empty() && out.filters.unapproved.is_empty());
+        assert!(out.filters.withheld.is_some());
     }
 }

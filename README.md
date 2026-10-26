@@ -35,7 +35,9 @@ one search across all of them, tabs and split panes mixing notes from any of the
 tables, footnotes, wikilinks and note transclusion, in a CodeMirror 6 *live preview* that never
 rewrites syntax it does not understand. Export any note through **pandoc** (HTML, DOCX, PDF,
 reveal.js, Beamer), or render it with **Quarto** into a pane beside the note — reveal.js decks
-included, with a speaker view, and PDF through Typst with no LaTeX install.
+included, with a speaker view, and PDF through Typst with no LaTeX install. A note's own Lua
+filters and shortcodes run once a vault owner has approved their exact bytes, and then only in
+a sandbox.
 
 **Scriptable instead of pluggable.** No plugin system, on purpose. Instead: a REST API, a
 `lemmate` CLI that works on local folders and remote vaults alike, and an **MCP server** so AI

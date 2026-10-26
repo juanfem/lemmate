@@ -39,6 +39,7 @@ async fn relay(server: SocketAddr, dir: &std::path::Path) -> LocalHandle {
                 vault_root: None,
                 config_path: None,
                 allow_remote: false,
+                approvals_dir: None,
             },
         )
         .await
@@ -334,6 +335,7 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
                     vault_root: None,
                     config_path: config,
                     allow_remote: false,
+                    approvals_dir: None,
                 },
             )
             .await
@@ -411,6 +413,7 @@ async fn the_relay_names_its_account_and_hands_sign_out_to_the_shell() {
             vault_root: None,
             config_path: None,
             allow_remote: false,
+            approvals_dir: None,
         },
     )
     .await

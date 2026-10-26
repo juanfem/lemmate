@@ -928,6 +928,7 @@ async fn start_on_stable_port(
         vault_root: vault_root.clone(),
         config_path: config_path.clone(),
         allow_remote: false,
+        approvals_dir: None,
     };
     match client::start_many(sync.clone(), opts(port)).await {
         Ok(handle) => Ok(handle),

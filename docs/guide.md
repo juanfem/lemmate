@@ -1025,17 +1025,50 @@ the desktop app and `lemmate serve`, and `PATH` otherwise; without one, renderin
 "pptx" | "revealjs"}` is the endpoint behind all of it; a render Quarto rejects answers **422** with its
 message.
 
-**Nothing in a note runs or reaches out.** A shared vault means anyone who can edit a note
-decides what Quarto is told, on the server and on every collaborator's desktop alike. So every
-YAML block Quarto would read — front matter, later blocks, `_metadata.yml`, `_quarto.yml`, at
-any depth under `format:` — loses the keys that run code or pull in files: `filters`,
-`shortcodes`, `engine`/`jupyter`/`knitr`/`execute`, `include-*`, `template*`,
-`metadata-files`, `resources`, `pdf-engine*`, `pre-render`/`post-render` and the like. The
-`include`, `embed` and `env` shortcodes are shown, not run; paths that leave the project
-(absolute, `~`, `file:`, `../` past the vault) are dropped from metadata, stylesheets and raw
-HTML; Quarto starts with a cleared environment and `_extensions/` is never laid out. On the
-server at most two renders run at once. If you would rather have no renders at all, set
-`--disable-quarto` / `LEMMATE_DISABLE_QUARTO=true` and they answer 501.
+**Nothing in a note runs or reaches out — unless you approved it.** A shared vault means anyone
+who can edit a note decides what Quarto is told, on the server and on every collaborator's
+desktop alike. So every YAML block Quarto would read — front matter, later blocks,
+`_metadata.yml`, `_quarto.yml`, at any depth under `format:` — loses the keys that run code or
+pull in files: `engine`/`jupyter`/`knitr`/`execute`, `include-*`, `template*`, `resources`,
+`pdf-engine*`, `pre-render`/`post-render` and the like. The `include`, `embed` and `env`
+shortcodes are shown, not run; paths that leave the project (absolute, `~/…`, `file:`, `../`
+past the vault) are dropped from metadata, stylesheets and raw HTML; Quarto starts with a
+cleared environment and `_extensions/` is never laid out. `metadata-files:` works, for YAML
+files in the vault. On the server at most two renders run at once. If you would rather have
+no renders at all, set `--disable-quarto` / `LEMMATE_DISABLE_QUARTO=true` and they answer 501.
+
+#### Lua filters and shortcodes
+
+A note can use its own Lua filters and shortcodes — `filters: [lua/tidy.lua]`,
+`shortcodes: [lua/cycle.lua]`, files in the vault — once someone has **approved** them. The
+first render of such a note runs without them and says so above the page: *2 Lua filters not
+run: lua/cycle.lua, lua/svg.lua — nobody has approved them.* **Review** shows each file's
+code (and, when an earlier version of the same file was approved, what changed since);
+**Approve** lets it run, and the note renders again.
+
+- An approval is for **those exact bytes**, in **this vault**. Edit one character of the file
+  and it is a new file, to be reviewed again. The same file in another vault is approved
+  separately.
+- On a server, only an **owner** of the vault can approve or revoke, signed in to the web app.
+  A personal access token — the CLI's, MCP's, the desktop app's — cannot, even an owner's: an
+  agent that writes a filter must not be able to approve it.
+- In the desktop app (or `lemmate serve`), approving works for that computer: the approval is
+  kept in the app's configuration folder (`filter-approvals/`), never in the vault. The app
+  asks the server to approve it for everyone too, which the server refuses when the app signed
+  in with an access token; approve it in the web app for the others. The server's approvals
+  also run in the desktop app, offline too.
+- **Approved filters run in a sandbox**: they can read the vault files the render has and
+  nothing else of the machine, write nowhere outside the render, and reach no network. So a
+  theme that `@import`s a web font from a CDN loses it in a render that runs filters — put the
+  font files in the vault and import them from there. On Linux this is Landlock (Linux 5.13
+  or newer); on macOS, `sandbox-exec`. Where neither exists (Windows), approved filters do not
+  run at all unless `LEMMATE_UNSANDBOXED_FILTERS=1` is set for the app — which runs them with
+  your full rights.
+- **Approved Lua filters in “vault”…** in the command palette lists what is approved, by whom
+  and when, with **Revoke**.
+
+A server that should never run Lua at all, approved or not, is started with
+`--disable-filters` / `LEMMATE_DISABLE_FILTERS=true`.
 
 Whole-vault export never needs pandoc: `lemmate export zip <vault> <out.zip>` writes the markdown
 and attachments as they are. And because the vault is already a folder of files, `pandoc` or

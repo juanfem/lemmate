@@ -3133,6 +3133,7 @@ mod tests {
             vault_root: None,
             config_path: None,
             allow_remote: false,
+            approvals_dir: None,
         };
         let relay = start(opts, local).await.unwrap();
 

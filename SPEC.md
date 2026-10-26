@@ -299,14 +299,46 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
 **not** execute code cells. "Render with Quarto" is an export action that shells out to a
 `quarto` binary on the server or desktop when present.
 
-- Always `--no-execute`; the note's own front matter is honoured otherwise. Front matter can
-  name Lua filters and files to include, so a server can switch rendering off
-  (`--disable-quarto`); the local relay cannot, being the user's own machine.
+- Always `--no-execute`; the note's own front matter is honoured otherwise, short of what
+  would run code or read files outside the project (`quarto.rs` `DENIED_KEYS`). A server can
+  still switch rendering off (`--disable-quarto`); the local relay cannot, being the user's
+  own machine.
+- **Lua filters and shortcodes run only as approved bytes.** `filters:` and `shortcodes:` —
+  in the front matter, a `_metadata.yml` or the vault `_quarto.yml`, never in another YAML
+  file — keep a vault-relative `.lua` entry only if the blake3 hash of the file's bytes, as
+  read for this render, is approved for the vault; any other entry (a JSON filter, an
+  extension's name) is dropped, and `_extensions/` is never laid out. An unapproved Lua file is
+  not laid out at all, so approved code cannot load it either. The render reports what ran and
+  what it would not run (`x-lemmate-filters`), and the pane offers the latter for review. One
+  changed byte is a new, unapproved file. `metadata-files:` is data, not code: YAML files in
+  the project, each through the same guard.
+- **Who approves.** Nothing in the vault can: not a file, not the vault doc, not the
+  `.lemmate/` sidecar, since anyone who can put a file in the vault could then approve their
+  own filter. On the server an approval is a row in `filter_approvals` (vault, hash, path,
+  who, when), made or revoked by a vault **owner in a session** — never with a personal access
+  token, an owner's included, so an agent cannot approve what it wrote; any member can list
+  them. The relay keeps `filter-approvals/<vault>.json` in the configuration directory: the
+  server's list as last fetched (refreshed on each render, so approved filters still run
+  offline) and the device's own approvals, for a standalone vault or one whose server refused
+  the device's token. `--disable-filters` turns them all off on a server.
+- **Approved filters run confined** (`sandbox.rs`). Linux: Landlock and a seccomp filter on
+  the thread that starts Quarto — reads only the system's folders, the Quarto install and
+  the render's scratch directory, writes only the latter, opens no socket, signals and
+  ptraces nothing outside itself (so not `/proc/<server>/environ`); unprivileged, so it works
+  under Docker's default seccomp profile, where bubblewrap's user namespaces do not. macOS:
+  `sandbox-exec`, no network and no writes outside the scratch directory, reads not narrowed.
+  Elsewhere nothing confines a render, and approved filters do not run unless the server is
+  started with `--unsandboxed-filters` (or the relay with `LEMMATE_UNSANDBOXED_FILTERS`).
+  With no network a confined render cannot inline a remote resource — a web font a theme
+  `@import`s from a CDN stays out; vendor such files into the vault instead. The guard filter
+  runs last of all (`post-finalize`; an approved filter asking for that stage gets
+  `pre-finalize`), so it still checks what the approved ones produced.
 - The note is rendered at its vault path in a temporary project, with the attachments it
   references at theirs and the vault's `export/references.bib` / `style.csl` as defaults.
   Wikilinks render as their labels; attachment embeds as images.
-- A note's dependencies are its links and embeds, every vault file its front matter names, and
-  — transitively — what those stylesheets import and those YAML files name. Dependencies are
+- A note's dependencies are its links and embeds, every vault file its front matter names or
+  its shortcodes are given as arguments (`{{< svg figures/x.svg >}}`), and — transitively —
+  what those stylesheets import and those YAML files name. Dependencies are
   attachments: recorded in the vault doc, synced, and kept while a note depends on them.
   `_quarto.yml`, `_metadata.yml` and `export/` are vault resources, kept regardless. A vault
   `_quarto.yml` is the render's base project, minus its `project:` (no scripts, no output

@@ -56,6 +56,7 @@ async fn relay_as(
         vault_root: None,
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     remember(start(opts, local).await.unwrap())
 }

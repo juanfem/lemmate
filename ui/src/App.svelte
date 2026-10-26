@@ -9,6 +9,7 @@
   import ConnectServer from './components/ConnectServer.svelte'
   import MergeVaults from './components/MergeVaults.svelte'
   import MembersDialog from './components/MembersDialog.svelte'
+  import FilterApprovals from './components/FilterApprovals.svelte'
   import SignedOut from './components/SignedOut.svelte'
   import DailyDialog from './components/DailyDialog.svelte'
   import { compare as compareDays, dayOf, formatDate, iso, pathFor, templateOf, today, type Day } from './lib/daily.ts'
@@ -71,6 +72,8 @@
   let mergeOpen = $state(false)
   /** The vault whose members dialog is open. */
   let membersOf: string | null = $state(null)
+  /** The vault whose approved Lua filters are listed (SPEC §5.6). */
+  let filtersOf: string | null = $state(null)
   if (!readPublicToken())
     fetch('/api/v1/local/setup')
       .then((r) => (r.ok ? r.json() : null))
@@ -987,6 +990,7 @@
     { id: 'newvault', label: 'New vault…', run: newVault },
     ...(session ? [{ id: 'renamevault', label: `Rename vault “${session.label}”…`, run: () => renameVault(session!.id) }] : []),
     ...(session && serverFeatures ? [{ id: 'members', label: `Members of “${session.label}”…`, run: () => (membersOf = session!.id) }] : []),
+    ...(session ? [{ id: 'filters', label: `Approved Lua filters in “${session.label}”…`, run: () => (filtersOf = session!.id) }] : []),
     { id: 'import', label: 'Import an Obsidian vault…', run: () => (importInto = session?.id ?? null) },
     ...(me && me.id !== 'local'
       ? [
@@ -1748,6 +1752,9 @@
   {/if}
   {#if membersOf && me}
     <MembersDialog vault={membersOf} label={workspace?.label(membersOf) ?? 'vault'} myId={me.id} onClose={() => (membersOf = null)} />
+  {/if}
+  {#if filtersOf}
+    <FilterApprovals vault={filtersOf} label={workspace?.label(filtersOf) ?? 'vault'} onClose={() => (filtersOf = null)} />
   {/if}
   {#if shareOpen && active && session}
     <ShareDialog vault={session.id} noteId={active} path={activePath} base={serverBase} onClose={() => (shareOpen = false)} />

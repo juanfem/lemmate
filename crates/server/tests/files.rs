@@ -181,6 +181,7 @@ async fn a_desktop_follows_deletes_and_moves_of_kept_files() {
         vault_root: Some(tmp.path().join("root")),
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     let handle = remember(lemmate_core::client::start_many(vec![sync], local).await.unwrap());
     let relay = format!("http://{}/api/v1/vaults/{}", handle.addr, handle.vault_id);

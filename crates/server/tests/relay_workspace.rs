@@ -49,6 +49,7 @@ async fn relay(server: SocketAddr, dirs: &[&Path], root: Option<&Path>) -> Local
         vault_root: root.map(Path::to_path_buf),
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     remember(start_many(opts, local).await.unwrap())
 }

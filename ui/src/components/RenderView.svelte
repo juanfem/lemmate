@@ -7,17 +7,20 @@
     AUTO_RENDER_WAIT,
     autoRenderDue,
     beforeBodyEnd,
+    filterReport,
     keepPlace,
     keepRender,
     keptRender,
     placeOf,
     readAutoRender,
     writeAutoRender,
+    type FilterReport,
     type Place,
   } from '../lib/render.ts'
   import { printHere } from '../lib/printlayout.ts'
   import { saveAs } from '../lib/savefile.ts'
   import Icon from './Icon.svelte'
+  import FilterApprovals from './FilterApprovals.svelte'
 
   /**
    * A note rendered through Quarto (SPEC §5.6), in a pane beside it. Quarto's page is its own
@@ -48,6 +51,11 @@
   let html: string | null = $state(was?.html ?? null)
   let error: string | null = $state(null)
   let busy = $state(false)
+  /** What the last render did with the Lua filters the note names (`x-lemmate-filters`). */
+  let filters: FilterReport | null = $state(null)
+  /** The files under review, as they were when *Review* was clicked: approving one renders
+   *  again, which empties `filters`, and the dialog should still show what was approved. */
+  let reviewing: FilterReport['unapproved'] | null = $state(null)
   /** The note as it is now, and as it was when the page on screen was rendered. */
   let text: string | null = $state(null)
   let renderedFrom: string | null = $state(was?.renderedFrom ?? null)
@@ -257,6 +265,7 @@
     try {
       const r = await api.render(session.id, noteId, choice, { view: true })
       const type = (r.headers.get('content-type') ?? '').split(';')[0]!.trim()
+      if (r.ok) filters = filterReport(r.headers.get('x-lemmate-filters'))
       if (r.status === 501) {
         error = 'Rendering needs Quarto, and there is none here — or the server has it switched off.'
       } else if (!r.ok) {
@@ -367,6 +376,15 @@
   {#if error}
     <pre class="error">{error}</pre>
   {/if}
+  {#if filters?.unapproved.length}
+    <p class="filters">
+      {filters.unapproved.length === 1 ? 'A Lua filter' : `${filters.unapproved.length} Lua filters`} not run:
+      {filters.unapproved.map((u) => u.path).join(', ')} — nobody has approved {filters.unapproved.length === 1 ? 'it' : 'them'}.
+      <button class="link" onclick={() => (reviewing = filters?.unapproved ?? null)}>Review</button>
+    </p>
+  {:else if filters?.withheld}
+    <p class="filters">Lua filters not run: {filters.withheld}.</p>
+  {/if}
   {#if exportProblem}
     <pre class="error">{exportProblem}</pre>
   {/if}
@@ -392,6 +410,16 @@
     <p class="wait">Quarto takes a few seconds to start.</p>
   {/if}
 </div>
+
+{#if reviewing}
+  <FilterApprovals
+    vault={session.id}
+    label={session.label}
+    review={reviewing}
+    onApproved={() => void render()}
+    onClose={() => (reviewing = null)}
+  />
+{/if}
 
 <style>
   .render {
@@ -531,7 +559,8 @@
     border-radius: 5px;
     padding: 0.1rem 0.3rem;
   }
-  .instead {
+  .instead,
+  .filters {
     margin: 0;
     padding: 0.5rem 0.75rem;
     font-family: var(--ui);
@@ -539,7 +568,8 @@
     color: var(--muted);
     border-bottom: 1px solid var(--border-soft);
   }
-  .instead .link {
+  .instead .link,
+  .filters .link {
     color: var(--accent);
     font: inherit;
     background: none;

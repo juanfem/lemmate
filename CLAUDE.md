@@ -90,6 +90,13 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   retires (deletes its files + sidecar, `LocalState::forget`s itself, `DELETE /vaults/:v`
   upstream once its socket is closed). `upsert_note` re-parents on conflict, which is what makes
   the server follow a note into its new vault.
+- Lua filters and shortcodes run only as **approved bytes** (SPEC §5.6): `quarto::Gate` decides
+  per render from the blake3 of what it lays out; approvals live in the server's
+  `filter_approvals` table or the relay's `config_dir()/filter-approvals/`, never in the vault;
+  approving takes an owner *session* (`filter_owner` in `app.rs`), never a token. A render that
+  runs one is confined by `sandbox.rs` (Landlock + seccomp on the thread that spawns Quarto) —
+  no network, so `embed-resources` cannot inline a CDN file there. Relay tests that touch
+  approvals set `LocalOptions::approvals_dir`, or they read the real config directory.
 - A relay outlives its engines: `LocalHandle::serve_forever` (not `wait`, which returns when the
   *first* engine ends — a merged-away vault would take the whole relay down with it).
 - Commit messages: short imperative title, body explaining why. **No `Co-Authored-By: Claude` or
@@ -151,4 +158,6 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   unaffected. The CI `artifacts` job sets both. `cargo tauri build` also rewrites
   `crates/desktop/Cargo.toml`, expanding `tauri`/`tauri-build` to `{ version = "2", features =
   [] }` — check it out again after a local bundle build.
+- Pandoc merges adjacent `RawInline`s of one format, so the render guard judges — and drops —
+  them as one: a test filter emitting a safe and an unsafe one needs a `Space` between them.
 - Env bool flags use `BoolishValueParser` (`1/0/yes/no` work); `LEMMATE_*` names are in `crates/server/src/main.rs`.

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   autoRenderDue,
+  filterReport,
   beforeBodyEnd,
   keepPlace,
   keepRender,
@@ -90,4 +91,12 @@ test('the automatic-render preference is remembered, and survives storage that t
   assert.equal(readAutoRender(broken), false)
   writeAutoRender(broken, true)
   assert.equal(readAutoRender(undefined), false)
+})
+
+test('a render says which filters it ran, and which it would not', () => {
+  const h = '{"ran":["lua/a.lua"],"unapproved":[{"path":"M\\u00fcller/b.lua","hash":"ab"},{"path":1}],"withheld":null}'
+  assert.deepEqual(filterReport(h), { ran: ['lua/a.lua'], unapproved: [{ path: 'Müller/b.lua', hash: 'ab' }], withheld: null })
+  assert.deepEqual(filterReport('{"withheld":"switched off"}'), { ran: [], unapproved: [], withheld: 'switched off' })
+  assert.equal(filterReport(null), null)
+  assert.equal(filterReport('not json'), null)
 })

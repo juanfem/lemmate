@@ -169,6 +169,16 @@ export type FileWrite =
 const filesUrl = (vault: string, path?: string) =>
   `/api/v1/vaults/${vault}/files${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`
 
+/** A Lua filter approved to run in a vault's renders (SPEC §5.6): these bytes, by hash. From the
+ *  desktop app, `source` says where: on the server, for everyone, or on this device alone. */
+export interface FilterApproval {
+  hash: string
+  path: string
+  approved_by: string
+  approved_ms: number
+  source?: 'server' | 'device'
+}
+
 /** What a note can be rendered to through Quarto (SPEC §5.6). */
 /** `auto`: the first format the note declares (a PDF or Word file, or a page); `preview`: the
  *  first page it declares — slides for a revealjs deck, else HTML. */
@@ -216,6 +226,17 @@ export const api = {
     })
     if (r.status === 401) authState.onUnauthorized()
     return r
+  },
+  filterApprovals: (vault: string) => get<FilterApproval[]>(`/vaults/${vault}/filter-approvals`),
+  /** Approve the Lua file at `path`, which must still be the bytes `hash` names (409 if not). */
+  approveFilter: (vault: string, path: string, hash: string) =>
+    post<FilterApproval>(`/vaults/${vault}/filter-approvals`, { path, hash }),
+  revokeFilter: (vault: string, hash: string) => del(`/vaults/${vault}/filter-approvals/${hash}`),
+  /** A vault file's text by the hash of its bytes, or null when there is no such file (any more). */
+  fileText: async (vault: string, hash: string): Promise<string | null> => {
+    const r = await fetch(`/api/v1/vaults/${vault}/attachments/${hash}`)
+    if (r.status === 401) authState.onUnauthorized()
+    return r.ok ? await r.text() : null
   },
   me: () => get<User>('/auth/me'),
   login: (email: string, password: string) => post<{ token: string; user: User }>('/auth/login', { email, password, device: navigator.userAgent.slice(0, 40) }),

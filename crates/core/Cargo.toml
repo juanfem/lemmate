@@ -44,6 +44,11 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # Killing a timed-out pandoc/quarto together with what it started (`pandoc::run_bounded`).
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Confining a render that runs approved Lua filters (`sandbox.rs`): unprivileged, so it works
+# inside a container under Docker's default seccomp profile, where bwrap's user namespaces do not.
+landlock = "0.4"
+
 [features]
 # Keep saved tokens in the OS keychain (credentials.rs). The CLI and the desktop app turn it on;
 # the server, which saves no tokens, does not.

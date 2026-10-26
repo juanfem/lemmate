@@ -82,6 +82,8 @@ const MAX_DEPENDENCIES: usize = 256;
 /// - the files its front matter names — `css:`, `theme: [cosmo, custom.scss]`, `filters:`,
 ///   `include-in-header:`, `reference-doc:`, `bibliography:` … any value that is the path of a
 ///   file in the vault, relative to the note, the vault root, or `attachments/`;
+/// - the files its shortcodes are given — `{{< svg figures/x.svg >}}`, `{{< video src="a.mp4" >}}`
+///   — resolved the same way: a shortcode reads what it is told to;
 /// - and, followed through, what those name in turn: a stylesheet's `@import`/`@use`/`@forward`,
 ///   a YAML file's own paths.
 ///
@@ -121,7 +123,69 @@ pub fn dependencies(
             add(resolve_reference(note_path, &target, false, &exists, all));
         }
     }
+    for target in shortcode_paths(text) {
+        add(resolve_reference(note_path, &target, false, &exists, all));
+    }
     follow(&mut out, &exists, &all, &read);
+    out
+}
+
+/// The arguments of the text's shortcodes (`{{< name arg key="value" >}}`) that could be the path
+/// of a file ([`looks_like_path`]): bare, quoted, or the value of a `key=`. Quarto expands a
+/// shortcode wherever it is, code blocks too, so this looks everywhere; an escaped one
+/// (`{{{< … >}}}`) is text, and names nothing.
+pub fn shortcode_paths(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("{{<") {
+        let escaped = rest[..at].ends_with('{');
+        rest = &rest[at + 3..];
+        let Some(end) = rest.find(">}}") else { break };
+        let inner = &rest[..end];
+        rest = &rest[end + 3..];
+        if escaped || inner.contains('\n') {
+            continue;
+        }
+        for arg in shortcode_args(inner).into_iter().skip(1) {
+            let value = match arg.split_once('=') {
+                Some((key, v))
+                    if !key.is_empty()
+                        && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') =>
+                {
+                    v.trim_matches(['"', '\''])
+                }
+                _ => arg.as_str(),
+            };
+            if looks_like_path(value) && !out.iter().any(|o| o == value) {
+                out.push(value.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// A shortcode's words: split at whitespace, except inside quotes, which are taken off a word
+/// that is quoted whole.
+fn shortcode_args(inner: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !word.is_empty() {
+                    out.push(std::mem::take(&mut word));
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
     out
 }
 
@@ -136,6 +200,7 @@ pub fn referred_names(text: &str, ix: &crate::markdown::NoteIndex) -> std::colle
     if let Some((yaml, _)) = crate::frontmatter::block(text) {
         targets.extend(yaml_paths(&text[yaml]));
     }
+    targets.extend(shortcode_paths(text));
     targets
         .iter()
         .filter_map(|t| {
@@ -475,6 +540,30 @@ mod tests {
                 "theme/base/_index.scss",
             ]
         );
+    }
+
+    #[test]
+    fn shortcode_arguments_name_files() {
+        let v = vault(&[
+            (
+                "talks/deck.qmd",
+                "{{< svg figures/a.svg >}} {{< video src=\"media/clip.mp4\" width=300 >}}\n\
+                 {{< cycle 2022 >}} {{<svg '/shared/b.svg'>}} {{{< svg figures/escaped.svg >}}}\n\
+                 ```\n{{< svg figures/in-code.svg >}}\n```\n{{< svg figures/missing.svg >}}\n",
+            ),
+            ("talks/figures/a.svg", "<svg/>"),
+            ("talks/media/clip.mp4", "mp4"),
+            ("shared/b.svg", "<svg/>"),
+            ("talks/figures/escaped.svg", "<svg/>"),
+            ("talks/figures/in-code.svg", "<svg/>"),
+        ]);
+        assert_eq!(
+            deps_in(&v, "talks/deck.qmd"),
+            ["talks/figures/a.svg", "talks/media/clip.mp4", "shared/b.svg", "talks/figures/in-code.svg"]
+        );
+        let ix = crate::markdown::index(&v["talks/deck.qmd"]).unwrap();
+        assert!(referred_names(&v["talks/deck.qmd"], &ix).contains("missing.svg"), "waited for");
+        assert_eq!(shortcode_paths("{{< x a.svg"), Vec::<String>::new(), "unclosed: nothing");
     }
 
     #[test]

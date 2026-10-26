@@ -10,6 +10,7 @@
 //!
 //! No UI, no network I/O beyond types; the server and native shells wire those up.
 
+pub mod approvals;
 pub mod attachments;
 pub mod chrome;
 pub mod client;
@@ -31,6 +32,7 @@ pub mod pandoc;
 pub mod paths;
 pub mod projection;
 pub mod quarto;
+pub mod sandbox;
 pub mod store;
 pub mod sync;
 pub mod tls;

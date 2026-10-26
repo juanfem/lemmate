@@ -50,10 +50,18 @@ struct Config {
     #[arg(long, env = "LEMMATE_QUARTO")]
     quarto: Option<PathBuf>,
     /// Refuse Quarto renders even when quarto is installed. A render honours the note's front
-    /// matter, which can run Lua filters and read files on this host; turn it off if everyone
-    /// who can edit a note should not be able to do that.
+    /// matter, short of what would run code or read files outside the vault; turn it off if
+    /// nobody should be rendering on this host at all.
     #[arg(long, env = "LEMMATE_DISABLE_QUARTO", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     disable_quarto: bool,
+    /// Never run Lua filters or shortcodes in a render, approved by a vault's owner or not
+    /// (SPEC §5.6): what renders did before approvals.
+    #[arg(long, env = "LEMMATE_DISABLE_FILTERS", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    disable_filters: bool,
+    /// UNSAFE: run approved Lua filters even when this host cannot confine them (no Landlock).
+    /// An approved filter then runs as this server, with its files and its environment.
+    #[arg(long, env = "LEMMATE_UNSANDBOXED_FILTERS", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true", default_value = "false")]
+    unsandboxed_filters: bool,
     /// Chrome or chrome-headless-shell, for a deck's PDF on pages the slides' size (default:
     /// Quarto's `quarto install chrome-headless-shell`, else a Chrome on PATH). Without one the
     /// app prints decks through the browser's own dialog.
@@ -149,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         quarto: cfg.quarto.clone(),
         quarto_enabled: !cfg.disable_quarto,
         chrome: cfg.chrome.clone(),
+        filters_enabled: !cfg.disable_filters,
+        unconfined_filters: cfg.unsandboxed_filters,
         password_login: !cfg.disable_password_login,
         oidc: oidc.clone(),
         auth: if cfg.no_auth {
@@ -189,6 +199,15 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(o) = &oidc {
         info!(issuer = %o.issuer, callback = %o.redirect_url, password_login = !cfg.disable_password_login, "OIDC sign-in on");
+    }
+    if !cfg.disable_quarto && !cfg.disable_filters {
+        match lemmate_core::sandbox::confinement() {
+            Ok(how) => info!(sandbox = how, "approved Lua filters run confined"),
+            Err(why) if cfg.unsandboxed_filters => {
+                tracing::warn!(%why, "approved Lua filters run UNCONFINED (--unsandboxed-filters)")
+            }
+            Err(why) => tracing::warn!(%why, "approved Lua filters cannot run: nothing here confines them"),
+        }
     }
     info!(bind = %cfg.bind, data_dir = %cfg.data_dir.display(), auth = !cfg.no_auth, "lemmate-server listening");
     axum::serve(listener, app).await?;

@@ -48,6 +48,7 @@ async fn relay_of(opts: Vec<SyncOptions>, root: Option<&Path>) -> LocalHandle {
         vault_root: root.map(Path::to_path_buf),
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     remember(start_many(opts, local).await.unwrap())
 }

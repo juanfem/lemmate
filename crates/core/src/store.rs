@@ -13,7 +13,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::{self, NoteIndex};
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// `meta` key holding the [`markdown::INDEX_VERSION`] the derived rows were written with.
 const INDEX_VERSION_KEY: &str = "index_version";
@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     last_used_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS access_tokens_user ON access_tokens (user_id);
+-- Lua filters and shortcodes a vault's renders may run (SPEC §5.6): these exact bytes, by
+-- their blake3 hash, in this vault. `path` is where the file was when it was approved, for
+-- people to read; the hash is what is checked. Approved by an owner, in a session.
+CREATE TABLE IF NOT EXISTS filter_approvals (
+    vault_id    TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    approved_ms INTEGER NOT NULL,
+    PRIMARY KEY (vault_id, hash)
+);
 "#;
 
 pub struct Store {
@@ -226,6 +237,18 @@ pub struct AttachmentRow {
     pub size: u64,
     pub mime: String,
     pub filename_hint: Option<String>,
+}
+
+/// A Lua filter approved to run in a vault's renders ([`Store::approve_filter`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FilterApproval {
+    /// blake3 of the approved bytes: what a render checks.
+    pub hash: String,
+    /// Where the file was when it was approved.
+    pub path: String,
+    /// Who approved it, by display name (or by id, for an account that is gone).
+    pub approved_by: String,
+    pub approved_ms: i64,
 }
 
 /// Vault-level roles (SPEC §11.2). Ordered: a higher role includes the lower ones.
@@ -1368,6 +1391,62 @@ impl Store {
             .flatten())
     }
 
+    // ---- Approved Lua filters (SPEC §5.6) ---------------------------------------------------
+
+    /// Approve these bytes (by `hash`) to run in `vault`'s renders; approving them again
+    /// records the newer path, approver and time.
+    pub fn approve_filter(
+        &mut self,
+        vault: VaultId,
+        hash: &str,
+        path: &str,
+        by: &str,
+    ) -> Result<FilterApproval> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO filter_approvals (vault_id, hash, path, approved_by, approved_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(vault_id, hash) DO UPDATE SET path = excluded.path, approved_by = excluded.approved_by,
+                                                       approved_ms = excluded.approved_ms",
+            params![vault.to_string(), hash, path, by, now],
+        )?;
+        let by_name = self.user_by_id(by)?.map(|u| u.display_name);
+        Ok(FilterApproval {
+            hash: hash.to_owned(),
+            path: path.to_owned(),
+            approved_by: by_name.unwrap_or_else(|| by.to_owned()),
+            approved_ms: now,
+        })
+    }
+
+    /// A vault's approvals, newest first, each with its approver's display name.
+    pub fn filter_approvals(&self, vault: VaultId) -> Result<Vec<FilterApproval>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.hash, f.path, COALESCE(u.display_name, f.approved_by), f.approved_ms
+             FROM filter_approvals f LEFT JOIN users u ON u.id = f.approved_by
+             WHERE f.vault_id = ?1 ORDER BY f.approved_ms DESC, f.path",
+        )?;
+        let rows = stmt
+            .query_map(params![vault.to_string()], |r| {
+                Ok(FilterApproval {
+                    hash: r.get(0)?,
+                    path: r.get(1)?,
+                    approved_by: r.get(2)?,
+                    approved_ms: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Revoke one; false when the vault had no such approval.
+    pub fn revoke_filter(&mut self, vault: VaultId, hash: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM filter_approvals WHERE vault_id = ?1 AND hash = ?2",
+            params![vault.to_string(), hash],
+        )?;
+        Ok(n == 1)
+    }
+
     // ---- Personal access tokens (SPEC §11.1) ------------------------------------------------
 
     pub fn create_access_token(
@@ -1761,6 +1840,7 @@ impl Store {
         tx.execute("DELETE FROM notes WHERE vault_id = ?1", params![vault_id.to_string()])?;
         tx.execute("DELETE FROM attachments WHERE vault_id = ?1", params![vault_id.to_string()])?;
         tx.execute("DELETE FROM memberships WHERE vault_id = ?1", params![vault_id.to_string()])?;
+        tx.execute("DELETE FROM filter_approvals WHERE vault_id = ?1", params![vault_id.to_string()])?;
         let doc = DocId::Vault(vault_id).to_string();
         tx.execute("DELETE FROM doc_updates WHERE doc_id = ?1", params![doc])?;
         tx.execute("DELETE FROM doc_snapshots WHERE doc_id = ?1", params![doc])?;
@@ -2430,5 +2510,25 @@ mod tests {
         assert_eq!(store.oidc_subject_of("u1").unwrap().as_deref(), Some("sub-1"));
         assert!(store.set_oidc_subject("u2", "sub-1").is_err(), "one subject, one user");
         assert!(store.user_by_oidc_subject("sub-2").unwrap().is_none());
+    }
+
+    #[test]
+    fn filter_approvals_are_per_vault_and_revocable() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.create_user("u1", "a@x", "Ana", None, false).unwrap();
+        let (a, b) = (VaultId::new(), VaultId::new());
+        let first = s.approve_filter(a, "h1", "lua/x.lua", "u1").unwrap();
+        assert_eq!(first.approved_by, "Ana");
+        s.approve_filter(a, "h1", "lua/moved.lua", "gone-user").unwrap();
+        let listed = s.filter_approvals(a).unwrap();
+        assert_eq!(listed.len(), 1, "one per hash");
+        assert_eq!((listed[0].path.as_str(), listed[0].approved_by.as_str()), ("lua/moved.lua", "gone-user"));
+        assert!(s.filter_approvals(b).unwrap().is_empty(), "another vault has none");
+        assert!(!s.revoke_filter(b, "h1").unwrap());
+        assert!(s.revoke_filter(a, "h1").unwrap());
+        assert!(s.filter_approvals(a).unwrap().is_empty());
+        s.approve_filter(a, "h2", "y.lua", "u1").unwrap();
+        s.delete_vault(a).unwrap();
+        assert!(s.filter_approvals(a).unwrap().is_empty(), "a vault's approvals go with it");
     }
 }

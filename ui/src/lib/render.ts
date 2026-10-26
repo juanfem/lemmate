@@ -134,3 +134,38 @@ export function autoRenderDue(s: {
     s.text !== s.tried
   )
 }
+
+/** A Lua file a render did not run because nobody has approved its bytes (SPEC §5.6). */
+export interface Unapproved {
+  path: string
+  hash: string
+}
+
+/** What became of the Lua filters and shortcodes a note named, as a render reports it. */
+export interface FilterReport {
+  /** Approved ones that ran, by vault path. */
+  ran: string[]
+  /** Named, in the vault, not approved: what an owner could approve. */
+  unapproved: Unapproved[]
+  /** Why approved ones did not run, when they did not: switched off, or nothing to confine them. */
+  withheld: string | null
+}
+
+/** The `x-lemmate-filters` header of a render, or null when it has none or it makes no sense. */
+export function filterReport(header: string | null): FilterReport | null {
+  if (!header) return null
+  let raw: unknown
+  try {
+    raw = JSON.parse(header)
+  } catch {
+    return null
+  }
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+  const unapproved = (Array.isArray(r.unapproved) ? r.unapproved : []).flatMap((u: unknown) => {
+    const o = u as Record<string, unknown> | null
+    return o && typeof o.path === 'string' && typeof o.hash === 'string' ? [{ path: o.path, hash: o.hash }] : []
+  })
+  return { ran: strings(r.ran), unapproved, withheld: typeof r.withheld === 'string' ? r.withheld : null }
+}

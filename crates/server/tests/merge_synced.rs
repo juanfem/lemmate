@@ -48,6 +48,7 @@ async fn relay(root: &Path, dirs: &[&str], server: SocketAddr) -> LocalHandle {
         vault_root: Some(root.to_path_buf()),
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     remember(start_many(opts, local).await.unwrap())
 }

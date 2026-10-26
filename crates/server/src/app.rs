@@ -47,6 +47,12 @@ pub struct ServerOptions {
     /// Chrome for a deck's PDF (`quarto::Format::SlidesPdf`); `None` → `chrome::chrome_bin`'s
     /// search. Without one that render answers 501, and the app prints through the browser.
     pub chrome: Option<std::path::PathBuf>,
+    /// Whether a render may run the Lua filters a vault's owners approved (SPEC §5.6). Off,
+    /// none runs and none is asked about, approved or not.
+    pub filters_enabled: bool,
+    /// Run approved filters even where nothing can confine them (`sandbox.rs`). Unsafe: for a
+    /// host that is a sandbox already.
+    pub unconfined_filters: bool,
     /// Email + password sign-in (SPEC §11.1). Off, accounts come only from `oidc`.
     pub password_login: bool,
     /// An OpenID Connect provider to sign in with.
@@ -65,6 +71,8 @@ impl Default for ServerOptions {
             quarto: None,
             quarto_enabled: true,
             chrome: None,
+            filters_enabled: true,
+            unconfined_filters: false,
             password_login: true,
             oidc: None,
         }
@@ -310,6 +318,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vaults/{vault}/notes/{id}/export", axum::routing::post(export_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render", get(render_page).post(render_note))
         .route("/api/v1/vaults/{vault}/notes/{id}/render/{render}", get(kept_render))
+        .route("/api/v1/vaults/{vault}/filter-approvals", get(filter_approvals).post(approve_filter))
+        .route("/api/v1/vaults/{vault}/filter-approvals/{hash}", axum::routing::delete(revoke_filter))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions", get(list_versions).post(save_version))
         .route("/api/v1/vaults/{vault}/notes/{id}/versions/{seq}", get(get_version).patch(label_version))
         .route("/api/v1/vaults/{vault}/tags", get(tags))
@@ -1562,6 +1572,13 @@ async fn render_note(
         RoomDoc::Vault(v) => v.attachment_entries().into_iter().collect(),
         RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
     };
+    let approved = if state.options.filters_enabled {
+        let rows = state.store.lock().await.filter_approvals(vault).map_err(internal)?;
+        Some(rows.into_iter().map(|a| a.hash).collect())
+    } else {
+        None
+    };
+    let unconfined = state.options.unconfined_filters;
     let blobs = state.attachments.clone();
     let bin = state.options.quarto.clone();
     let chrome = state.options.chrome.clone();
@@ -1581,6 +1598,8 @@ async fn render_note(
             quarto: bin.clone(),
             viewing: view,
             chrome: chrome.clone(),
+            approved,
+            unconfined,
             ..Default::default()
         };
         lemmate_core::quarto::render(&path, &text, format, &paths, read, &opts).map(Some)
@@ -1588,7 +1607,7 @@ async fn render_note(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match rendered {
-        Ok(Some((bytes, mime))) => {
+        Ok(Some(lemmate_core::quarto::Rendered { bytes, mime, filters })) => {
             let disposition = lemmate_core::quarto::disposition(&row.path, format);
             // A page made to be looked at is kept, so opening it again elsewhere is instant; a
             // deck's speaker view shows its previews from that kept page, so it names it.
@@ -1610,6 +1629,9 @@ async fn render_note(
             if let Some(kept) = kept.and_then(|k| header::HeaderValue::from_str(&k).ok()) {
                 response.headers_mut().insert("x-render-id", kept);
             }
+            if let Some(report) = filters.header().and_then(|h| header::HeaderValue::from_str(&h).ok()) {
+                response.headers_mut().insert("x-lemmate-filters", report);
+            }
             Ok(response)
         }
         Ok(None) => Err(StatusCode::NOT_IMPLEMENTED),
@@ -1623,6 +1645,84 @@ async fn render_note(
             Ok((StatusCode::UNPROCESSABLE_ENTITY, without_temp_paths(&msg)).into_response())
         }
     }
+}
+
+/// The Lua filters a vault's renders may run (SPEC §5.6). Any member may see them; a token
+/// sees them as far as its scope reaches.
+async fn filter_approvals(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+) -> Result<Json<Vec<lemmate_core::store::FilterApproval>>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if auth::role_or_claim(&state, &user, vault, false).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(state.store.lock().await.filter_approvals(vault).map_err(internal)?))
+}
+
+#[derive(Deserialize)]
+struct ApproveIn {
+    path: String,
+    hash: String,
+}
+
+/// Who may approve or revoke a vault's filters: an owner, signed in. A personal access token
+/// approves nothing, not even an owner's — an agent holding one could otherwise approve the
+/// filter it just wrote. 404 for a non-member, 403 for anyone else.
+async fn filter_owner(state: &AppState, user: &AuthUser, vault: VaultId) -> Result<(), StatusCode> {
+    let role = auth::role_or_claim(state, user, vault, false).await.ok_or(StatusCode::NOT_FOUND)?;
+    if user.token.is_some() || role < Role::Owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+/// Approve the Lua file at `path` to run in this vault's renders — as the vault holds it now,
+/// which must be the bytes `hash` names: what the owner read is what is approved, not whatever
+/// arrived since. 409 when it has changed, 404 when there is no such file.
+async fn approve_filter(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Json(body): Json<ApproveIn>,
+) -> Result<Json<lemmate_core::store::FilterApproval>, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    filter_owner(&state, &user, vault).await?;
+    if !body.path.to_ascii_lowercase().ends_with(".lua")
+        || !lemmate_core::attachments::is_valid_hash(&body.hash)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let current = match &*vault_room(&state, vault).await?.doc.lock().await {
+        RoomDoc::Vault(v) => {
+            v.attachment_entries().into_iter().find(|(p, _)| *p == body.path).map(|(_, h)| h)
+        }
+        RoomDoc::Note(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    match current {
+        None => return Err(StatusCode::NOT_FOUND),
+        Some(h) if h != body.hash => return Err(StatusCode::CONFLICT),
+        Some(_) => {}
+    }
+    let approval =
+        state.store.lock().await.approve_filter(vault, &body.hash, &body.path, &user.id).map_err(internal)?;
+    info!(%vault, path = %body.path, hash = %body.hash, by = %user.id, "filter approved");
+    Ok(Json(approval))
+}
+
+async fn revoke_filter(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((vault, hash)): Path<(String, String)>,
+) -> Result<StatusCode, StatusCode> {
+    let vault: VaultId = vault.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    filter_owner(&state, &user, vault).await?;
+    if !state.store.lock().await.revoke_filter(vault, &hash).map_err(internal)? {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    info!(%vault, %hash, by = %user.id, "filter approval revoked");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The live note `id`, provided it is in `vault`.

@@ -26,6 +26,7 @@ async fn relay(root: &Path) -> LocalHandle {
         vault_root: Some(root.to_path_buf()),
         config_path: None,
         allow_remote: false,
+        approvals_dir: None,
     };
     start(options(root), local).await.unwrap()
 }
@@ -134,6 +135,7 @@ async fn a_relay_reachable_from_the_network_has_to_be_asked_for() {
         vault_root: None,
         config_path: None,
         allow_remote,
+        approvals_dir: None,
     };
     assert!(start(options(tmp.path()), local(false)).await.is_err());
     let handle = start(options(tmp.path()), local(true)).await.unwrap();

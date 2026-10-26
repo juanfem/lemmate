@@ -24,6 +24,8 @@ either way. From `crates/server/src/main.rs`:
 | `--pandoc PATH` | `LEMMATE_PANDOC` | pandoc binary for exports (default: on `PATH`; exports answer 501 without it) |
 | `--quarto PATH` | `LEMMATE_QUARTO` | quarto binary for *Render with Quarto* (default: on `PATH`; renders answer 501 without it) |
 | `--disable-quarto` | `LEMMATE_DISABLE_QUARTO` | off — set it to refuse renders even with quarto installed |
+| `--disable-filters` | `LEMMATE_DISABLE_FILTERS` | off — set it to run no Lua filter or shortcode in a render, approved or not |
+| `--unsandboxed-filters` | `LEMMATE_UNSANDBOXED_FILTERS` | off — **unsafe**: run approved Lua filters even where the server cannot confine them (no Landlock) |
 | `--chrome PATH` | `LEMMATE_CHROME` | Chrome for a deck's PDF (default: Quarto's `chrome-headless-shell`, else a Chrome on `PATH`; without one the app prints decks through the browser's dialog) |
 | — | `LEMMATE_CHROME_NO_SANDBOX` | off; the image sets it — Chrome's own sandbox needs user namespaces, which a container lacks |
 | `--secure-cookies` | `LEMMATE_SECURE_COOKIES` | off |
@@ -366,12 +368,20 @@ the admin out of their own session) or with an invite (§d above). Turn the flag
 something else that restricts who can reach the server. The only validation on a new account is
 that the email contains `@` and the password is at least 8 characters.
 
-**Quarto renders run what a note's front matter asks for.** Code cells never run — every
-render passes `--no-execute` — but front matter can name Lua filters, and files to include in
-the output, and Quarto honours both. On a shared server that means anyone who can edit a note
-can run Lua and read files as the server's user, inside the container. If that is more than
-you want to allow, set `LEMMATE_DISABLE_QUARTO=true` (or build without Quarto, above): renders
-then answer 501 and the app says rendering is unavailable.
+**Quarto renders run no code a vault owner has not approved.** Code cells never run — every
+render passes `--no-execute` — and what front matter could use to run a program or read a file
+on the server is dropped before Quarto sees it. The exception is a Lua filter or shortcode whose
+exact bytes an owner of the vault approved, signed in to the web app (see the user guide). Those
+run **confined**: with Landlock and a seccomp filter they read only the system's folders, the
+Quarto install and the render's own scratch directory, write only the latter, open no socket and
+cannot touch another process — so not the database under `/data`, not the server's environment
+(the OIDC secret), not the other containers on its network. Landlock needs Linux 5.13 or newer
+with `landlock` among the kernel's LSMs (`cat /sys/kernel/security/lsm`), and nothing else: no
+capability, no seccomp profile of your own, no user namespaces — it works under Docker's default
+profile. The server says at startup which it is: `approved Lua filters run confined`, or that
+they cannot run here. To run none at all, set `LEMMATE_DISABLE_FILTERS=true`; for no renders,
+`LEMMATE_DISABLE_QUARTO=true` (or build without Quarto, above): renders then answer 501 and the
+app says rendering is unavailable.
 
 A deck's PDF runs the deck's JavaScript — written by whoever wrote the note — in headless Chrome
 on the server, without Chrome's own sandbox inside a container. Every request the page makes is
