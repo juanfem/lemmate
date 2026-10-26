@@ -9,6 +9,8 @@
 //                    (absolute paths); the picker never shows
 //   swipe:<x>,<y>,<dx>,<dy>  a finger dragged from (x, y) by (dx, dy): a touch scroll gesture,
 //                    which is how a phone scrolls a page or turns a slide
+//   tap:<x>,<y>      a finger put down and lifted at viewport coordinates (a phone's tap:
+//                    the browser, not CodeMirror, decides where the caret goes)
 //   mouse:<x>,<y>    a real left press and release at viewport coordinates — what CodeMirror's
 //                    own mousedown handling (posAtCoords, the height map) needs to see
 //   drag:<x>,<y>,<x2>,<y2>  a real left-button drag from (x, y) to (x2, y2), in steps — enough
@@ -125,6 +127,14 @@ async function runStep(cdp, step, outdir) {
       if ([x, y, dx, dy].some((n) => !Number.isFinite(n))) die(`bad swipe (expected x,y,dx,dy): ${arg}`);
       await cdp.send('Input.synthesizeScrollGesture',
         { x, y, xDistance: dx, yDistance: dy, gestureSourceType: 'touch', speed: 800 });
+      return;
+    }
+    case 'tap': {
+      const [x, y] = arg.split(',').map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) die(`bad tap (expected x,y): ${arg}`);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+      await sleep(50);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       return;
     }
     case 'mouse': {

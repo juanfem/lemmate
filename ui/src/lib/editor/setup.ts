@@ -54,7 +54,7 @@ const theme = EditorView.theme({
   // makes the pane read as a page rather than as an input that happens to start partway
   // across. The side padding is a comfortable margin on a monitor and half the line length on
   // a phone, so it shrinks with the viewport instead of staying a fixed 2rem.
-  '.cm-content': { maxWidth: 'var(--measure)', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)', '--list-indent': '1.75em' },
+  '.cm-content': { maxWidth: 'var(--measure)', margin: '0 auto', padding: '0 clamp(0.9rem, 4vw, 2.5rem)', caretColor: 'var(--accent)', '--list-indent': '1.75em', '--task-box': '0.95em' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '1.5px' },
   // A full-width band is a lot of colour to spend on "the cursor is here". A short fade from
   // the left margin says the same thing and stops competing with the text sitting on it.
@@ -142,17 +142,20 @@ const theme = EditorView.theme({
   // so the text starts on the same column either way. `viii.` may push past it; that is all.
   '.cm-list-mark': { display: 'inline-block', minWidth: 'var(--list-indent)', whiteSpace: 'pre' },
   '.cm-list-mark-task': { minWidth: '0' },
-  '.cm-list-line .cm-task-checkbox': { boxSizing: 'border-box', marginRight: 'calc(var(--list-indent) - 0.95em)' },
+  '.cm-list-line .cm-task-checkbox': { boxSizing: 'border-box', marginRight: 'calc(var(--list-indent) - var(--task-box))' },
   '.cm-list-bullet': { display: 'inline-block', width: '1em', textAlign: 'center', color: 'var(--muted)', fontSize: '1.45em', lineHeight: '1', verticalAlign: '-0.08em' },
   // The number keeps the marker colour the highlighter gave the digits it replaces.
   '.cm-list-number': { color: 'var(--muted)' },
   // Drawn rather than left to the browser: a default control takes its colours from the
   // platform's colour scheme, and an unchecked one is then a dark box on our dark background —
   // present, clickable, and all but invisible. These follow the theme's own tokens instead.
+  // A finger is not a pointer: on a touch screen the box is drawn larger, still inside the
+  // bullet's column (`--list-indent`), and taps just beside it count too (livePreview.ts).
+  '@media (pointer: coarse)': { '.cm-content': { '--task-box': '1.3em' } },
   '.cm-task-checkbox': {
     appearance: 'none',
-    width: '0.95em',
-    height: '0.95em',
+    width: 'var(--task-box)',
+    height: 'var(--task-box)',
     margin: '0 0.4em 0 0',
     verticalAlign: '-0.1em',
     border: '1.5px solid var(--muted)',
@@ -162,7 +165,7 @@ const theme = EditorView.theme({
   },
   '.cm-task-checkbox:hover': { borderColor: 'var(--accent)' },
   '.cm-task-checkbox:checked': {
-    background: `var(--accent) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg>") center/0.8em no-repeat`,
+    background: `var(--accent) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg>") center/84% no-repeat`,
     borderColor: 'var(--accent)',
   },
   '.cm-ySelectionInfo': { fontFamily: 'var(--ui)', fontSize: '0.7em' },

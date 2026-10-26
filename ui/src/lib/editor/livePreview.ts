@@ -1069,6 +1069,26 @@ export function toggleTaskAt(state: EditorState, pos: number): TransactionSpec |
   return { changes: { from: pos + 1, to: pos + 2, insert: mark[1] === ' ' ? 'x' : ' ' } }
 }
 
+/**
+ * Which of `boxes` a finger at (`x`, `y`) means: the nearest one within `slop` pixels of its
+ * edges, or -1. A fingertip is wider than the box, and a tap a little beside it still means it.
+ */
+export function boxNear(boxes: { left: number; top: number; right: number; bottom: number }[], x: number, y: number, slop: number): number {
+  let best = -1
+  let bestDist = Infinity
+  boxes.forEach((r, i) => {
+    const dx = Math.max(r.left - x, 0, x - r.right)
+    const dy = Math.max(r.top - y, 0, y - r.bottom)
+    if (dx > slop || dy > slop) return
+    const dist = dx * dx + dy * dy
+    if (dist < bestDist) [best, bestDist] = [i, dist]
+  })
+  return best
+}
+
+/** Where each view's current touch began, so a scroll that ends on a box does not tick it. */
+const touchStarts = new WeakMap<EditorView, { x: number; y: number }>()
+
 export function livePreview(opts: LivePreviewOptions) {
   // A StateField rather than a ViewPlugin: block-level replacements (math blocks, folded
   // front matter) are only allowed from fields. Recomputed on document or selection changes.
@@ -1114,6 +1134,34 @@ export function livePreview(opts: LivePreviewOptions) {
         const toggle = toggleTaskAt(view.state, view.posAtDOM(target))
         if (toggle) view.dispatch(toggle)
         return true
+      },
+      // A tap is the browser's, not CodeMirror's: it puts the caret where the finger lands,
+      // which reveals the line, so the box turns back into `[ ]` under the finger and the tap
+      // edits markdown instead of ticking. Taken here, on touchend, before the browser acts on
+      // it — and a finger just beside the box still counts.
+      touchend(event, view) {
+        const start = touchStarts.get(view)
+        touchStarts.delete(view)
+        const touch = event.changedTouches[0]
+        if (!start || !touch || Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10) return false
+        // Only this editor's boxes: a transclusion's inner editor has its own, and they are read-only.
+        const boxes = [...view.contentDOM.querySelectorAll<HTMLInputElement>('.cm-task-checkbox')].filter(
+          (b) => !b.disabled && b.closest('.cm-editor') === view.dom,
+        )
+        const i = boxNear(boxes.map((b) => b.getBoundingClientRect()), touch.clientX, touch.clientY, 12)
+        if (i < 0) return false
+        const toggle = toggleTaskAt(view.state, view.posAtDOM(boxes[i]!))
+        if (!toggle) return false
+        event.preventDefault()
+        view.dispatch(toggle)
+        return true
+      },
+    }),
+    EditorView.domEventObservers({
+      touchstart(event, view) {
+        const touch = event.touches.length === 1 ? event.touches[0] : undefined
+        if (touch) touchStarts.set(view, { x: touch.clientX, y: touch.clientY })
+        else touchStarts.delete(view)
       },
     }),
   ]

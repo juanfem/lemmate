@@ -220,6 +220,10 @@
   let menu: MenuState | null = $state(null)
   let bookmarked = $derived(!!session?.isBookmarked('note', activePath))
   let moreItems = $derived([
+    // The mode switch is the first thing a narrow pane folds away; on a phone this is its home.
+    ...(onMode && pane.active && session && !isBlank(pane.active)
+      ? [...VIEW_MODES.map((m) => ({ label: `${m.label} mode`, checked: pane.mode === m.id, run: () => onMode(m.id) })), { label: '', separator: true }]
+      : []),
     ...(onHistory ? [{ label: 'Version history', run: onHistory }] : []),
     ...(onRenderPane ? [{ label: 'Render with Quarto in a new pane', run: onRenderPane }] : []),
     ...(onDetach && pane.active && !isBlank(pane.active) ? [{ label: 'Move to new window', run: () => onDetach(pane.active!) }] : []),

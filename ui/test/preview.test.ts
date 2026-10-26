@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { EditorSelection, EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { calloutSpans, livePreview, toggleTaskAt, webHref } from '../src/lib/editor/livePreview.ts'
+import { boxNear, calloutSpans, livePreview, toggleTaskAt, webHref } from '../src/lib/editor/livePreview.ts'
 import { noteSyntax } from '../src/lib/editor/syntax.ts'
 import { imageSrc } from '../src/lib/linktarget.ts'
 
@@ -112,4 +112,17 @@ test('an escape shows the character it escapes, and its backslash only on the cu
   assert.deepEqual(hidden(previewState(doc, 0)), [])
   // Inside code a backslash is just a backslash.
   assert.deepEqual(hidden(previewState('`a\\*b`\n\nx', 9)).filter((t) => t === '\\'), [])
+})
+
+test('a tap beside a task box still means it, and the nearest box wins', () => {
+  const box = (top: number) => ({ left: 20, top, right: 40, bottom: top + 20 })
+  const boxes = [box(0), box(30)]
+  assert.equal(boxNear(boxes, 30, 10, 12), 0)
+  // Just left of the first box, and between the two but closer to the second.
+  assert.equal(boxNear(boxes, 10, 10, 12), 0)
+  assert.equal(boxNear(boxes, 30, 27, 12), 1)
+  // Too far off, or on the line's text past the box.
+  assert.equal(boxNear(boxes, 30, 70, 12), -1)
+  assert.equal(boxNear(boxes, 80, 10, 12), -1)
+  assert.equal(boxNear([], 0, 0, 12), -1)
 })
