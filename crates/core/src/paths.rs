@@ -44,6 +44,16 @@ pub fn log_dir() -> Option<PathBuf> {
     Some(dirs::state_dir().or_else(dirs::data_local_dir)?.join("lemmate"))
 }
 
+/// Where native clients keep what they can fetch again — the web fonts a render needs
+/// ([`crate::webfonts`]): the platform's cache directory (`~/.cache/lemmate` on Linux), or under
+/// `$LEMMATE_CONFIG_DIR` when that is set.
+pub fn cache_dir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("LEMMATE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(v).join("cache"));
+    }
+    Some(dirs::cache_dir()?.join("lemmate"))
+}
+
 /// The user's home directory, used only to *suggest* paths (the setup screen's default vault
 /// folder). Never used to build a configuration path — that is `config_dir`'s job.
 pub fn home_dir() -> Option<PathBuf> {

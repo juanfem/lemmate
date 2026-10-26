@@ -294,6 +294,9 @@ pub struct RenderOptions {
     /// Run approved filters even where nothing can confine them ([`crate::sandbox`]). Unsafe:
     /// for a machine that is a sandbox already, and knows it.
     pub unconfined: bool,
+    /// Fetches what a vault stylesheet imports from the web, to write it in before Quarto runs
+    /// ([`crate::webfonts`]); `None` leaves that to Quarto, which a confined render cannot do.
+    pub web_fonts: Option<crate::webfonts::WebFonts>,
 }
 
 impl Default for RenderOptions {
@@ -305,6 +308,7 @@ impl Default for RenderOptions {
             chrome: None,
             approved: None,
             unconfined: false,
+            web_fonts: None,
         }
     }
 }
@@ -468,7 +472,12 @@ fn render_in(
             let Some(guarded) = guard_yaml(&path, &String::from_utf8_lossy(&bytes), gate) else { continue };
             serde_yaml_ng::to_string(&guarded).map_err(|e| Error::Export(e.to_string()))?.into_bytes()
         } else if is_stylesheet(&path) {
-            guard_stylesheet(&path, &String::from_utf8_lossy(&bytes)).into_bytes()
+            let css = String::from_utf8_lossy(&bytes);
+            let css = match &opts.web_fonts {
+                Some(web) => web.localize(&css),
+                None => css.into_owned(),
+            };
+            guard_stylesheet(&path, &css).into_bytes()
         } else {
             bytes
         };
@@ -2186,6 +2195,64 @@ mod tests {
         assert!(h.is_ascii() && !h.contains('\n'), "{h}");
         let back: serde_json::Value = serde_json::from_str(&h).unwrap();
         assert_eq!(back["unapproved"][0]["path"], "Müller/ü 😀.lua");
+    }
+
+    /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary, on a machine that can
+    /// confine a render. A theme that imports its font from a CDN, in a render that runs an
+    /// approved filter and so reaches no network: Lemmate fetched the font beforehand, so the
+    /// theme is whole and the font is in the page. Unfetched, the import used to swallow the
+    /// theme's `:root` rule — every reveal.js variable — when pandoc wrote it back without its `;`.
+    #[test]
+    fn a_confined_deck_keeps_its_theme_and_its_web_font() {
+        let Some(bin) = quarto() else {
+            eprintln!("skipped: set LEMMATE_TEST_QUARTO");
+            return;
+        };
+        if let Err(why) = crate::sandbox::confinement() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let theme = "/*-- scss:defaults --*/\n$presentation-heading-color: #0033A0;\n\
+                     $font-family-sans-serif: \"Webby\", Arial, sans-serif;\n\
+                     /*-- scss:rules --*/\n@import url(\"https://cdn.example/webby/webby.css\");\n\
+                     .reveal h2 { letter-spacing: -0.01em; }\n";
+        let files: std::collections::HashMap<String, String> = [
+            ("deck/theme.scss".to_owned(), theme.to_owned()),
+            ("deck/lua/para.lua".to_owned(), "function Para(p) return p end\n".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let atts: Vec<String> = files.keys().cloned().collect();
+        let read = |p: &str| files.get(p).map(|c| c.as_bytes().to_vec());
+        let md = "---\ntitle: Fonts\nformat:\n  revealjs:\n    theme: [default, theme.scss]\n\
+                  filters: [lua/para.lua]\n---\n\n## One\n\nText.\n";
+        let approved: HashSet<String> =
+            [crate::attachments::hash_bytes(files["deck/lua/para.lua"].as_bytes())].into();
+        let web = crate::webfonts::WebFonts::with(|url, _| {
+            match url.as_str() {
+            "https://cdn.example/webby/webby.css" => Some(
+                b"@font-face { font-family: \"Webby\"; src: url(\"files/webby.woff2?v=1\") format(\"woff2\"); }".to_vec(),
+            ),
+            "https://cdn.example/webby/files/webby.woff2?v=1" => Some(b"WEBBY-FONT-BYTES".to_vec()),
+            _ => None,
+        }
+        });
+        let opts = RenderOptions {
+            quarto: Some(bin),
+            approved: Some(approved),
+            web_fonts: Some(web),
+            ..Default::default()
+        };
+        let out = render("deck/talk.qmd", md, Format::RevealJs, &atts, read, &opts).unwrap();
+        assert_eq!(out.filters.ran, ["deck/lua/para.lua"], "confined");
+        let page = String::from_utf8_lossy(&out.bytes);
+        // The page's stylesheets are percent-encoded `data:` links.
+        let css = percent_decoded(&page);
+        assert!(css.contains("--r-heading-color: #0033A0"), "the theme's variables are there");
+        use base64::Engine as _;
+        let font = base64::engine::general_purpose::STANDARD.encode("WEBBY-FONT-BYTES");
+        assert!(css.contains(&format!("data:font/woff2;base64,{font}")), "and the font, fetched by Lemmate");
+        assert!(!css.contains("@import \"https://cdn.example"), "with no import left to fail");
     }
 
     /// Runs only when LEMMATE_TEST_QUARTO points at a quarto binary, on a machine that can

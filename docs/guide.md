@@ -1063,9 +1063,11 @@ code (and, when an earlier version of the same file was approved, what changed s
   so does one made in a vault with no server. The server's approvals also run in the desktop
   app, offline too.
 - **Approved filters run in a sandbox**: they can read the vault files the render has and
-  nothing else of the machine, write nowhere outside the render, and reach no network. So a
-  theme that `@import`s a web font from a CDN loses it in a render that runs filters — put the
-  font files in the vault and import them from there. On Linux this is Landlock (Linux 5.13
+  nothing else of the machine, write nowhere outside the render, and reach no network. A web
+  font a theme `@import`s from a CDN (`@import url("https://…")` in a `.scss` or `.css`) still
+  works: Lemmate fetches it before the render and writes it into the page, and keeps a copy, so
+  it renders offline afterwards too. Only `https:` stylesheets and font files are fetched; one
+  that cannot be is left out, and the theme falls back to its next font. On Linux this is Landlock (Linux 5.13
   or newer); on macOS, `sandbox-exec`. Where neither exists (Windows), approved filters do not
   run at all unless `LEMMATE_UNSANDBOXED_FILTERS=1` is set for the app — which runs them with
   your full rights.

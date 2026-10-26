@@ -159,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
         chrome: cfg.chrome.clone(),
         filters_enabled: !cfg.disable_filters,
         unconfined_filters: cfg.unsandboxed_filters,
+        web_fonts: Some(lemmate_core::webfonts::WebFonts::online(Some(cfg.data_dir.join("web-cache")))),
         password_login: !cfg.disable_password_login,
         oidc: oidc.clone(),
         auth: if cfg.no_auth {

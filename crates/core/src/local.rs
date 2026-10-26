@@ -1230,7 +1230,13 @@ async fn render_note(
     };
     let unconfined = std::env::var_os("LEMMATE_UNSANDBOXED_FILTERS")
         .is_some_and(|v| matches!(v.to_str(), Some("1" | "true" | "yes" | "on")));
-    let opts = crate::quarto::RenderOptions { viewing: view, approved, unconfined, ..Default::default() };
+    let opts = crate::quarto::RenderOptions {
+        viewing: view,
+        approved,
+        unconfined,
+        web_fonts: Some(crate::webfonts::WebFonts::online(crate::paths::cache_dir().map(|d| d.join("web")))),
+        ..Default::default()
+    };
     let rendered = tokio::task::spawn_blocking(move || {
         // A deck's PDF also needs a Chrome to print it; without one the UI falls back to the
         // browser's print dialog, as it does without Quarto.

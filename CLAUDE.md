@@ -97,7 +97,8 @@ green before committing; the cross-platform legs mostly catch unix-only assumpti
   `filter_approvals` table or the relay's `config_dir()/filter-approvals/`, never in the vault;
   approving takes an owner session or full-access token (`filter_owner` in `app.rs`). A render that
   runs one is confined by `sandbox.rs` (Landlock + seccomp on the thread that spawns Quarto) —
-  no network, so `embed-resources` cannot inline a CDN file there. Relay tests that touch
+  no network, so a CDN stylesheet a theme `@import`s is fetched beforehand by `webfonts.rs` and
+  written into the stylesheet (fonts as `data:` URIs). Relay tests that touch
   approvals set `LocalOptions::approvals_dir`, or they read the real config directory.
 - A relay outlives its engines: `LocalHandle::serve_forever` (not `wait`, which returns when the
   *first* engine ends — a merged-away vault would take the whole relay down with it).

@@ -53,6 +53,9 @@ pub struct ServerOptions {
     /// Run approved filters even where nothing can confine them (`sandbox.rs`). Unsafe: for a
     /// host that is a sandbox already.
     pub unconfined_filters: bool,
+    /// Fetches the web fonts a vault stylesheet imports before a render ([`lemmate_core::webfonts`]);
+    /// `None` leaves them to Quarto, which a render running approved filters cannot reach.
+    pub web_fonts: Option<lemmate_core::webfonts::WebFonts>,
     /// Email + password sign-in (SPEC §11.1). Off, accounts come only from `oidc`.
     pub password_login: bool,
     /// An OpenID Connect provider to sign in with.
@@ -73,6 +76,7 @@ impl Default for ServerOptions {
             chrome: None,
             filters_enabled: true,
             unconfined_filters: false,
+            web_fonts: None,
             password_login: true,
             oidc: None,
         }
@@ -1583,6 +1587,7 @@ async fn render_note(
         None
     };
     let unconfined = state.options.unconfined_filters;
+    let web_fonts = state.options.web_fonts.clone();
     let blobs = state.attachments.clone();
     let bin = state.options.quarto.clone();
     let chrome = state.options.chrome.clone();
@@ -1604,6 +1609,7 @@ async fn render_note(
             chrome: chrome.clone(),
             approved,
             unconfined,
+            web_fonts,
             ..Default::default()
         };
         lemmate_core::quarto::render(&path, &text, format, &paths, read, &opts).map(Some)

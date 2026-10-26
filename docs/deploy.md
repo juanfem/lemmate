@@ -379,7 +379,9 @@ cannot touch another process — so not the database under `/data`, not the serv
 with `landlock` among the kernel's LSMs (`cat /sys/kernel/security/lsm`), and nothing else: no
 capability, no seccomp profile of your own, no user namespaces — it works under Docker's default
 profile. The server says at startup which it is: `approved Lua filters run confined`, or that
-they cannot run here. To run none at all, set `LEMMATE_DISABLE_FILTERS=true`; for no renders,
+they cannot run here. Since a confined render reaches no network, the server fetches the web
+fonts a vault theme imports from a CDN beforehand (public `https:` hosts, stylesheets and font
+files only) and keeps them in `web-cache/` under the data directory. To run none at all, set `LEMMATE_DISABLE_FILTERS=true`; for no renders,
 `LEMMATE_DISABLE_QUARTO=true` (or build without Quarto, above): renders then answer 501 and the
 app says rendering is unavailable.
 

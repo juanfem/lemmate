@@ -329,8 +329,13 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   `sandbox-exec`, no network and no writes outside the scratch directory, reads not narrowed.
   Elsewhere nothing confines a render, and approved filters do not run unless the server is
   started with `--unsandboxed-filters` (or the relay with `LEMMATE_UNSANDBOXED_FILTERS`).
-  With no network a confined render cannot inline a remote resource — a web font a theme
-  `@import`s from a CDN stays out; vendor such files into the vault instead. The guard filter
+  With no network a confined render cannot fetch a remote resource itself, so the server or
+  relay does it first (`webfonts.rs`, every render): an `https:` stylesheet a vault stylesheet
+  `@import`s is written in its place, and the fonts it names become `data:` URIs — public
+  hosts only, stylesheets and font files only, bounded in size, cached (the server's
+  `web-cache/`, the client's cache folder) so a fetched font renders offline. One that cannot be
+  fetched is commented out: pandoc, failing it, wrote the import back without its `;`, which
+  swallowed the theme's next rule — every reveal.js variable. The guard filter
   runs last of all (`post-finalize`; an approved filter asking for that stage gets
   `pre-finalize`), so it still checks what the approved ones produced.
 - The note is rendered at its vault path in a temporary project, with the attachments it
