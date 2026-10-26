@@ -41,6 +41,7 @@
     onAsk,
     onPresence,
     onStats,
+    onOverflow,
     trail = [],
     onOpenFile,
     onUploadFiles,
@@ -68,6 +69,8 @@
     onPresence?: (names: string[]) => void
     /** Line and word counts for the pane's footer. Debounced with the outline. */
     onStats?: (stats: { lines: number; words: number }) => void
+    /** Whether the page is taller than the view, i.e. it has to be scrolled. */
+    onOverflow?: (overflows: boolean) => void
     /** Where the note lives, folder by folder — drawn on the page above its first line. */
     trail?: string[]
     /** Open one of the note's files in a tab (SPEC §9). Without it there is no Files shelf. */
@@ -330,6 +333,8 @@
       const box = view.scrollDOM.getBoundingClientRect()
       // Down the middle of the scroller, just below its top edge: the first line still on screen.
       onHere?.(view.posAtCoords({ x: box.left + box.width / 2, y: box.top + 8 }, false))
+      // Asked on the same occasions: a resize or a change of height is a geometry change too.
+      onOverflow?.(view.scrollDOM.scrollHeight > view.scrollDOM.clientHeight + 1)
     })
   }
   const headingWatcher = EditorView.updateListener.of((u) => {

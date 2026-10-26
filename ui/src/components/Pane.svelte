@@ -209,9 +209,10 @@
     ['tags', 'Tags', shelves.tags],
     ['backlinks', 'Backlinks', shelves.backlinks],
   ])
-  /** Lines past which a note without headings still gets a margin, for its shelves alone. */
-  const LONG_NOTE = 60
-  let showMargin = $derived(index.length > 0 || stats.lines >= LONG_NOTE)
+  /** Whether the page scrolls: only then are the shelves out of sight, and only then does a
+   *  note without headings get a margin, for them alone. */
+  let overflows = $state(false)
+  let showMargin = $derived(index.length > 0 || overflows)
 
   // What the strip folds away on a narrow pane lives here too, so nothing becomes unreachable
   // by making the window smaller. Delete stays at the bottom, behind a separator: a destructive
@@ -562,6 +563,7 @@
             onPresence={(p) => { presence = p; onPresence?.(p) }}
             onStats={(s) => (stats = s)}
             onShelves={(s) => (shelves = s)}
+            onOverflow={(o) => (overflows = o)}
             bind:jumpToShelf
             mode={pane.mode}
             bind:jumpTo

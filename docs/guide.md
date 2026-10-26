@@ -481,7 +481,7 @@ lives there and underneath it rather than in a column of its own:
   margin (roughly the width of two panes on a laptop). Below the headings, under a rule and in
   small capitals, it lists the shelves at the foot of the page — **Files**, **Tags**,
   **Backlinks**, with their counts — so a long note's are a click away rather than a scroll. A
-  note without headings gets the margin for these alone once it runs past 60 lines.
+  note without headings gets the margin for these alone once it is too long to fit the window.
 - **Tags and backlinks** are two shelves at the foot of the page, after the note. The tags are
   the ones the index found — inline `#tags` first, then whatever `tags:` the front matter
   declares — lower-cased, as they appear in the Tags pane and in search. Click one to list
