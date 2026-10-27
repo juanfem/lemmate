@@ -547,7 +547,7 @@ export function createFileEditor(
   parent: HTMLElement,
   doc: string,
   name: string,
-  opts: { onChange: (text: string) => void; save: () => void; readOnly?: boolean },
+  opts: { onChange: (text: string) => void; save: () => void; onMove?: () => void; readOnly?: boolean },
 ): EditorView {
   const view = new EditorView({
     parent,
@@ -579,6 +579,7 @@ export function createFileEditor(
         ]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) opts.onChange(u.state.doc.toString())
+          if (u.docChanged || u.selectionSet) opts.onMove?.()
         }),
       ],
     }),

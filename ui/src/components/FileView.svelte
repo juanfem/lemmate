@@ -1,6 +1,15 @@
+<script lang="ts" module>
+  import type { StateEffect } from '@codemirror/state'
+
+  /** Where each file was left, as `Editor` keeps it for notes: a tab switch rebuilds this view,
+   *  and coming back should find the file scrolled and with the cursor where it was. Per file
+   *  tab, for the life of the page. */
+  const places = new Map<string, { scroll: StateEffect<unknown>; anchor: number; head: number; length: number }>()
+</script>
+
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte'
-  import type { EditorView } from '@codemirror/view'
+  import { EditorView } from '@codemirror/view'
   import { api, type FileEntry } from '../lib/api.ts'
   import { createFileEditor } from '../lib/editor/setup.ts'
   import { baseName, fileKind, folderOf, humanSize, isText } from '../lib/filetree.ts'
@@ -59,10 +68,31 @@
     baseText = content
     dirty = false
     if (!host) return
-    view = createFileEditor(host, content, baseName(path), {
+    const v = createFileEditor(host, content, baseName(path), {
       onChange: (t) => (dirty = t !== baseText),
       save: () => void save(),
+      onMove: () => remember(v),
     })
+    const place = places.get(fileTab(session.id, path))
+    if (place && v.state.doc.length > 0) {
+      const len = v.state.doc.length
+      v.dispatch({
+        selection: { anchor: Math.min(place.anchor, len), head: Math.min(place.head, len) },
+        // The snapshot names a document position; a shorter text may no longer hold it.
+        effects: len >= place.length ? place.scroll : EditorView.scrollIntoView(Math.min(place.head, len), { y: 'center' }),
+      })
+    }
+    // Only now: the restore above would otherwise be remembered before its scroll has landed.
+    view = v
+    v.scrollDOM.addEventListener('scroll', () => remember(v), { passive: true })
+  }
+
+  /** Note where the reader is, for `places`. Kept as it changes rather than read on the way
+   *  out: by `onDestroy` the editor is already off the page and its scroller reads 0. */
+  function remember(v: EditorView) {
+    if (v !== view || v.state.doc.length === 0) return
+    const { anchor, head } = v.state.selection.main
+    places.set(fileTab(session.id, path), { scroll: v.scrollSnapshot(), anchor, head, length: v.state.doc.length })
   }
 
   // Load once the listing names the file; afterwards, follow a change made elsewhere only
