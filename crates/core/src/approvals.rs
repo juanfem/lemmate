@@ -33,17 +33,15 @@ impl DeviceApprovals {
         self.server.iter().chain(&self.device).map(|a| a.hash.clone()).collect()
     }
 
-    /// After a version of the file at `path` went on the front of a list: keep only the newest
-    /// [`FILTER_VERSIONS_KEPT`] of it there, as the server does with its own.
-    pub fn keep_latest(&mut self, path: &str) {
+    /// Keep only the newest [`FILTER_VERSIONS_KEPT`] versions of each file in each list (both
+    /// newest first), as the server does with its own.
+    pub fn trim(&mut self) {
         for list in [&mut self.server, &mut self.device] {
-            let mut seen = 0;
+            let mut seen = std::collections::HashMap::<String, usize>::new();
             list.retain(|a| {
-                if a.path != path {
-                    return true;
-                }
-                seen += 1;
-                seen <= FILTER_VERSIONS_KEPT
+                let n = seen.entry(a.path.clone()).or_default();
+                *n += 1;
+                *n <= FILTER_VERSIONS_KEPT
             });
         }
     }
@@ -74,9 +72,15 @@ impl ApprovalFiles {
     }
 
     /// A vault's approvals; none when there is no file, or one that cannot be read — which
-    /// runs fewer filters, never more.
+    /// runs fewer filters, never more. Trimmed to [`FILTER_VERSIONS_KEPT`] per file, for a file
+    /// written before there was a limit.
     pub fn load(&self, vault: VaultId) -> DeviceApprovals {
-        std::fs::read(self.path(vault)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let mut approvals: DeviceApprovals = std::fs::read(self.path(vault))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        approvals.trim();
+        approvals
     }
 
     pub fn save(&self, vault: VaultId, approvals: &DeviceApprovals) -> std::io::Result<()> {
@@ -124,12 +128,20 @@ mod tests {
         let mut x = DeviceApprovals { server: vec![approval("s1")], ..Default::default() };
         for h in ["v1", "v2", "v3"] {
             x.device.insert(0, approval(h));
-            x.keep_latest("a.lua");
+            x.trim();
         }
         x.device.insert(1, approval_at("b1", "b.lua"));
-        x.keep_latest("a.lua");
+        x.trim();
         let device: Vec<&str> = x.device.iter().map(|a| a.hash.as_str()).collect();
         assert_eq!(device, ["v3", "b1", "v2"], "v1 is gone, b.lua is not counted");
         assert_eq!(x.server, [approval("s1")], "the server's copy counts on its own");
+
+        // A file written before the limit is trimmed as it is read.
+        let dir = tempfile::tempdir().unwrap();
+        let files = ApprovalFiles::new(dir.path());
+        let vault = VaultId::new();
+        let old = DeviceApprovals { device: ["v3", "v2", "v1"].map(approval).to_vec(), ..Default::default() };
+        files.save(vault, &old).unwrap();
+        assert_eq!(files.load(vault).hashes(), ["v3".to_owned(), "v2".to_owned()].into());
     }
 }

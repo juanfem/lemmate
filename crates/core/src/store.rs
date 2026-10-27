@@ -13,7 +13,7 @@ use crate::ids::{DocId, NoteId, VaultId};
 use crate::markdown::{self, NoteIndex};
 use crate::vault_doc::VaultDoc;
 
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// `meta` key holding the [`markdown::INDEX_VERSION`] the derived rows were written with.
 const INDEX_VERSION_KEY: &str = "index_version";
@@ -449,6 +449,17 @@ impl Store {
                      UPDATE access_tokens SET full_access = 1 WHERE name LIKE 'Lemmate desktop on %';",
                 )?;
             }
+            // v12: a filter keeps its last FILTER_VERSIONS_KEPT approvals. Rows from before were
+            // updated in place on re-approval, so their time, not their rowid, says which is newer.
+            conn.execute(
+                "DELETE FROM filter_approvals WHERE rowid IN (
+                     SELECT rowid FROM (
+                         SELECT rowid, ROW_NUMBER() OVER (
+                             PARTITION BY vault_id, path ORDER BY approved_ms DESC, rowid DESC) AS n
+                         FROM filter_approvals)
+                     WHERE n > ?1)",
+                params![FILTER_VERSIONS_KEPT as i64],
+            )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })
@@ -2578,6 +2589,33 @@ mod tests {
         s.approve_filter(a, "h2", "y.lua", "u1").unwrap();
         s.delete_vault(a).unwrap();
         assert!(s.filter_approvals(a).unwrap().is_empty(), "a vault's approvals go with it");
+    }
+
+    #[test]
+    fn opening_an_older_database_prunes_its_filter_approvals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lemmate.db");
+        let vault = VaultId::new();
+        {
+            let s = Store::open(&path).unwrap();
+            // As v11 left them: one row per version, any number of them, in no rowid order.
+            for (hash, file, ms) in
+                [("v3", "x.lua", 30), ("v1", "x.lua", 10), ("v2", "x.lua", 20), ("y1", "y.lua", 5)]
+            {
+                s.conn
+                    .execute(
+                        "INSERT INTO filter_approvals VALUES (?1, ?2, ?3, 'u1', ?4)",
+                        params![vault.to_string(), hash, file, ms],
+                    )
+                    .unwrap();
+            }
+            s.conn.pragma_update(None, "user_version", 11).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let mut hashes: Vec<String> =
+            s.filter_approvals(vault).unwrap().into_iter().map(|a| a.hash).collect();
+        hashes.sort();
+        assert_eq!(hashes, ["v2", "v3", "y1"], "the oldest version of x.lua is gone");
     }
 
     #[test]

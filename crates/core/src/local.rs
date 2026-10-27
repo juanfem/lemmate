@@ -2355,7 +2355,7 @@ async fn approve_filter(
                     ApprovalOut { approval, source: "device" }
                 }
             };
-            a.keep_latest(&out.approval.path);
+            a.trim();
             out
         })
     })
