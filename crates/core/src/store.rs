@@ -254,6 +254,11 @@ pub struct TokenGrant<'a> {
     pub expires_ms: Option<i64>,
 }
 
+/// How many approved versions of one Lua file a vault keeps: the one just approved and the one
+/// before it, so undoing the latest edit runs again without another review. An older version
+/// of the file is unapproved once a newer one is approved twice over.
+pub const FILTER_VERSIONS_KEPT: usize = 2;
+
 /// A Lua filter approved to run in a vault's renders ([`Store::approve_filter`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FilterApproval {
@@ -1423,7 +1428,8 @@ impl Store {
     // ---- Approved Lua filters (SPEC §5.6) ---------------------------------------------------
 
     /// Approve these bytes (by `hash`) to run in `vault`'s renders; approving them again
-    /// records the newer path, approver and time.
+    /// records the newer path, approver and time. Older versions of the file at `path` beyond
+    /// [`FILTER_VERSIONS_KEPT`] are revoked.
     pub fn approve_filter(
         &mut self,
         vault: VaultId,
@@ -1433,10 +1439,17 @@ impl Store {
     ) -> Result<FilterApproval> {
         let now = now_ms();
         self.conn.execute(
-            "INSERT INTO filter_approvals (vault_id, hash, path, approved_by, approved_ms) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(vault_id, hash) DO UPDATE SET path = excluded.path, approved_by = excluded.approved_by,
-                                                       approved_ms = excluded.approved_ms",
+            // REPLACE, not an update in place: a fresh row gets the highest rowid, so rowid
+            // order is approval order, ties on the clock or not.
+            "INSERT OR REPLACE INTO filter_approvals (vault_id, hash, path, approved_by, approved_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![vault.to_string(), hash, path, by, now],
+        )?;
+        self.conn.execute(
+            "DELETE FROM filter_approvals WHERE vault_id = ?1 AND path = ?2 AND hash NOT IN (
+                 SELECT hash FROM filter_approvals WHERE vault_id = ?1 AND path = ?2
+                 ORDER BY rowid DESC LIMIT ?3)",
+            params![vault.to_string(), path, FILTER_VERSIONS_KEPT as i64],
         )?;
         let by_name = self.user_by_id(by)?.map(|u| u.display_name);
         Ok(FilterApproval {
@@ -1452,7 +1465,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT f.hash, f.path, COALESCE(u.display_name, f.approved_by), f.approved_ms
              FROM filter_approvals f LEFT JOIN users u ON u.id = f.approved_by
-             WHERE f.vault_id = ?1 ORDER BY f.approved_ms DESC, f.path",
+             WHERE f.vault_id = ?1 ORDER BY f.rowid DESC",
         )?;
         let rows = stmt
             .query_map(params![vault.to_string()], |r| {
@@ -2565,6 +2578,29 @@ mod tests {
         s.approve_filter(a, "h2", "y.lua", "u1").unwrap();
         s.delete_vault(a).unwrap();
         assert!(s.filter_approvals(a).unwrap().is_empty(), "a vault's approvals go with it");
+    }
+
+    #[test]
+    fn a_filter_keeps_its_last_two_approved_versions() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (a, b) = (VaultId::new(), VaultId::new());
+        let hashes = |s: &Store, v| {
+            let mut h: Vec<String> = s.filter_approvals(v).unwrap().into_iter().map(|a| a.hash).collect();
+            h.sort();
+            h
+        };
+        for h in ["v1", "v2", "v3"] {
+            s.approve_filter(a, h, "lua/x.lua", "u1").unwrap();
+        }
+        s.approve_filter(a, "other", "lua/y.lua", "u1").unwrap();
+        s.approve_filter(b, "v1", "lua/x.lua", "u1").unwrap();
+        assert_eq!(hashes(&s, a), ["other", "v2", "v3"], "v1 is gone; another file is not counted");
+        assert_eq!(hashes(&s, b), ["v1"], "nor another vault");
+        // Reverting to v2 and approving it again keeps v3, the version before it now.
+        s.approve_filter(a, "v2", "lua/x.lua", "u1").unwrap();
+        assert_eq!(hashes(&s, a), ["other", "v2", "v3"]);
+        s.approve_filter(a, "v4", "lua/x.lua", "u1").unwrap();
+        assert_eq!(hashes(&s, a), ["other", "v2", "v4"]);
     }
 
     #[test]

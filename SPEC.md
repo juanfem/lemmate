@@ -321,6 +321,10 @@ case-insensitive and hierarchical. Rename tag = rewrite all occurrences.
   server's list as last fetched (refreshed on each render, so approved filters still run
   offline) and the device's own approvals, for a standalone vault or one whose server refused
   the device's token. `--disable-filters` turns them all off on a server.
+- **Two versions per file.** Approving a Lua file keeps the version just approved and the
+  one approved before it at the same path, so reverting the latest edit runs again without a
+  review; older ones are revoked (`FILTER_VERSIONS_KEPT`). The relay trims its two lists the
+  same way, each on its own.
 - **Approved filters run confined** (`sandbox.rs`). Linux: Landlock and a seccomp filter on
   the thread that starts Quarto — reads only the system's folders, the Quarto install and
   the render's scratch directory, writes only the latter, opens no socket, signals and

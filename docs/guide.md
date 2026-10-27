@@ -1053,6 +1053,9 @@ code (and, when an earlier version of the same file was approved, what changed s
 - An approval is for **those exact bytes**, in **this vault**. Edit one character of the file
   and it is a new file, to be reviewed again. The same file in another vault is approved
   separately.
+- Only the **last two** approved versions of a file are kept: approving a new one forgets the
+  one before last. Undo your latest change and the file runs again without a review; go back
+  further and it is reviewed again.
 - On a server, only an **owner** of the vault can approve or revoke: in the web app, or in the
   desktop app signed in with a **full-access** token — which is what it gets when you allow it
   in the browser. A plain (limited) access token — the kind to give an agent, MCP or a script —

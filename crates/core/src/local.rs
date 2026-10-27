@@ -2344,7 +2344,7 @@ async fn approve_filter(
         });
         files.update(vault_id, |a| {
             a.device.retain(|d| d.hash != approval.hash);
-            match shared {
+            let out = match shared {
                 Some(on_server) => {
                     a.server.retain(|d| d.hash != on_server.hash);
                     a.server.insert(0, on_server.clone());
@@ -2354,7 +2354,9 @@ async fn approve_filter(
                     a.device.insert(0, approval.clone());
                     ApprovalOut { approval, source: "device" }
                 }
-            }
+            };
+            a.keep_latest(&out.approval.path);
+            out
         })
     })
     .await
