@@ -3,6 +3,7 @@
 
 import { GFM, parser, type BlockContext, type InlineContext, type Line, type MarkdownExtension } from '@lezer/markdown'
 import { LanguageDescription } from '@codemirror/language'
+import type { Input } from '@lezer/common'
 import { Tag, styleTags, tags as t } from '@lezer/highlight'
 
 export const wikiLinkTag = Tag.define()
@@ -69,6 +70,28 @@ const blockMath = {
 }
 
 /**
+ * The YAML front matter: a `---` on the note's first line, closed by `---` or `...` within its
+ * first 200 lines — as `frontMatterRange` in the live preview reads it. Its own node, so a
+ * `# comment` in it is no heading and nothing in it is markdown. Unclosed, it is a rule.
+ */
+const frontMatter = {
+  name: 'FrontMatter',
+  parse(cx: BlockContext, line: Line): boolean {
+    if (cx.lineStart !== 0 || line.text.trim() !== '---') return false
+    // The closing line has to be found before a line is taken: lezer cannot give lines back.
+    const input = (cx as unknown as { input: Input }).input
+    const head = input.read(0, Math.min(input.length, 64 * 1024)).split('\n').slice(1, 200)
+    const close = head.findIndex((l) => l.trim() === '---' || l.trim() === '...')
+    if (close < 0) return false
+    let end = line.text.length
+    for (let n = 0; n <= close && cx.nextLine(); n++) end = cx.lineStart + line.text.length
+    cx.addElement(cx.elt('FrontMatter', 0, end))
+    cx.nextLine()
+    return true
+  },
+}
+
+/**
  * The language a fence's info string names: `rust`, Quarto's `{python}`, Pandoc's
  * `{.haskell .numberLines}` — the first word, braces and dot stripped. Empty for a bare fence.
  */
@@ -89,13 +112,17 @@ export const noteSyntax: MarkdownExtension = [
       { name: 'NoteTag', style: noteTagTag },
       { name: 'InlineMath', style: mathTag },
       { name: 'BlockMath', style: mathTag, block: true },
+      { name: 'FrontMatter', block: true },
     ],
     parseInline: [
       { name: 'WikiLink', parse: parseWikiLink, before: 'Link' },
       { name: 'NoteTag', parse: parseTag },
       { name: 'InlineMath', parse: parseInlineMath, before: 'Escape' },
     ],
-    parseBlock: [{ ...blockMath, before: 'FencedCode' }],
+    parseBlock: [
+      { ...frontMatter, before: 'LinkReference' },
+      { ...blockMath, before: 'FencedCode' },
+    ],
     props: [styleTags({ 'WikiLink WikiEmbed': wikiLinkTag, NoteTag: noteTagTag, 'InlineMath BlockMath': mathTag })],
   },
 ]

@@ -22,6 +22,17 @@ test('wikilinks, embeds, tags, math', () => {
   assert.ok(names('- [ ] todo\n').includes('TaskMarker'))
 })
 
+test('front matter is one block: a comment in it is no heading, and an unclosed one is a rule', () => {
+  const tree = p.parse('---\ntitle: T\n# a comment\nfilters: [a.lua]\n---\n# Heading\n')
+  const fm = tree.topNode.firstChild!
+  assert.equal(fm.name, 'FrontMatter')
+  assert.deepEqual([fm.from, fm.to], [0, 45])
+  assert.deepEqual(names('---\n# a comment\n...\n# Heading\n').filter((n) => n.startsWith('ATXHeading')), ['ATXHeading1'])
+  assert.ok(!names('---\n# not front matter\n').includes('FrontMatter'))
+  assert.ok(names('---\n# not front matter\n').includes('ATXHeading1'))
+  assert.ok(!names('text\n\n---\nx: 1\n---\n').includes('FrontMatter'), 'only on the first line')
+})
+
 test('a fence names its language in any of the usual spellings', async () => {
   const { codeLanguage, codeLanguageName } = await import('../src/lib/editor/syntax.ts')
   const { languages } = await import('@codemirror/language-data')
