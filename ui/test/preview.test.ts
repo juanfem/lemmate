@@ -3,9 +3,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EditorSelection, EditorState } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { EditorView, type DecorationSet } from '@codemirror/view'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { boxNear, calloutSpans, livePreview, toggleTaskAt, webHref } from '../src/lib/editor/livePreview.ts'
+import { boxNear, calloutSpans, livePreview, luaRefs, toggleTaskAt, webHref } from '../src/lib/editor/livePreview.ts'
 import { noteSyntax } from '../src/lib/editor/syntax.ts'
 import { imageSrc } from '../src/lib/linktarget.ts'
 
@@ -125,4 +125,54 @@ test('a tap beside a task box still means it, and the nearest box wins', () => {
   assert.equal(boxNear(boxes, 30, 70, 12), -1)
   assert.equal(boxNear(boxes, 80, 10, 12), -1)
   assert.equal(boxNear([], 0, 0, 12), -1)
+})
+
+test('the Lua files a front matter’s filter lists name are found, and nothing else', () => {
+  const body = [
+    'title: x.lua',
+    'filters: [a.lua, "b c.lua", quarto]',
+    'shortcodes:',
+    '- s.lua',
+    '  - path: ../lua/p.lua',
+    '    at: post-render',
+    '  - {path: q.lua, type: lua}',
+    '  # gone.lua',
+    'format:',
+    '  html:',
+    '    filters:',
+    '      - fmt.lua # not.lua',
+    '    theme: t.lua',
+    '',
+  ].join('\n')
+  const refs = luaRefs(body)
+  assert.deepEqual(
+    refs.map((r) => r.href),
+    ['a.lua', 'b c.lua', 's.lua', '../lua/p.lua', 'q.lua', 'fmt.lua'],
+  )
+  for (const r of refs) assert.equal(body.slice(r.from, r.to), r.href)
+  assert.deepEqual(luaRefs("filters: ['x.lua']\n").map((r) => r.href), ['x.lua'])
+})
+
+test('open front matter makes its Lua filters links; collapsed, it has none', () => {
+  const doc = '---\ntitle: T\nfilters:\n  - lua/f.lua\n---\n\nBody'
+  const links = (anchor: number) => {
+    const state = EditorState.create({
+      doc,
+      selection: { anchor },
+      extensions: [
+        markdown({ base: markdownLanguage, extensions: noteSyntax }),
+        livePreview({ openLink: () => {}, embedUrl: () => undefined, openUrl: () => {} }),
+      ],
+    })
+    const hrefs: string[] = []
+    for (const set of decos(state) as DecorationSet[]) {
+      set.between(0, doc.length, (from, to, d) => {
+        const href = d.spec.attributes?.['data-href']
+        if (href) hrefs.push(`${href}@${doc.slice(from, to)}`)
+      })
+    }
+    return hrefs
+  }
+  assert.deepEqual(links(doc.indexOf('title')), ['lua/f.lua@lua/f.lua'])
+  assert.deepEqual(links(doc.length), [])
 })

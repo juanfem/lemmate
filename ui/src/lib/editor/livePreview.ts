@@ -695,6 +695,52 @@ function frontMatterSummary(body: string): string {
   return `${shown.join(' · ')} · ${keys.length} ${keys.length === 1 ? 'property' : 'properties'}`
 }
 
+/** A Lua file named in the front matter: where it is written in the body, and the path as written. */
+export interface LuaRef {
+  from: number
+  to: number
+  href: string
+}
+
+/**
+ * The Lua files the front matter's `filters:` and `shortcodes:` lists name — at the top or
+ * under a format, in flow (`[a.lua]`) or block style, bare or as a `path:` — by their offsets
+ * in `body`. Paths are as written, relative to the note, as the render reads them (SPEC §5.6).
+ */
+export function luaRefs(body: string): LuaRef[] {
+  const out: LuaRef[] = []
+  // Within a list: the indent of its key; a line indented no further ends it, unless it is
+  // one of the list's own `- ` items, which YAML lets sit level with the key.
+  let listIndent = -1
+  let at = 0
+  for (const line of body.split('\n')) {
+    const start = at
+    at += line.length + 1
+    const indent = /^ */u.exec(line)![0].length
+    const key = /^ *(filters|shortcodes): */u.exec(line)
+    let scan = -1
+    if (key) {
+      listIndent = indent
+      scan = key[0].length
+    } else if (listIndent >= 0 && line.trim() !== '' && !line.trimStart().startsWith('#')) {
+      if (indent > listIndent || (indent === listIndent && /^ *- /u.test(line))) scan = indent
+      else listIndent = -1
+    }
+    if (scan < 0) continue
+    // A comment runs from a `#` after a space to the end of the line.
+    const text = line.slice(0, scan) + line.slice(scan).replace(/(^|\s)#.*$/u, '')
+    // A path in quotes may hold spaces; a bare one ends at the first.
+    const token = /(?<=^|[\s[{,])(?:"([^"]+\.lua)"|'([^']+\.lua)'|([^\s"'[\]{},#]+\.lua))(?=$|[\s,\]}])/gu
+    token.lastIndex = scan
+    for (let m; (m = token.exec(text)); ) {
+      const href = m[1] ?? m[2] ?? m[3]!
+      const from = start + m.index + (m[3] === undefined ? 1 : 0)
+      out.push({ from, to: from + href.length, href })
+    }
+  }
+  return out
+}
+
 /** A callout: its opening and closing fence lines (1-based), and what its title bar says. */
 export interface CalloutSpan {
   open: number
@@ -777,6 +823,13 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
 
   if (fm && !revealed(state, fm.from, fm.to)) {
     push(fm.from, fm.to, Decoration.replace({ widget: new FrontMatterWidget(frontMatterSummary(fm.body)), block: true }))
+  } else if (fm && opts.openUrl) {
+    // Open front matter: the Lua filters it names are links to their files, followed with a
+    // click off the cursor's line as any link is.
+    const base = state.doc.line(1).to + 1
+    for (const r of luaRefs(fm.body)) {
+      push(base + r.from, base + r.to, linkMark(r.href, !revealed(state, base + r.from, base + r.from)))
+    }
   }
 
   // `^id` block markers are addresses for `![[note#^id]]`, not prose: off the cursor they go.
