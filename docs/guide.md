@@ -445,7 +445,9 @@ the note you are reading is on the note's own page rather than in a panel beside
 top: **search** (the palette, `Ctrl+K`), then the views — **Files**, **Tags**, **Starred**,
 **Attachments**, **Trash** — then **today's daily note** and **new note** (in the vault you are
 on). At the foot, the status dot and, when you are signed in, your initial, which opens the
-account menu. Searching is not a view here — that is the palette.
+account menu. Searching is not a view here — that is the palette. Click the view that is
+already showing to fold the sidebar down to its rail, and any view to bring it back (*Hide/Show
+the sidebar* in the palette does the same). The main window remembers which it was.
 
 - **Files** lists folders and their notes. Rows carry the date they last changed, and the list
   header switches between **Recent** and **Name** order. Where the server or relay cannot
@@ -617,11 +619,11 @@ shares it, so it always reaches the note you copied.
 
 **A note in its own window.** Right-click a tab, or open `⋯`, and choose *Move to new window*
 (*Move tab to new window* in the palette). The tab leaves its pane and the note opens in a window
-with no sidebar — another app window in the desktop app, a popup in a browser. Links, the palette
-and the other tabs you open there all work as usual; the window just keeps no layout of its own,
-so closing it loses nothing and the main window's panes are restored as you left them. The window
-closes by itself when its last tab does. Not offered
-on a phone, where there is no second window to put it in.
+with the sidebar folded to its rail — another app window in the desktop app, a popup in a
+browser. Links, the palette and the other tabs you open there all work as usual; the window
+just keeps no layout of its own, so closing it loses nothing and the main window's panes are
+restored as you left them. The window closes by itself when its last tab does. Not offered on a
+phone, where there is no second window to put it in.
 
 **Version history** opens in a pane of its own — the clock on the tab strip, `Ctrl+Shift+R`, or
 *Show version history* in the palette. It splits right where there is room and reuses the last

@@ -162,7 +162,8 @@
   const ULID = '[0-9A-HJKMNP-TV-Z]{26}'
   /**
    * A window a tab was moved out into: the whole workspace behind it, so links, the palette and
-   * other vaults all still work, but no sidebar and — above all — no say in the saved layout.
+   * other vaults all still work, the sidebar folded to its rail, and — above all — no say in the
+   * saved layout.
    * Every window on this origin shares one `localStorage`, and a window holding one note must
    * not replace the main window's panes with it. Fixed for the life of the page: the route it
    * writes back keeps the `w`.
@@ -324,6 +325,7 @@
     sidebar === 'tags' || sidebar === 'bookmarks' ? sidebar : trashOpen ? 'trash' : attachmentsOpen ? 'attachments' : 'files',
   )
   function show(v: View) {
+    collapsed = false
     if (v === 'tags' || v === 'bookmarks') {
       sidebar = v
       return
@@ -344,6 +346,7 @@
   function filterByTag(tag: string) {
     tagFilter = tag
     sidebar = 'tags'
+    collapsed = false
     // On a phone the sidebar is a drawer, and the answer is inside it.
     if (narrow.current) drawer = true
   }
@@ -444,6 +447,36 @@
   $effect(() => {
     if (palette !== null && narrow.current) drawer = false
   })
+
+  // ---- collapsed: only the rail is left, and picking a view from it brings the panel back
+  //
+  // The main window remembers it. A detached window starts with it folded — it holds a note or
+  // two, and the editor is what it is for — and keeps what you do with it to itself, since every
+  // window shares one `localStorage`. On a phone the drawer already does this job.
+  let collapsed = $state(detached || loadCollapsed())
+  function loadCollapsed(): boolean {
+    try {
+      return localStorage.getItem('lemmate.sidebar.collapsed') === '1'
+    } catch {
+      return false
+    }
+  }
+  function toggleSidebar() {
+    collapsed = !collapsed
+    if (detached) return
+    try {
+      localStorage.setItem('lemmate.sidebar.collapsed', collapsed ? '1' : '0')
+    } catch {
+      /* private mode */
+    }
+  }
+  /** Folded as drawn: a phone has its drawer instead, and a shared note on its own no rail. */
+  let folded = $derived(collapsed && !narrow.current && !solo)
+  /** A rail button: another view opens it; the one already showing folds the sidebar away. */
+  function pick(v: View) {
+    if (v === view && !narrow.current) toggleSidebar()
+    else show(v)
+  }
 
   // ---- sidebar width: drag the divider, double-click it to go back to the default
   const SIDE_MIN = 180
@@ -942,6 +975,7 @@
     { id: 'daily-next', label: 'Next daily note', shortcut: 'Alt+]', run: () => stepDaily(1) },
     { id: 'calendar', label: 'Daily notes calendar and settings…', run: openCalendar },
     { id: 'search', label: 'Search all vaults', shortcut: 'Ctrl+Shift+F', run: () => (palette = '') },
+    { id: 'sidebar', label: collapsed ? 'Show the sidebar' : 'Hide the sidebar', run: toggleSidebar },
     { id: 'files', label: 'Show files', run: () => show('files') },
     { id: 'tags', label: 'Show tags', run: () => show('tags') },
     { id: 'bookmarks', label: 'Show bookmarks', run: () => show('bookmarks') },
@@ -1436,241 +1470,247 @@
 {:else if !workspace && !solo}
   <main class="welcome"><h1>Lemmate</h1><p class="muted">Loading…</p></main>
 {:else}
-  <div class="layout" class:narrow={narrow.current} class:detached style:--side="{sideWidth}px">
-    {#if detached && denied}
+  <div class="layout" class:narrow={narrow.current} class:collapsed={folded} style:--side="{sideWidth}px">
+    <!-- With the panel folded away its own refusal notice would be too, so it moves up here. -->
+    {#if denied && folded}
       <div class="denied">
         Permission denied by the server ({denied.reason}) — your last change was not saved.
         <button class="link" onclick={() => location.reload()}>Reload</button>
         <button class="link" onclick={() => { if (workspace) workspace.denied = null }}>Dismiss</button>
       </div>
     {/if}
-    {#if !detached}
-      <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
-           two shortcuts (new note, commands) that have no keyboard to be reached from. -->
-      <header class="topbar">
-        <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
-        <span class="here" title={activePath}>{activeTitle}</span>
-        {#if panes.length > 1}
-          <button class="panes" onclick={paneMenu} aria-haspopup="menu" aria-label="Pane {focusedPane + 1} of {panes.length} — switch pane" title="Switch pane">
-            <Icon name="splitright" size={14} />
-            {focusedPane + 1}/{panes.length}
-          </button>
-        {/if}
-        <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
-        {#if !solo}
-          <button class="icon" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
-        {/if}
-        <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands"><Icon name="search" size={17} /></button>
-        <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
-      </header>
-      {#if narrow.current && drawer}
-        <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
+    <!-- Only drawn when the sidebar is a drawer: it carries the handle that opens it, and the
+         two shortcuts (new note, commands) that have no keyboard to be reached from. -->
+    <header class="topbar">
+      <button class="icon" onclick={() => (drawer = !drawer)} aria-expanded={drawer} aria-label="Show the sidebar">☰</button>
+      <span class="here" title={activePath}>{activeTitle}</span>
+      {#if panes.length > 1}
+        <button class="panes" onclick={paneMenu} aria-haspopup="menu" aria-label="Pane {focusedPane + 1} of {panes.length} — switch pane" title="Switch pane">
+          <Icon name="splitright" size={14} />
+          {focusedPane + 1}/{panes.length}
+        </button>
       {/if}
-      <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
-           screen reader to wander into. -->
-      <aside class:open={drawer} inert={narrow.current && !drawer}>
-        <!-- The rail: every view the sidebar has, one click each, and the two things you reach
-             for from anywhere (search, a new note). It replaced a search box that was a button in
-             disguise and a row of tabs: the box took a row to say "press Ctrl K", and Attachments
-             and Trash were hidden in the Files toolbar. On a phone it is the same rail, inside
-             the drawer. A shared note on its own has no workspace for any of it to act on. -->
-        {#if !solo}
-          <nav class="rail" aria-label="Sidebar">
-            <button onclick={() => (palette = '')} title="Search and commands (Ctrl K)" aria-label="Search and commands">
-              <Icon name="search" size={18} />
-            </button>
-            <hr />
-            <div class="views" role="tablist" aria-orientation="vertical">
-              {#each RAIL as r (r.id)}
-                <button class:on={view === r.id} role="tab" aria-selected={view === r.id} onclick={() => show(r.id)} title={r.label} aria-label={r.label}>
-                  <Icon name={r.icon} size={18} />
-                </button>
-              {/each}
-            </div>
-            <hr />
-            <!-- A phone has the daily note in its top bar, a tap away without the drawer. -->
-            <button class="daily" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} title="Today's daily note — opened, or created from the daily template (Ctrl+Shift+D). Right-click for the calendar and settings." aria-label="Today's daily note">
-              <Icon name="calendar" size={18} />
-            </button>
-            <button onclick={() => session && createInVault(session.id)} disabled={!session} title="New note" aria-label="New note">
-              <Icon name="newnote" size={18} />
-            </button>
-            <span class="grow"></span>
-            <span class="dot" class:offline={status !== 'online'} role="status" title={statusLine} aria-label={statusLine}></span>
-            <!-- Who you are, and the way back out. Both were commands and nothing else, and a
-                 session you can only end by knowing what to type is a session you cannot end.
-                 Absent standalone and with `--no-auth`, where there is no account to leave; on
-                 the desktop the relay asks the server who its token belongs to. -->
-            {#if me && me.id !== 'local'}
+      <span class="dot" class:offline={status !== 'online'} title={statusLine}></span>
+      {#if !solo}
+        <button class="icon" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} aria-label="Today's daily note"><Icon name="calendar" size={17} /></button>
+      {/if}
+      <button class="icon" onclick={() => (palette = '')} aria-label="Search and commands"><Icon name="search" size={17} /></button>
+      <button class="icon" onclick={() => (palette = '>')} aria-label="Commands">⌘</button>
+    </header>
+    {#if narrow.current && drawer}
+      <div class="scrim" onclick={() => (drawer = false)} role="presentation"></div>
+    {/if}
+    <!-- Off-screen the drawer is not just invisible but `inert`: no tab stops, nothing for a
+         screen reader to wander into. -->
+    <aside class:open={drawer} inert={narrow.current && !drawer}>
+      <!-- The rail: every view the sidebar has, one click each, and the two things you reach
+           for from anywhere (search, a new note). It replaced a search box that was a button in
+           disguise and a row of tabs: the box took a row to say "press Ctrl K", and Attachments
+           and Trash were hidden in the Files toolbar. On a phone it is the same rail, inside
+           the drawer. A shared note on its own has no workspace for any of it to act on. -->
+      {#if !solo}
+        <nav class="rail" aria-label="Sidebar">
+          <button onclick={() => (palette = '')} title="Search and commands (Ctrl K)" aria-label="Search and commands">
+            <Icon name="search" size={18} />
+          </button>
+          <hr />
+          <div class="views" role="tablist" aria-orientation="vertical">
+            {#each RAIL as r (r.id)}
               <button
-                class="avatar"
-                title="{me.display_name} — {me.email}"
-                aria-label="Account: {me.display_name}"
-                aria-haspopup="menu"
-                onclick={(e) => {
-                  // Anchored to the button, not to the pointer: this one is reached from the
-                  // keyboard too, and a menu that lands in the corner of the window because the
-                  // click carried no coordinates is not a menu about this row.
-                  const r = e.currentTarget.getBoundingClientRect()
-                  menu = {
-                    x: r.right + 4,
-                    y: r.bottom,
-                    // Account settings are the server's pages; the desktop's relay does not carry
-                    // them, so there the menu is who you are and the way out.
-                    items: onRelay
-                      ? [
-                          { label: `${me?.email ?? ""} on ${relayServer.replace(/^https?:\/\//u, '')}`, run: () => {}, disabled: true },
-                          ...(shell?.openExternal ? [{ label: 'Account settings (opens the browser)…', run: () => openOnServer('#/account') }] : []),
-                          // Only the desktop shell can sign out; `lemmate serve` is signed in by its flags.
-                          ...(canConnect ? [{ separator: true, label: '' }, { label: 'Sign out', run: signOut, danger: true }] : []),
-                        ]
-                      : [
-                          { label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
-                          { separator: true, label: '' },
-                          { label: 'Sign out', run: signOut, danger: true },
-                        ],
-                  }
-                }}
+                class:on={view === r.id && !collapsed}
+                role="tab"
+                aria-selected={view === r.id && !collapsed}
+                onclick={() => pick(r.id)}
+                title={view === r.id && !collapsed && !narrow.current ? `${r.label} — click again to hide the sidebar` : r.label}
+                aria-label={r.label}
               >
-                {initial(me.display_name)}
+                <Icon name={r.icon} size={18} />
               </button>
-            {/if}
-          </nav>
-        {/if}
-        <div class="panel">
-          {#if solo}
-            <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
-          {:else if sidebar === 'files'}
-            <FilesPane
-              bind:revealFolder
-              {vaults}
-              activeId={active}
-              activeVault={session?.id ?? null}
-              onOpen={open}
-              bind:trash={trashOpen}
-              bind:attachments={attachmentsOpen}
-              actions={{
-                onCreateIn: createInFolder,
-                onRenameFolder: renameFolder,
-                onDeleteFolder: deleteFolder,
-                onCreateInVault: createInVault,
-                onRenameVault: renameVault,
-                onVaultMembers: serverFeatures ? (v: string) => (membersOf = v) : undefined,
-                onImportInto: (v) => (importInto = v),
-                onNewVault: newVault,
-                onRenameNote: renameNote,
-                onTrashNotes: trashNotes,
-                onOpenInTab: openInNewTab,
-                onOpenInPane: openInNewPane,
-                onShareNote: serverFeatures ? (id: string) => (open(id), (shareOpen = true)) : undefined,
-                onBookmarkNote: bookmarkNote,
-                onMove: moveDropped,
+            {/each}
+          </div>
+          <hr />
+          <!-- A phone has the daily note in its top bar, a tap away without the drawer. -->
+          <button class="daily" onclick={() => daily()} oncontextmenu={(e) => (e.preventDefault(), openCalendar())} title="Today's daily note — opened, or created from the daily template (Ctrl+Shift+D). Right-click for the calendar and settings." aria-label="Today's daily note">
+            <Icon name="calendar" size={18} />
+          </button>
+          <button onclick={() => session && createInVault(session.id)} disabled={!session} title="New note" aria-label="New note">
+            <Icon name="newnote" size={18} />
+          </button>
+          <span class="grow"></span>
+          <span class="dot" class:offline={status !== 'online'} role="status" title={statusLine} aria-label={statusLine}></span>
+          <!-- Who you are, and the way back out. Both were commands and nothing else, and a
+               session you can only end by knowing what to type is a session you cannot end.
+               Absent standalone and with `--no-auth`, where there is no account to leave; on
+               the desktop the relay asks the server who its token belongs to. -->
+          {#if me && me.id !== 'local'}
+            <button
+              class="avatar"
+              title="{me.display_name} — {me.email}"
+              aria-label="Account: {me.display_name}"
+              aria-haspopup="menu"
+              onclick={(e) => {
+                // Anchored to the button, not to the pointer: this one is reached from the
+                // keyboard too, and a menu that lands in the corner of the window because the
+                // click carried no coordinates is not a menu about this row.
+                const r = e.currentTarget.getBoundingClientRect()
+                menu = {
+                  x: r.right + 4,
+                  y: r.bottom,
+                  // Account settings are the server's pages; the desktop's relay does not carry
+                  // them, so there the menu is who you are and the way out.
+                  items: onRelay
+                    ? [
+                        { label: `${me?.email ?? ""} on ${relayServer.replace(/^https?:\/\//u, '')}`, run: () => {}, disabled: true },
+                        ...(shell?.openExternal ? [{ label: 'Account settings (opens the browser)…', run: () => openOnServer('#/account') }] : []),
+                        // Only the desktop shell can sign out; `lemmate serve` is signed in by its flags.
+                        ...(canConnect ? [{ separator: true, label: '' }, { label: 'Sign out', run: signOut, danger: true }] : []),
+                      ]
+                    : [
+                        { label: 'Account, password, tokens and invites…', run: () => (accountOpen = true) },
+                        { separator: true, label: '' },
+                        { label: 'Sign out', run: signOut, danger: true },
+                      ],
+                }
               }}
             >
-              {#snippet attachmentsTools()}
-                <button onclick={() => attachmentsPane?.collapseAll()} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
-                <button onclick={() => attachmentsPane?.locate()} disabled={!attachmentsPane?.canLocate()} title="Show the files the open note uses" aria-label="Show the files the open note uses"><Icon name="locate" /></button>
-                <button onclick={() => session && startUpload(session.id, null)} disabled={!session} title="Upload files…" aria-label="Upload files"><Icon name="upload" /></button>
-              {/snippet}
-              {#snippet attachmentsView()}
-                <AttachmentsPane
-                  bind:this={attachmentsPane}
-                  vaults={(workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id, session: v }))}
-                  activeVault={session?.id ?? null}
-                  activeNoteId={active && !isFileTab(active) && !isBlank(active) ? active : null}
-                  activeFile={active ? parseFileTab(active) : null}
-                  onOpenFile={openFile}
-                  onUpload={startUpload}
-                  onRename={renameFile}
-                  onDelete={deleteFile}
-                />
-              {/snippet}
-              {#snippet trashView()}
-                {#if session}
-                  <TrashPane
-                    vault={session.id}
-                    vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
-                    version={tagsVersion}
-                    onRestored={(id) => open(id)}
-                  />
-                {/if}
-              {/snippet}
-            </FilesPane>
-            {#if sharedWithMe.length}
-              <nav class="shared">
-                <p class="muted">Shared with me</p>
-                {#each sharedWithMe as n (n.id)}
-                  <!-- The desktop relay holds only your own vaults, so a note shared from someone else's
-                       opens on the server, in the browser. -->
-                  <button
-                    onclick={() => (onRelay ? openOnServer(`#/n/${n.vault_id}/${n.id}`) : (location.hash = `#/n/${n.vault_id}/${n.id}`))}
-                    title={n.path}>{n.title ?? displayName(n.path)}</button>
-                {/each}
-              </nav>
-            {/if}
-          {:else if sidebar === 'search'}
-            <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
-          {:else if sidebar === 'tags'}
-            <header class="panel-head"><h2>Tags</h2></header>
-            {#if session}
-              <TagsPane
-                vault={session.id}
-                version={tagsVersion}
-                bind:selected={tagFilter}
-                onOpen={open}
-                onMenu={(t, e) => tagMenu(t, session.id, e)}
+              {initial(me.display_name)}
+            </button>
+          {/if}
+        </nav>
+      {/if}
+      <div class="panel">
+        {#if solo}
+          <p class="muted pad">A note shared with you. <button class="link" onclick={() => (location.hash = '')}>All vaults</button></p>
+        {:else if sidebar === 'files'}
+          <FilesPane
+            bind:revealFolder
+            {vaults}
+            activeId={active}
+            activeVault={session?.id ?? null}
+            onOpen={open}
+            bind:trash={trashOpen}
+            bind:attachments={attachmentsOpen}
+            actions={{
+              onCreateIn: createInFolder,
+              onRenameFolder: renameFolder,
+              onDeleteFolder: deleteFolder,
+              onCreateInVault: createInVault,
+              onRenameVault: renameVault,
+              onVaultMembers: serverFeatures ? (v: string) => (membersOf = v) : undefined,
+              onImportInto: (v) => (importInto = v),
+              onNewVault: newVault,
+              onRenameNote: renameNote,
+              onTrashNotes: trashNotes,
+              onOpenInTab: openInNewTab,
+              onOpenInPane: openInNewPane,
+              onShareNote: serverFeatures ? (id: string) => (open(id), (shareOpen = true)) : undefined,
+              onBookmarkNote: bookmarkNote,
+              onMove: moveDropped,
+            }}
+          >
+            {#snippet attachmentsTools()}
+              <button onclick={() => attachmentsPane?.collapseAll()} title="Collapse all" aria-label="Collapse all"><Icon name="collapse" /></button>
+              <button onclick={() => attachmentsPane?.locate()} disabled={!attachmentsPane?.canLocate()} title="Show the files the open note uses" aria-label="Show the files the open note uses"><Icon name="locate" /></button>
+              <button onclick={() => session && startUpload(session.id, null)} disabled={!session} title="Upload files…" aria-label="Upload files"><Icon name="upload" /></button>
+            {/snippet}
+            {#snippet attachmentsView()}
+              <AttachmentsPane
+                bind:this={attachmentsPane}
+                vaults={(workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id, session: v }))}
+                activeVault={session?.id ?? null}
+                activeNoteId={active && !isFileTab(active) && !isBlank(active) ? active : null}
+                activeFile={active ? parseFileTab(active) : null}
+                onOpenFile={openFile}
+                onUpload={startUpload}
+                onRename={renameFile}
+                onDelete={deleteFile}
               />
-            {/if}
-          {:else}
-            <header class="panel-head"><h2>Starred</h2></header>
-            <nav class="bookmarks-pane">
-              {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
-                <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
-                  ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
-                </button>
+            {/snippet}
+            {#snippet trashView()}
+              {#if session}
+                <TrashPane
+                  vault={session.id}
+                  vaults={manyVaults ? (workspace?.sessions ?? []).map((v) => ({ id: v.id, label: workspace?.label(v.id) ?? v.id })) : []}
+                  version={tagsVersion}
+                  onRestored={(id) => open(id)}
+                />
+              {/if}
+            {/snippet}
+          </FilesPane>
+          {#if sharedWithMe.length}
+            <nav class="shared">
+              <p class="muted">Shared with me</p>
+              {#each sharedWithMe as n (n.id)}
+                <!-- The desktop relay holds only your own vaults, so a note shared from someone else's
+                     opens on the server, in the browser. -->
+                <button
+                  onclick={() => (onRelay ? openOnServer(`#/n/${n.vault_id}/${n.id}`) : (location.hash = `#/n/${n.vault_id}/${n.id}`))}
+                  title={n.path}>{n.title ?? displayName(n.path)}</button>
               {/each}
-              {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
             </nav>
           {/if}
-          {#if denied}
-            <div class="denied">
-              Permission denied by the server ({denied.reason}) — your last change was not saved.
-              <button class="link" onclick={() => location.reload()}>Reload</button>
-              <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
-            </div>
+        {:else if sidebar === 'search'}
+          <SearchPane label={labelOfNote} onOpen={open} vaults={vaults.map((v) => v.id)} />
+        {:else if sidebar === 'tags'}
+          <header class="panel-head"><h2>Tags</h2></header>
+          {#if session}
+            <TagsPane
+              vault={session.id}
+              version={tagsVersion}
+              bind:selected={tagFilter}
+              onOpen={open}
+              onMenu={(t, e) => tagMenu(t, session.id, e)}
+            />
           {/if}
-          {#if solo}
-            <footer class="status" class:offline={status !== 'online'}>
-              <span class="dot"></span>
-              {statusLine}
-            </footer>
-          {/if}
-        </div>
-      </aside>
-      <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
-           static kind. -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div
-        class="vsplit"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize the sidebar"
-        aria-valuenow={sideWidth}
-        aria-valuemin={SIDE_MIN}
-        aria-valuemax={SIDE_MAX}
-        tabindex="0"
-        onpointerdown={(e) =>
-          dragResize(e, { axis: 'x', from: sideWidth, min: SIDE_MIN, max: SIDE_MAX, onMove: (v) => (sideWidth = v), onEnd: saveSideWidth })}
-        onkeydown={(e) => {
-          const step = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
-          if (!step) return
-          e.preventDefault()
-          saveSideWidth(clamp(sideWidth + step, SIDE_MIN, SIDE_MAX))
-        }}
-        ondblclick={() => saveSideWidth(SIDE_DEFAULT)}
-      ></div>
-    {/if}
+        {:else}
+          <header class="panel-head"><h2>Starred</h2></header>
+          <nav class="bookmarks-pane">
+            {#each workspace?.bookmarks ?? [] as b, i (b.vault + b.kind + b.target + i)}
+              <button onclick={() => openPath(b.vault, b.target)} title={`${workspace?.label(b.vault)} · ${b.target}`}>
+                ★ {b.label}{#if manyVaults}<span class="vault-tag">{workspace?.label(b.vault)}</span>{/if}
+              </button>
+            {/each}
+            {#if (workspace?.bookmarks.length ?? 0) === 0}<p class="muted pad">Bookmark a note with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>{/if}
+          </nav>
+        {/if}
+        {#if denied}
+          <div class="denied">
+            Permission denied by the server ({denied.reason}) — your last change was not saved.
+            <button class="link" onclick={() => location.reload()}>Reload</button>
+            <button class="link" onclick={() => { if (solo) solo.denied = null; else if (workspace) workspace.denied = null }}>Dismiss</button>
+          </div>
+        {/if}
+        {#if solo}
+          <footer class="status" class:offline={status !== 'online'}>
+            <span class="dot"></span>
+            {statusLine}
+          </footer>
+        {/if}
+      </div>
+    </aside>
+    <!-- A window splitter is a focusable `separator` per ARIA; svelte's rule only knows the
+         static kind. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="vsplit"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the sidebar"
+      aria-valuenow={sideWidth}
+      aria-valuemin={SIDE_MIN}
+      aria-valuemax={SIDE_MAX}
+      tabindex="0"
+      onpointerdown={(e) =>
+        dragResize(e, { axis: 'x', from: sideWidth, min: SIDE_MIN, max: SIDE_MAX, onMove: (v) => (sideWidth = v), onEnd: saveSideWidth })}
+      onkeydown={(e) => {
+        const step = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
+        if (!step) return
+        e.preventDefault()
+        saveSideWidth(clamp(sideWidth + step, SIDE_MIN, SIDE_MAX))
+      }}
+      ondblclick={() => saveSideWidth(SIDE_DEFAULT)}
+    ></div>
     <section class="main">
       {#each panes as p, i (p.id)}
         <Pane
@@ -1735,7 +1775,7 @@
         onOpen={open}
         onOpenInPane={openInNewPane}
         onCreate={(path) => create(path)}
-        onFolder={(vault, folder) => { focusVault = vault; sidebar = 'files'; drawer = false; revealFolder?.(vault, folder) }}
+        onFolder={(vault, folder) => { focusVault = vault; sidebar = 'files'; collapsed = false; drawer = false; revealFolder?.(vault, folder) }}
         onClose={() => (palette = null)}
       />
     {/key}
@@ -2117,15 +2157,19 @@
     z-index: 8;
     background: rgb(0 0 0 / 0.35);
   }
-  /* Nothing but the panes: the sidebar stays in the window the tab came from. */
-  .layout.detached,
-  .layout.detached.narrow {
-    grid-template-columns: minmax(0, 1fr);
+  /* Folded to the rail: the column shrinks to it, the panel and the splitter go, and the
+     rail's own border is the edge. A refusal the panel would have shown runs across the top. */
+  .layout.collapsed {
+    grid-template-columns: auto 0 minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
-    grid-template-areas: 'denied' 'main';
+    grid-template-areas: 'denied denied denied' 'side split main';
   }
-  .layout.detached > .denied {
+  .layout.collapsed > .denied {
     grid-area: denied;
+  }
+  .layout.collapsed .panel,
+  .layout.collapsed .vsplit {
+    display: none;
   }
   /* `minmax(0, …)`, not a bare `1fr`: that one's minimum is the content's min-content width,
      and the top bar's includes the whole unwrapped note title — a long one widened the column
