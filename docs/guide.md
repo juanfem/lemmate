@@ -317,6 +317,15 @@ Callout `collapse="true"` is not implemented.
 - **Autocomplete**: type `[[` for note paths, `#` for existing tags. The `@` citation, `:::`
   callout and `/` slash menus described in SPEC §8 are not implemented.
 - **Front matter opens folded** and the cursor lands after it.
+- **Folding.** Point at a heading and an arrow appears just left of it: click it to fold the
+  section — everything down to the next heading of the same level or higher. An HTML comment
+  that runs over several lines gets one too, and folds to `<!--…-->`. A folded line keeps its
+  arrow showing; click it, or the `…`, to open it again. (Other blocks — a long paragraph, a
+  table, a code block — fold from the keyboard: `Ctrl+Alt+[` folds everything foldable,
+  `Ctrl+Alt+]` unfolds it.) The palette has **Fold all
+  sections**, **Fold all comments** (one-line comments too), **Unfold all comments** (folded
+  sections stay folded) and **Unfold everything**. Folds belong to the view: they are not
+  saved and nobody else sees them.
 - **`Tab` nests a list item** under the item above it, and `Shift+Tab` brings it back out; the
   item's children come along, and an ordered item is renumbered for the level it lands on.
   Markdown nests by column, so this is not the same as adding spaces: `Tab` puts the marker

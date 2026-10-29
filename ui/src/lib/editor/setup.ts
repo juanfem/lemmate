@@ -7,7 +7,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, codeFolding, LanguageDescription } from '@codemirror/language'
+import { syntaxHighlighting, HighlightStyle, indentOnInput, bracketMatching, foldKeymap, codeFolding, LanguageDescription } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
 import { tags as t } from '@lezer/highlight'
 import { yCollab } from 'y-codemirror.next'
@@ -19,6 +19,7 @@ import { embeddedSection, type EmbedTarget } from './transclude.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
 import { insertLink, run, toggleMark } from './format.ts'
+import { commentFolding, foldArrows } from './fold.ts'
 import { selectionBar } from './selectionBar.ts'
 import { skipSpelling } from './spelling.ts'
 
@@ -64,9 +65,6 @@ const theme = EditorView.theme({
   },
   '&.cm-focused': { outline: 'none' },
   '.cm-line': { padding: '0' },
-  // Kept tight on purpose. The gutter is in the flow, so every pixel of it shifts the centred
-  // measure to the right of the pane's real centre; a fold arrow needs nowhere near the default
-  // width, and the narrower it is the closer the document sits to actually centred.
   // CodeMirror draws the selection behind the text, so anything with a background of its own —
   // a code block's lines, inline code, a callout, a table — would hide it. Above the text and
   // translucent, it shows through all of them.
@@ -76,8 +74,27 @@ const theme = EditorView.theme({
     background: 'color-mix(in srgb, var(--accent) 26%, transparent)',
   },
   '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--faint)', minWidth: '0' },
-  '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', opacity: 0.35, padding: '0 0.3em' },
-  '.cm-foldGutter:hover .cm-gutterElement': { opacity: 1 },
+  // The fold arrow (lib/editor/fold.ts): a zero-width anchor at the start of a heading or comment
+  // line, and the arrow hung off it into the side padding, sitting on the text's baseline
+  // whatever the heading's size. Shown while the pointer is on the line, or where there is no
+  // pointer to hover, and always once folded.
+  '.cm-fold-arrow': { display: 'inline-block', width: '0', position: 'relative', userSelect: 'none' },
+  '.cm-fold-arrow > span': {
+    position: 'absolute',
+    // Off the text by 0.3rem, or less where the side padding is narrow (a phone) and that would
+    // push the 12px chevron off the page's edge.
+    right: 'min(0.3rem, calc(clamp(0.9rem, 4vw, 2.5rem) - 13px))',
+    bottom: '0.15em',
+    display: 'flex',
+    color: 'var(--faint)',
+    cursor: 'pointer',
+    visibility: 'hidden',
+  },
+  '.cm-line:hover .cm-fold-arrow > span, .cm-fold-arrow-closed > span': { visibility: 'visible' },
+  '.cm-fold-arrow > span:hover': { color: 'var(--accent)' },
+  '.cm-fold-arrow > span svg': { transform: 'rotate(90deg)', transition: 'transform 0.12s' },
+  '.cm-fold-arrow-closed > span svg': { transform: 'none' },
+  '@media (hover: none)': { '.cm-fold-arrow > span': { visibility: 'visible' } },
   '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
   // Space above a heading is *padding*, never margin: CodeMirror's height map measures each
   // line with getBoundingClientRect(), which excludes margins, so a margin here desynchronises
@@ -200,11 +217,10 @@ const theme = EditorView.theme({
   '&.cm-file .cm-activeLineGutter': { background: 'transparent', color: 'var(--muted)' },
   // Source mode drops the prose face along with the decorations: it is code, so it looks it.
   '&.cm-mode-source .cm-scroller': { fontFamily: 'var(--mono)', fontSize: '0.92em' },
-  // Nothing in reading mode is editable, so the caret, the active line and the fold gutter
-  // are all noise.
+  // Nothing in reading mode is editable, so the caret and the active line are noise. Folding
+  // still works there: it changes the view, not the note.
   '&.cm-mode-reading .cm-content': { caretColor: 'transparent' },
   '&.cm-mode-reading .cm-activeLine': { background: 'transparent' },
-  '&.cm-mode-reading .cm-gutters': { display: 'none' },
 
   // ---- the page's own furniture (lib/editor/page.ts)
   //
@@ -494,7 +510,8 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       indentOnInput(),
       bracketMatching(),
       codeFolding({ placeholderText: '…' }),
-      foldGutter({ openText: '▾', closedText: '▸' }),
+      foldArrows,
+      commentFolding,
       closeBrackets(),
       EditorView.lineWrapping,
       // A fenced block's language is loaded the first time a fence names it, and the block
@@ -524,7 +541,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
         ...searchKeymap,
         ...historyKeymap,
         // Ctrl+Shift+[ / ] step through tabs (tabkeys.ts), so folding at the cursor keeps only
-        // the Mac's Cmd+Alt+[ / ]; elsewhere the gutter folds, and Ctrl+Alt+[ / ] still fold all.
+        // the Mac's Cmd+Alt+[ / ]; elsewhere the arrows fold, and Ctrl+Alt+[ / ] still fold all.
         ...foldKeymap.map((b) => (b.key?.startsWith('Ctrl-Shift-') ? { ...b, key: undefined } : b)),
         indentWithTab,
       ]),

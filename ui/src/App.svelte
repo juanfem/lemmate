@@ -21,6 +21,9 @@
   import type { VaultNode } from './lib/tree.ts'
   import { plan, type DragPayload } from './lib/moves.ts'
   import type { ViewMode } from './lib/editor/setup.ts'
+  import { EditorView } from '@codemirror/view'
+  import { unfoldAll } from '@codemirror/language'
+  import { foldComments, foldSections, unfoldComments } from './lib/editor/fold.ts'
   import { clamp, dragResize } from './lib/resize.ts'
   import { media, NARROW } from './lib/media.svelte.ts'
   import Pane, { isBlank, type PaneState } from './components/Pane.svelte'
@@ -512,6 +515,14 @@
   function setMode(mode: ViewMode) {
     focused.mode = mode
   }
+  /** Run `command` on the focused pane's note editor, if it is showing one, and give it focus. */
+  function inEditor(command: (view: EditorView) => boolean) {
+    const dom = document.querySelector<HTMLElement>('.main > .pane.focused .editor > .cm-editor')
+    const view = dom && EditorView.findFromDOM(dom)
+    if (!view) return
+    command(view)
+    view.focus()
+  }
   let focused = $derived(panes[Math.min(focusedPane, panes.length - 1)] ?? panes[0]!)
   /** The focused pane's note: everything outside the panes (commands, sidebar) acts on it. */
   let activeTab = $derived(focused.active)
@@ -988,6 +999,10 @@
     { id: 'mode-live', label: 'View: live preview', run: () => setMode('live') },
     { id: 'mode-source', label: 'View: source', run: () => setMode('source') },
     { id: 'mode-reading', label: 'View: reading', run: () => setMode('reading') },
+    { id: 'fold-sections', label: 'Fold all sections', run: () => inEditor(foldSections) },
+    { id: 'unfold-all', label: 'Unfold everything', run: () => inEditor(unfoldAll) },
+    { id: 'fold-comments', label: 'Fold all comments', run: () => inEditor(foldComments) },
+    { id: 'unfold-comments', label: 'Unfold all comments', run: () => inEditor(unfoldComments) },
     { id: 'full-width', label: measure.full ? 'View: centred text column' : 'View: full-width text', run: measure.toggle },
     colours.current === 'warm'
       ? { id: 'palette', label: 'View: Finder colours', run: () => colours.set('finder') }
