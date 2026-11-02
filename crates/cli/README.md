@@ -73,7 +73,11 @@ lemmate daily >> today.md
 ```
 
 Every command exits non-zero with a one-line reason on failure: "not signed in: run `notes
-login`" for a 401, "not found or no access" for a 404.
+login`" for a 401, "not found or no access" for a 404. The status tells a script which: **3**
+when what it named is not there (no note at that path, or a 404 — which is also what the
+server answers for something the account cannot see), **1** for any other failure, **2** for a
+usage error. So `lemmate cat "$p" >/dev/null 2>&1; [ $? -eq 3 ] && lemmate new "$p" …` creates
+only a note that is really missing, and stops on a bad token or a dead network.
 
 ### MCP server
 

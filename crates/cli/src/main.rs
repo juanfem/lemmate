@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use lemmate_cli::mcp;
-use lemmate_cli::remote::{NotesApi, Remote, resolve_vault};
+use lemmate_cli::remote::{NotesApi, Remote, is_not_found, resolve_vault};
 use lemmate_core::client::{self, SyncOptions};
 use lemmate_core::credentials;
 use lemmate_core::export;
@@ -369,6 +369,11 @@ enum ExportFormat {
     },
 }
 
+/// The exit status of a command that failed because what it names is not there — a note, or
+/// something the server answers 404 for. Scripts branch on it ("create it, then") without
+/// reading the message; any other failure is 1, and clap's usage errors are 2.
+const EXIT_NOT_FOUND: u8 = 3;
+
 fn main() -> ExitCode {
     // stderr, always: `lemmate mcp` speaks JSON-RPC on stdout.
     tracing_subscriber::fmt()
@@ -381,7 +386,7 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
-            ExitCode::FAILURE
+            if is_not_found(&e) { ExitCode::from(EXIT_NOT_FOUND) } else { ExitCode::FAILURE }
         }
     }
 }

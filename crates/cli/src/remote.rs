@@ -142,14 +142,31 @@ impl fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
+/// No note at that path or id: the client's own "not found", from looking the key up in the
+/// vault's note list rather than from a 404, and treated as one (`is_not_found`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteNotFound {
+    pub key: String,
+    pub vault: String,
+}
+
+impl fmt::Display for NoteNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no note matching {:?} in vault {}", self.key, self.vault)
+    }
+}
+
+impl std::error::Error for NoteNotFound {}
+
 /// The HTTP status behind an error, when there is one.
 pub fn status_of(err: &anyhow::Error) -> Option<u16> {
     err.downcast_ref::<HttpError>().map(|e| e.status)
 }
 
-/// True when the error means "the server has no such thing".
+/// True when the error means "the server has no such thing" — a 404, which the server also
+/// answers for something the account cannot see, or a note the vault has none of.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
-    status_of(err) == Some(404)
+    status_of(err) == Some(404) || err.downcast_ref::<NoteNotFound>().is_some()
 }
 
 fn transport_error(err: ureq::Error, request: &str) -> anyhow::Error {
@@ -387,7 +404,7 @@ pub trait NotesApi {
     /// Like [`NotesApi::lookup_note`], but "no such note" is an error.
     fn resolve_note(&self, vault: &str, path_or_id: &str) -> Result<NoteSummary> {
         self.lookup_note(vault, path_or_id)?
-            .ok_or_else(|| anyhow!("no note matching {path_or_id:?} in vault {vault}"))
+            .ok_or_else(|| NoteNotFound { key: path_or_id.to_owned(), vault: vault.to_owned() }.into())
     }
 }
 

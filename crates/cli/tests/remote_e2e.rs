@@ -175,6 +175,39 @@ fn mcp_tools_work_against_a_real_server() {
         .dispatch(&json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":uri}}))
         .unwrap();
     assert_eq!(body(r["result"]["contents"][0]["text"].as_str().unwrap()), "# Standup\n\nshipped\n");
+    // A note the vault has none of is "not found", not a server failure.
+    let missing = format!("note://{vault}/Nowhere.md");
+    let r = session
+        .dispatch(&json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":missing}}))
+        .unwrap();
+    assert_eq!(r["error"]["code"], -32002, "{r}");
+}
+
+/// A script tells "no such note" from "something broke" by the exit status alone: 3 for the
+/// first, 1 for the second — never by reading the message, whose wording is free to change.
+#[test]
+fn a_missing_note_exits_3_and_other_failures_exit_1() {
+    let (server, _blobs) = start_server();
+    let remote = Remote::from_args(&server, Some("ignored-when-auth-is-off".into()), None).unwrap();
+    let vault = VaultId::new().to_string();
+    remote.create(&vault, "Here", "# Here\n").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let cat = |server: &str, note: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lemmate"))
+            .args(["cat", note])
+            .env("LEMMATE_SERVER", server)
+            .env("LEMMATE_TOKEN", "ignored-when-auth-is-off")
+            .env("LEMMATE_CONFIG_DIR", config.path())
+            .env_remove("LEMMATE_VAULT")
+            .output()
+            .unwrap()
+    };
+    assert_eq!(cat(&server, "Here").status.code(), Some(0));
+    let missing = cat(&server, "Software/Not yet");
+    assert_eq!(missing.status.code(), Some(3), "{}", String::from_utf8_lossy(&missing.stderr));
+    // Nothing listening there: a failure, but not a missing note.
+    let down = cat("http://127.0.0.1:1", "Here");
+    assert_eq!(down.status.code(), Some(1), "{}", String::from_utf8_lossy(&down.stderr));
 }
 
 #[test]
