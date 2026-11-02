@@ -368,6 +368,20 @@ function markerGap(state: EditorState, mark: SyntaxNode): string {
 
 const hide = Decoration.replace({})
 
+/** The `>` marks of quote `node`, wherever they sit inside it, but not those of a quote nested
+ *  in it — that one is a node of its own, and hides its own. */
+function quoteMarks(node: SyntaxNode): SyntaxNode[] {
+  const out: SyntaxNode[] = []
+  const walk = (n: SyntaxNode) => {
+    for (let c = n.firstChild; c; c = c.nextSibling) {
+      if (c.name === 'QuoteMark') out.push(c)
+      else if (c.name !== 'Blockquote') walk(c)
+    }
+  }
+  walk(node)
+  return out
+}
+
 /** Link text, or a bare address, carrying where it goes for the click handler in `livePreview`. */
 function linkMark(href: string, rendered: boolean): Decoration {
   return Decoration.mark({ class: rendered ? 'cm-link cm-link-rendered' : 'cm-link', attributes: { 'data-href': href } })
@@ -1029,7 +1043,9 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
             const toLine = state.doc.lineAt(node.to).number
             for (let ln = fromLine; ln <= toLine; ln++) push(state.doc.line(ln).from, state.doc.line(ln).from, Decoration.line({ class: 'cm-blockquote' }))
             if (!revealed(state, node.from, node.to)) {
-              for (const m of n.getChildren('QuoteMark')) push(m.from, Math.min(m.to + 1, state.doc.lineAt(m.from).to), hide)
+              // Not only its own children: the `>` that continues a paragraph, a list or a code
+              // block onto the next line is that block's child. A nested quote's are its own.
+              for (const m of quoteMarks(n)) push(m.from, Math.min(m.to + 1, state.doc.lineAt(m.from).to), hide)
             }
             break
           }

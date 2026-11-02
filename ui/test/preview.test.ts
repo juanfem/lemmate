@@ -176,3 +176,17 @@ test('open front matter makes its Lua filters links; collapsed, it has none', ()
   assert.deepEqual(links(doc.indexOf('title')), ['lua/f.lua@lua/f.lua'])
   assert.deepEqual(links(doc.length), [])
 })
+
+test('a quote hides the `>` of every line, a continued paragraph’s and a nested quote’s too', () => {
+  const marks = (s: EditorState) => {
+    const out: string[] = []
+    for (const set of decos(s)) {
+      set.between(0, s.doc.length, (from, to, d) => {
+        if (d.spec.widget === undefined && to > from && !d.spec.class && s.sliceDoc(from, to).startsWith('>')) out.push(`${s.doc.lineAt(from).number}:${s.sliceDoc(from, to)}`)
+      })
+    }
+    return out.sort()
+  }
+  const doc = '> A quote\n> over two lines.\n>\n> > nested\n> > and on\n\nafter'
+  assert.deepEqual(marks(previewState(doc, doc.length)), ['1:> ', '2:> ', '3:>', '4:> ', '4:> ', '5:> ', '5:> '])
+})
