@@ -5,8 +5,9 @@
 //
 // The arrow that folds them sits beside the text, not in a gutter at the pane's edge: with the
 // text centred, a gutter put it a hand's width away from the heading it belonged to.
-import { RangeSetBuilder, type EditorState, type StateEffect } from '@codemirror/state'
+import { type EditorState, type StateEffect } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import type { SyntaxNode } from '@lezer/common'
 import { ensureSyntaxTree, foldable, foldedRanges, foldEffect, foldService, syntaxTree, unfoldEffect } from '@codemirror/language'
 
 type Range = { from: number; to: number }
@@ -48,18 +49,63 @@ export const commentFolding = foldService.of((state, lineStart, lineEnd) => {
 
 const isHeading = (name: string) => /^(?:ATX|Setext)Heading\d$/u.test(name)
 
-/** Whether the line at `from`..`to` opens a heading or a comment — the lines that get an arrow.
- *  A paragraph or a table folds too (from the keyboard), but an arrow beside every one of them
- *  would be clutter in the text itself. */
+const DIV_OPEN = /^:{3,}\s*[^\s:]/u
+const DIV_CLOSE = /^:{3,}\s*$/u
+
+/** Is `pos` in code or front matter, where a `:::` line is text and opens nothing? */
+function inCodeOrFrontMatter(state: EditorState, pos: number): boolean {
+  for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); n; n = n.parent) {
+    if (n.name === 'FencedCode' || n.name === 'CodeBlock' || n.name === 'FrontMatter') return true
+  }
+  return false
+}
+
+/** A pandoc fenced div — `::: notes`, a Quarto callout, any `::: {…}` — folds from its opening
+ *  line to its closing fence. They nest, a `:::` in a code block is code, and one never closed
+ *  folds nothing (pandoc reads it as text). */
+export const divFolding = foldService.of((state, lineStart, lineEnd) => {
+  const first = state.doc.lineAt(lineStart)
+  if (!DIV_OPEN.test(first.text.trim()) || inCodeOrFrontMatter(state, lineStart)) return null
+  let depth = 0
+  let fence: { ch: string; len: number } | null = null
+  for (let ln = first.number + 1; ln <= state.doc.lines; ln++) {
+    const line = state.doc.line(ln)
+    const t = line.text.trim()
+    if (fence) {
+      const m = /^(`{3,}|~{3,})\s*$/u.exec(t)
+      if (m && m[1]![0] === fence.ch && m[1]!.length >= fence.len) fence = null
+      continue
+    }
+    const f = /^(`{3,}|~{3,})/u.exec(t)
+    if (f && !(f[1]![0] === '`' && t.slice(f[1]!.length).includes('`'))) {
+      fence = { ch: f[1]![0]!, len: f[1]!.length }
+      continue
+    }
+    if (DIV_CLOSE.test(t)) {
+      if (depth === 0) return { from: lineEnd, to: line.to }
+      depth--
+    } else if (DIV_OPEN.test(t)) depth++
+  }
+  return null
+})
+
+/** Whether the line at `from`..`to` opens a block that gets an arrow: a heading, a comment, a
+ *  code block, a quote or a fenced div. A paragraph folds too (from the keyboard), but an arrow
+ *  for every one would be clutter; a table and display math are drawn as widgets in live
+ *  preview, which a fold would fight with. */
 function arrowLine(state: EditorState, from: number, to: number): boolean {
+  if (DIV_OPEN.test(state.sliceDoc(from, to).trim())) return true
   let found = false
   syntaxTree(state).iterate({
     from,
     to,
     enter: (n) => {
-      if (found || n.name === 'FencedCode' || n.name === 'CodeBlock') return false
-      if (n.from < from) return
-      if (isHeading(n.name) || ((n.name === 'CommentBlock' || n.name === 'Comment') && commentRange(state, n.from, n.to))) found = true
+      if (found) return false
+      const code = n.name === 'FencedCode' || n.name === 'CodeBlock'
+      if (n.from < from) return code ? false : undefined
+      if (isHeading(n.name) || n.name === 'FencedCode' || n.name === 'Blockquote') found = true
+      else if ((n.name === 'CommentBlock' || n.name === 'Comment') && commentRange(state, n.from, n.to)) found = true
+      if (code) return false
     },
   })
   return found
@@ -76,22 +122,31 @@ function closedFold(state: EditorState, range: Range): Range | undefined {
   return folded(state).find((f) => f.from === range.from && f.to === range.to)
 }
 
+/** The `range.from` of the arrow the pointer is over the block of, per editor. */
+const pointedAt = new WeakMap<EditorView, number>()
+
 class FoldArrow extends WidgetType {
   readonly range: Range
   readonly open: boolean
-  constructor(range: Range, open: boolean) {
+  readonly here: boolean
+  constructor(range: Range, open: boolean, here: boolean) {
     super()
     this.range = range
     this.open = open
+    this.here = here
   }
   eq(other: FoldArrow) {
-    return other.range.from === this.range.from && other.range.to === this.range.to && other.open === this.open
+    return other.range.from === this.range.from && other.range.to === this.range.to && other.open === this.open && other.here === this.here
   }
   toDOM(view: EditorView) {
-    // A zero-width anchor at the start of the line, so the text does not move, and the arrow
-    // hung off it into the margin to its left.
+    // A zero-width anchor at the start of the line, so the text does not move: it says where
+    // the line's baseline is, and the arrow hangs off it into the margin (setup.ts).
     const wrap = document.createElement('span')
-    wrap.className = `cm-fold-arrow${this.open ? '' : ' cm-fold-arrow-closed'}`
+    wrap.className = 'cm-fold-arrow'
+    wrap.classList.toggle('cm-fold-arrow-closed', !this.open)
+    wrap.classList.toggle('cm-fold-arrow-here', this.here)
+    wrap.classList.toggle('cm-fold-arrow-pointed', pointedAt.get(view) === this.range.from)
+    wrap.dataset.from = String(this.range.from)
     const button = wrap.appendChild(document.createElement('span'))
     // A chevron rather than ▾/▸, which most fonts draw at half the size of the text around them.
     button.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
@@ -111,10 +166,16 @@ class FoldArrow extends WidgetType {
   }
 }
 
-/** Where the arrows go in `from`..`to`: the start of each heading or comment line that folds,
+type Arrow = { at: number; range: Range; open: boolean }
+
+/** The line an arrow hangs off, which places it: off the line's own left edge — outside a
+ *  quote's or a callout's border, not on it. */
+const foldLine = Decoration.line({ class: 'cm-fold-line' })
+
+/** Where the arrows go in `from`..`to`: the start of each line opening a block that folds,
  *  with the range it folds and whether that is open. */
-export function arrowsIn(state: EditorState, from: number, to: number): { at: number; range: Range; open: boolean }[] {
-  const out: { at: number; range: Range; open: boolean }[] = []
+export function arrowsIn(state: EditorState, from: number, to: number): Arrow[] {
+  const out: Arrow[] = []
   for (let pos = from; pos <= to; ) {
     const line = state.doc.lineAt(pos)
     const range = arrowLine(state, line.from, line.to) ? foldable(state, line.from, line.to) : null
@@ -124,33 +185,69 @@ export function arrowsIn(state: EditorState, from: number, to: number): { at: nu
   return out
 }
 
-function arrows(view: EditorView): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>()
-  for (const { from, to } of view.visibleRanges) {
-    for (const { at, range, open } of arrowsIn(view.state, from, to)) {
-      builder.add(at, at, Decoration.widget({ widget: new FoldArrow(range, open), side: -1 }))
-    }
-  }
-  return builder.finish()
+/** The arrow of the innermost block holding `pos` — its opening line through what it folds —
+ *  so inside a subsection it is the subsection's, not the chapter's. */
+export function arrowFor(arrows: Arrow[], pos: number): Arrow | undefined {
+  let best: Arrow | undefined
+  for (const a of arrows) if (a.at <= pos && pos <= a.range.to && (!best || a.at > best.at)) best = a
+  return best
 }
 
-/** The arrow beside each heading and comment that folds: shown while the pointer is on its
- *  line, and all the time once it is folded, so a folded section says so where it starts. */
+/** The arrow beside each block that folds. It shows for the block the pointer is in and the
+ *  one the cursor is in — the innermost, both — and all the time once folded, so a folded
+ *  block says so where it starts. */
 export const foldArrows = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet
+    arrows: Arrow[] = []
+    readonly view: EditorView
     constructor(view: EditorView) {
-      this.decorations = arrows(view)
+      this.view = view
+      this.decorations = this.build(view.state)
+      view.dom.addEventListener('mousemove', this.move)
+      view.dom.addEventListener('mouseleave', this.leave)
+    }
+    build(state: EditorState): DecorationSet {
+      // A fold splits the visible ranges, and the line it ends on can open both halves.
+      const seen = new Set<number>()
+      this.arrows = this.view.visibleRanges
+        .flatMap(({ from, to }) => arrowsIn(state, from, to))
+        .filter((a) => !seen.has(a.at) && seen.add(a.at))
+      const here = arrowFor(this.arrows, state.selection.main.head)
+      return Decoration.set(
+        this.arrows.flatMap((a) => [foldLine.range(a.at), Decoration.widget({ widget: new FoldArrow(a.range, a.open, a === here), side: -1 }).range(a.at)]),
+        true,
+      )
     }
     update(u: ViewUpdate) {
+      const pointed = pointedAt.get(u.view)
+      if (pointed !== undefined && u.docChanged) pointedAt.set(u.view, u.changes.mapPos(pointed))
       if (
         u.docChanged ||
         u.viewportChanged ||
+        u.selectionSet ||
         syntaxTree(u.startState) !== syntaxTree(u.state) ||
         foldedRanges(u.startState) !== foldedRanges(u.state)
       ) {
-        this.decorations = arrows(u.view)
+        this.decorations = this.build(u.state)
       }
+    }
+    point(from: number | undefined) {
+      if (pointedAt.get(this.view) === from) return
+      if (from === undefined) pointedAt.delete(this.view)
+      else pointedAt.set(this.view, from)
+      for (const el of this.view.contentDOM.querySelectorAll<HTMLElement>('.cm-fold-arrow')) {
+        el.classList.toggle('cm-fold-arrow-pointed', el.dataset.from === String(from))
+      }
+    }
+    move = (e: MouseEvent) => {
+      const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY }, false)
+      this.point(arrowFor(this.arrows, pos)?.range.from)
+    }
+    leave = () => this.point(undefined)
+    destroy() {
+      this.view.dom.removeEventListener('mousemove', this.move)
+      this.view.dom.removeEventListener('mouseleave', this.leave)
     }
   },
   { decorations: (p) => p.decorations },

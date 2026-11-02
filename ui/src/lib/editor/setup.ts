@@ -19,7 +19,7 @@ import { embeddedSection, type EmbedTarget } from './transclude.ts'
 import { listIndent } from './lists.ts'
 import { noteCompletions, type CompletionSources } from './complete.ts'
 import { insertLink, run, toggleMark } from './format.ts'
-import { commentFolding, foldArrows } from './fold.ts'
+import { commentFolding, divFolding, foldArrows } from './fold.ts'
 import { selectionBar } from './selectionBar.ts'
 import { skipSpelling } from './spelling.ts'
 
@@ -74,21 +74,23 @@ const theme = EditorView.theme({
     background: 'color-mix(in srgb, var(--accent) 26%, transparent)',
   },
   '.cm-gutters': { background: 'transparent', border: 0, color: 'var(--faint)', minWidth: '0' },
-  // The fold arrow (lib/editor/fold.ts): a zero-width anchor at the start of a heading or comment
-  // line, and the arrow hung off it into the side padding, sitting on the text's baseline
-  // whatever the heading's size. Shown while the pointer is on the line, or where there is no
-  // pointer to hover, and always once folded.
+  // The fold arrow (lib/editor/fold.ts): a zero-width anchor at the start of a block's first
+  // line, and the arrow hung off it into the side padding — across from the line's own left
+  // edge (the line is its containing block), so it clears a quote's or a callout's border, and
+  // up from the anchor, which sits on the text's baseline whatever the heading's size. Shown
+  // for the block the pointer is in and the one the cursor is in (fold.ts says which), and
+  // always once folded.
   //
-  // Hidden by opacity, never visibility: a hidden element takes no pointer, so the way to the
-  // arrow — off the line into the padding — would hide it before the pointer got there. As it
-  // is, the arrow is part of the line it hangs off, and its padding reaches the text, so there
-  // is no gap to fall through on the way.
-  '.cm-fold-arrow': { display: 'inline-block', width: '0', position: 'relative', userSelect: 'none' },
+  // Hidden by opacity, never visibility: a hidden element takes no pointer, and the arrow has
+  // to be there to take the click the moment it shows. Its padding reaches the line, so the
+  // way to it has no gap.
+  '.cm-fold-line': { position: 'relative' },
+  '.cm-fold-arrow': { display: 'inline-block', width: '0', userSelect: 'none' },
   '.cm-fold-arrow > span': {
     position: 'absolute',
-    right: '0',
-    bottom: 'calc(0.15em - 0.3rem)',
-    // The chevron sits 0.3rem off the text, or less where the side padding is narrow (a phone)
+    right: '100%',
+    transform: 'translateY(calc(-100% + 0.3rem + 0.15em))',
+    // The chevron sits 0.3rem off the line, or less where the side padding is narrow (a phone)
     // and that would push it off the page's edge; the padding around it is what takes a click.
     padding: '0.3rem min(0.3rem, calc(clamp(0.9rem, 4vw, 2.5rem) - 13px)) 0.3rem 0.4rem',
     display: 'flex',
@@ -97,11 +99,10 @@ const theme = EditorView.theme({
     opacity: '0',
     transition: 'opacity 0.1s',
   },
-  '.cm-line:hover .cm-fold-arrow > span, .cm-fold-arrow-closed > span': { opacity: '1' },
+  '.cm-fold-arrow-pointed > span, .cm-fold-arrow-here > span, .cm-fold-arrow-closed > span': { opacity: '1' },
   '.cm-fold-arrow > span:hover': { color: 'var(--accent)' },
   '.cm-fold-arrow > span svg': { transform: 'rotate(90deg)', transition: 'transform 0.12s' },
   '.cm-fold-arrow-closed > span svg': { transform: 'none' },
-  '@media (hover: none)': { '.cm-fold-arrow > span': { opacity: '1' } },
   '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
   // Space above a heading is *padding*, never margin: CodeMirror's height map measures each
   // line with getBoundingClientRect(), which excludes margins, so a margin here desynchronises
@@ -203,6 +204,8 @@ const theme = EditorView.theme({
   // A folded fence line: the band above or below the code, with the language named at the top.
   '.cm-codeblock-folded': { fontSize: '0.7em', lineHeight: '1.6' },
   '.cm-codeblock-lang': { display: 'inline-block', width: '100%', textAlign: 'right', fontFamily: 'var(--ui)', color: 'var(--faint)' },
+  // A code block folded shut: the language and the `…` share the band, not a row each.
+  '.cm-line:has(.cm-foldPlaceholder) .cm-codeblock-lang': { width: 'auto', marginRight: '0.5em' },
   '.cm-table-row': { fontFamily: 'var(--mono)', fontSize: '0.9em' },
   // The rendered table. The wrapper scrolls a table wider than the measure and holds the gap
   // around it as padding, for the same measuring reason as `.cm-heading`.
@@ -519,6 +522,7 @@ export function createEditor(parent: HTMLElement, text: Y.Text, awareness: Aware
       codeFolding({ placeholderText: '…' }),
       foldArrows,
       commentFolding,
+      divFolding,
       closeBrackets(),
       EditorView.lineWrapping,
       // A fenced block's language is loaded the first time a fence names it, and the block

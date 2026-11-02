@@ -6,10 +6,10 @@ import { EditorState } from '@codemirror/state'
 import { codeFolding, foldable, foldedRanges } from '@codemirror/language'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { noteSyntax } from '../src/lib/editor/syntax.ts'
-import { commentFolding, arrowsIn, commentRanges, foldCommentsEffects, foldSectionsEffects, unfoldCommentsEffects } from '../src/lib/editor/fold.ts'
+import { arrowFor, arrowsIn, commentFolding, commentRanges, divFolding, foldCommentsEffects, foldSectionsEffects, unfoldCommentsEffects } from '../src/lib/editor/fold.ts'
 
 const make = (doc: string) =>
-  EditorState.create({ doc, extensions: [markdown({ base: markdownLanguage, extensions: noteSyntax }), codeFolding(), commentFolding] })
+  EditorState.create({ doc, extensions: [markdown({ base: markdownLanguage, extensions: noteSyntax }), codeFolding(), commentFolding, divFolding] })
 
 const hidden = (s: EditorState, r: { from: number; to: number }) => s.sliceDoc(r.from, r.to)
 
@@ -73,4 +73,37 @@ test('folding sections folds every heading, nested ones too, and not a heading i
   const t = s.update({ effects: foldSectionsEffects(s) }).state
   assert.equal(foldedText(t).length, 4)
   assert.ok(foldedText(t)[0]!.includes('## A.2'))
+})
+
+test('a fenced div folds to its own closing fence, past nested ones and code', () => {
+  const doc = '::: notes\nSay this.\n\n::: {.callout-tip}\ninner\n:::\n\n```\n:::\n```\n:::\n\nafter\n'
+  const s = make(doc)
+  const first = s.doc.line(1)
+  assert.equal(hidden(s, foldable(s, first.from, first.to)!), doc.slice(first.to, doc.indexOf(':::\n\nafter') + 3))
+  const inner = s.doc.line(4)
+  assert.equal(hidden(s, foldable(s, inner.from, inner.to)!), '\ninner\n:::')
+  const inCode = s.doc.line(9)
+  assert.equal(foldable(s, inCode.from, inCode.to), null)
+  const open = make('::: notes\n\nnever closed\n')
+  assert.equal(foldable(open, 0, open.doc.line(1).to), null)
+})
+
+test('code blocks, quotes and fenced divs get arrows too; a table does not', () => {
+  const doc = '```js\nlet a\nlet b\n```\n\n> quoted\n> more\n\n::: notes\nhi\n:::\n\n| a |\n|---|\n| b |\n'
+  const s = make(doc)
+  assert.deepEqual(
+    arrowsIn(s, 0, doc.length).map((a) => s.doc.lineAt(a.at).number),
+    [1, 6, 9],
+  )
+})
+
+test('the arrow that shows is the innermost block\'s around the position', () => {
+  const doc = '# A\n\nintro\n\n## B\n\n```\ncode\n```\n\nb text\n\n# C\n'
+  const s = make(doc)
+  const arrows = arrowsIn(s, 0, doc.length)
+  const line = (pos: number | undefined) => (pos === undefined ? undefined : s.doc.lineAt(pos).number)
+  assert.equal(line(arrowFor(arrows, doc.indexOf('intro'))?.at), 1)
+  assert.equal(line(arrowFor(arrows, doc.indexOf('b text'))?.at), 5)
+  assert.equal(line(arrowFor(arrows, doc.indexOf('code'))?.at), 7)
+  assert.equal(line(arrowFor(arrows, doc.indexOf('# C'))?.at), undefined, 'a heading with nothing under it folds nothing')
 })
