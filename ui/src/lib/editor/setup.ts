@@ -78,23 +78,30 @@ const theme = EditorView.theme({
   // line, and the arrow hung off it into the side padding, sitting on the text's baseline
   // whatever the heading's size. Shown while the pointer is on the line, or where there is no
   // pointer to hover, and always once folded.
+  //
+  // Hidden by opacity, never visibility: a hidden element takes no pointer, so the way to the
+  // arrow — off the line into the padding — would hide it before the pointer got there. As it
+  // is, the arrow is part of the line it hangs off, and its padding reaches the text, so there
+  // is no gap to fall through on the way.
   '.cm-fold-arrow': { display: 'inline-block', width: '0', position: 'relative', userSelect: 'none' },
   '.cm-fold-arrow > span': {
     position: 'absolute',
-    // Off the text by 0.3rem, or less where the side padding is narrow (a phone) and that would
-    // push the 12px chevron off the page's edge.
-    right: 'min(0.3rem, calc(clamp(0.9rem, 4vw, 2.5rem) - 13px))',
-    bottom: '0.15em',
+    right: '0',
+    bottom: 'calc(0.15em - 0.3rem)',
+    // The chevron sits 0.3rem off the text, or less where the side padding is narrow (a phone)
+    // and that would push it off the page's edge; the padding around it is what takes a click.
+    padding: '0.3rem min(0.3rem, calc(clamp(0.9rem, 4vw, 2.5rem) - 13px)) 0.3rem 0.4rem',
     display: 'flex',
     color: 'var(--faint)',
     cursor: 'pointer',
-    visibility: 'hidden',
+    opacity: '0',
+    transition: 'opacity 0.1s',
   },
-  '.cm-line:hover .cm-fold-arrow > span, .cm-fold-arrow-closed > span': { visibility: 'visible' },
+  '.cm-line:hover .cm-fold-arrow > span, .cm-fold-arrow-closed > span': { opacity: '1' },
   '.cm-fold-arrow > span:hover': { color: 'var(--accent)' },
   '.cm-fold-arrow > span svg': { transform: 'rotate(90deg)', transition: 'transform 0.12s' },
   '.cm-fold-arrow-closed > span svg': { transform: 'none' },
-  '@media (hover: none)': { '.cm-fold-arrow > span': { visibility: 'visible' } },
+  '@media (hover: none)': { '.cm-fold-arrow > span': { opacity: '1' } },
   '.cm-foldPlaceholder': { background: 'var(--accent-bg)', border: 0, color: 'var(--accent)', borderRadius: '4px', padding: '0 0.4em' },
   // Space above a heading is *padding*, never margin: CodeMirror's height map measures each
   // line with getBoundingClientRect(), which excludes margins, so a margin here desynchronises
