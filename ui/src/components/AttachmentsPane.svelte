@@ -420,6 +420,8 @@
     justify-content: center;
     width: 1.35rem;
     height: 1.2rem;
+    /* Taller than the line: let it overhang into the row's padding rather than grow the row. */
+    margin: -0.2rem 0;
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--bg);
