@@ -106,9 +106,47 @@
   export function canLocate(): boolean {
     return locatable
   }
+  // The section on top: the files the open note uses, the same list as the Files shelf at the
+  // foot of the note. Opening one focuses its file tab, which leaves no open note, so the list
+  // stays on the note it was showing until another note (or a blank tab) takes the focus.
+  let shown: { vault: string; note: string } | null = $state(null)
+  $effect(() => {
+    if (activeNoteId && activeVault) shown = { vault: activeVault, note: activeNoteId }
+    else if (!activeFile) shown = null
+  })
+  let inNote = $derived.by(() => {
+    const v = shown && vaults.find((x) => x.id === shown!.vault)
+    if (!v || !shown) return null
+    const path = v.session.pathOf(shown.note)
+    if (path === undefined) return null
+    const note = shown.note
+    return {
+      vault: v.id,
+      name: path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/, ''),
+      entries: v.session.files.filter((f) => f.used_by.includes(note)),
+    }
+  })
   let locatable = $derived(
     !!activeNoteId && !!vaults.find((x) => x.id === activeVault)?.session.files.some((f) => f.used_by.includes(activeNoteId!)),
   )
+  // Folded or not, remembered like the folders are.
+  const NOTE_KEY = 'lemmate.filetree.note'
+  let noteOpen = $state(read(NOTE_KEY) !== '0')
+  function read(key: string): string | null {
+    try {
+      return localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  }
+  function toggleNote() {
+    noteOpen = !noteOpen
+    try {
+      localStorage.setItem(NOTE_KEY, noteOpen ? '1' : '0')
+    } catch {
+      /* the view just forgets */
+    }
+  }
 
   let menu: MenuState | null = $state(null)
   function fileMenu(vault: string, entry: FileEntry, e: MouseEvent) {
@@ -140,6 +178,27 @@
   const BADGE: Record<string, string> = { style: 'var(--syn-keyword)', other: 'var(--muted)' }
 </script>
 
+{#snippet file(vault: string, entry: FileEntry, name: string, indent: string, tree = true)}
+  <button
+    class="row file"
+    class:active={activeFile?.vault === vault && activeFile.path === entry.path}
+    data-file={tree ? folderKey(vault, entry.path) : undefined}
+    style:padding-left={indent}
+    onclick={() => onOpenFile(vault, entry.path)}
+    oncontextmenu={(e) => fileMenu(vault, entry, e)}
+    use:longpress
+    title={entry.path}
+  >
+    {#if fileKind(entry.path) === 'image'}
+      <img class="thumb" src={api.attachmentUrl(vault, entry.hash)} alt="" loading="lazy" />
+    {:else}
+      <span class="badge" style:color={BADGE[fileKind(entry.path)]}>{extension(entry.path).slice(0, 4).toUpperCase() || 'FILE'}</span>
+    {/if}
+    <span class="name">{name}</span>
+    <span class="count" class:quiet={!entry.used_by.length && !entry.vault}>{usage(entry)}</span>
+  </button>
+{/snippet}
+
 {#snippet rows(vault: string, nodes: FileNode[], depth: number)}
   {#each nodes as n (n.path)}
     {#if n.kind === 'folder'}
@@ -158,29 +217,28 @@
         {@render rows(vault, n.children, depth + 1)}
       {/if}
     {:else}
-      <button
-        class="row file"
-        class:active={activeFile?.vault === vault && activeFile.path === n.path}
-        data-file={folderKey(vault, n.path)}
-        style:padding-left="{depth * 0.9 + 1.3}rem"
-        onclick={() => onOpenFile(vault, n.path)}
-        oncontextmenu={(e) => fileMenu(vault, n.entry, e)}
-        use:longpress
-        title={n.path}
-      >
-        {#if fileKind(n.path) === 'image'}
-          <img class="thumb" src={api.attachmentUrl(vault, n.entry.hash)} alt="" loading="lazy" />
-        {:else}
-          <span class="badge" style:color={BADGE[fileKind(n.path)]}>{extension(n.path).slice(0, 4).toUpperCase() || 'FILE'}</span>
-        {/if}
-        <span class="name">{n.name}</span>
-        <span class="count" class:quiet={!n.entry.used_by.length && !n.entry.vault}>{usage(n.entry)}</span>
-      </button>
+      {@render file(vault, n.entry, n.name, `${depth * 0.9 + 1.3}rem`)}
     {/if}
   {/each}
 {/snippet}
 
 <div class="attachments" bind:this={host}>
+  {#if inNote}
+    <section class="note" aria-label="Files this note uses">
+      <button class="row head" onclick={toggleNote} aria-expanded={noteOpen}>
+        <span class="chev" class:open={noteOpen}>▸</span>
+        <span class="name" title="The files {inNote.name} uses">{inNote.name}</span>
+        <span class="count">{inNote.entries.length}</span>
+      </button>
+      {#if noteOpen}
+        {#each inNote.entries as e (e.path)}
+          {@render file(inNote.vault, e, e.path.slice(e.path.lastIndexOf('/') + 1), '1.3rem', false)}
+        {:else}
+          <p class="empty small">This note uses no files.</p>
+        {/each}
+      {/if}
+    </section>
+  {/if}
   <div class="bar">
     <div class="chips" role="group" aria-label="Show">
       {#each FILTERS as f (f.id)}
@@ -225,6 +283,24 @@
     flex-direction: column;
     min-height: 0;
     flex: 1;
+  }
+  .note {
+    padding: 0 0 0.4rem;
+    margin-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+    max-height: 40%;
+    overflow: auto;
+    flex-shrink: 0;
+  }
+  .note .head .name {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .note .head .name::before {
+    content: 'Files in ';
+    font-weight: 400;
   }
   .bar {
     display: flex;

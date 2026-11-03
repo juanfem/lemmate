@@ -570,7 +570,8 @@ that hold them, so a `Slides/` folder with one sub-folder per deck stays tidy. A
 how many files are inside; a file shows how many notes use it, or *vault* for the vault-wide
 ones, *kept* for one you put there yourself that nothing uses yet. The chips filter to images,
 styles or everything else; the target button opens the folders holding the files of the note
-you are reading.
+you are reading. Above the tree, **Files in *note*** lists those same files directly — the list
+at the foot of the note — and stays on that note while you have one of its files open.
 
 - **Open** a file by clicking it. Text files — `.scss`, `.css`, `.yml`, `.bib`, `.lua`, `.json`
   and friends — open in an editor; **Save** (or `Ctrl+S`) writes the whole file for everyone.
