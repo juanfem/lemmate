@@ -9,6 +9,7 @@ import katex from 'katex'
 import { codeLanguageName, htmlBlockImages } from './syntax.ts'
 import { blockMarker, parseEmbed, type EmbedTarget } from './transclude.ts'
 import { imageSrc, linkTarget } from '../linktarget.ts'
+import { cachedMermaid, renderMermaid, type MermaidResult } from './mermaid.ts'
 
 export interface LivePreviewOptions {
   /** Never reveal markup (read-only views have no meaningful cursor). */
@@ -631,6 +632,62 @@ class TableWidget extends WidgetType {
   }
 }
 
+/** A ```mermaid block off the cursor: the diagram, drawn once the library has loaded. */
+class MermaidWidget extends WidgetType {
+  readonly source: string
+  constructor(source: string) {
+    super()
+    this.source = source
+  }
+  eq(other: MermaidWidget) {
+    return other.source === this.source
+  }
+  get estimatedHeight() {
+    return 200
+  }
+  toDOM(view: EditorView) {
+    // Padding, not margin, for the gap — for the reason `.cm-table` gives.
+    const wrap = document.createElement('div')
+    wrap.className = 'cm-mermaid'
+    const fill = (r: MermaidResult) => {
+      if ('svg' in r) {
+        wrap.innerHTML = r.svg
+      } else {
+        wrap.replaceChildren()
+        const msg = document.createElement('div')
+        msg.className = 'cm-mermaid-error'
+        msg.textContent = `Mermaid: ${r.error.split('\n')[0]}`
+        const src = document.createElement('pre')
+        src.className = 'cm-mermaid-source'
+        src.textContent = this.source
+        wrap.append(msg, src)
+      }
+    }
+    const hit = cachedMermaid(this.source)
+    if (hit) fill(hit)
+    else {
+      wrap.classList.add('cm-mermaid-pending')
+      wrap.textContent = 'mermaid'
+      void renderMermaid(this.source).then((r) => {
+        wrap.classList.remove('cm-mermaid-pending')
+        fill(r)
+        view.requestMeasure()
+      })
+    }
+    // Clicking the diagram edits it: the caret goes to the block, which reveals its source.
+    wrap.addEventListener('mousedown', (e) => {
+      if (!view.state.facet(EditorView.editable)) return
+      e.preventDefault()
+      view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } })
+      view.focus()
+    })
+    return wrap
+  }
+  ignoreEvent() {
+    return true
+  }
+}
+
 class CalloutTitle extends WidgetType {
   readonly title: string
   constructor(title: string) {
@@ -1058,6 +1115,18 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
             const marks = n.getChildren('CodeMark')
             const open = marks[0]
             const close = marks.length > 1 ? marks[marks.length - 1] : undefined
+            const info = n.getChild('CodeInfo')
+            const lang = info ? codeLanguageName(state.sliceDoc(info.from, info.to)) : ''
+            // A diagram (```mermaid, or Quarto's ```{mermaid}) is drawn instead — once it is
+            // closed: half-typed, it stays code. A block widget covers whole lines.
+            const body = n.getChild('CodeText')
+            if (folded && close && lang.toLowerCase() === 'mermaid' && body) {
+              const from = state.doc.line(fromLine).from
+              const to = state.doc.line(toLine).to
+              const source = state.sliceDoc(body.from, body.to)
+              push(from, to, Decoration.replace({ widget: new MermaidWidget(source), block: true }))
+              break
+            }
             for (let ln = fromLine; ln <= toLine; ln++) {
               const line = state.doc.line(ln)
               const opening = ln === fromLine
@@ -1066,8 +1135,6 @@ function build(state: EditorState, opts: LivePreviewOptions): Preview {
               push(line.from, line.from, Decoration.line({ class: cls }))
             }
             if (folded && open) {
-              const info = n.getChild('CodeInfo')
-              const lang = info ? codeLanguageName(state.sliceDoc(info.from, info.to)) : ''
               const end = state.doc.lineAt(open.from).to
               push(open.from, end, lang ? Decoration.replace({ widget: new MarkerWidget(lang, 'cm-codeblock-lang') }) : hide)
             }

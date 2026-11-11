@@ -285,7 +285,11 @@ that cell. Inside a table a wikilink's label needs its pipe escaped, `[[Note\|la
 pipe ends the cell. **Fenced code blocks** fold their fences away — the opening one to the
 language's name — and are syntax-highlighted in whatever language the fence names (`rust`,
 Quarto's `{python}`, Pandoc's `{.haskell}`); a language's grammar is fetched the first time a
-block uses it, so offline a never-seen language shows as plain monospace. List markers follow the level they are on: `•`,
+block uses it, so offline a never-seen language shows as plain monospace. A closed
+` ```mermaid ` block (or Quarto's ` ```{mermaid} `) is drawn as its **Mermaid diagram**,
+following the light or dark theme; click it to edit the source. A diagram that does not parse
+shows Mermaid's error above its source. The Mermaid library loads the first time a note has
+a diagram. List markers follow the level they are on: `•`,
 `◦` and `▪` down a bullet list, and `1.`, `a.`, `i.` down an ordered one, keeping the delimiter
 the file holds. An ordered item is numbered by its position, as every markdown renderer numbers
 it, so a file full of `1.` still reads 1, 2, 3 and a gap left by an item you indented away

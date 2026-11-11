@@ -143,6 +143,11 @@ const theme = EditorView.theme({
   '.cm-link-rendered': { cursor: 'pointer' },
   '.cm-link-rendered:hover': { textDecoration: 'underline' },
   '.cm-math-block': { display: 'block', textAlign: 'center', padding: '0.5em 0' },
+  '.cm-mermaid': { padding: '0.5em 0', textAlign: 'center', overflowX: 'auto', cursor: 'text' },
+  '.cm-mermaid svg': { maxWidth: '100%', height: 'auto' },
+  '.cm-mermaid-pending': { fontFamily: 'var(--ui)', fontSize: '0.7em', color: 'var(--faint)', background: 'var(--code-bg)', padding: '2em 0' },
+  '.cm-mermaid-error': { fontFamily: 'var(--ui)', fontSize: '0.75em', color: 'var(--danger, #c33)', textAlign: 'left' },
+  '.cm-mermaid-source': { fontFamily: 'var(--mono)', fontSize: '0.85em', background: 'var(--code-bg)', margin: '0', padding: '0.5em 0.75em', textAlign: 'left', whiteSpace: 'pre-wrap' },
   '.cm-embed-image': { maxWidth: '100%', display: 'block', padding: '0.5em 0' },
   // A transcluded note: a frame with its name on top, and the note itself — another editor, in
   // reading mode — inside. That inner editor matches every rule here too, so it is taken back

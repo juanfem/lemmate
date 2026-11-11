@@ -190,3 +190,28 @@ test('a quote hides the `>` of every line, a continued paragraph’s and a neste
   const doc = '> A quote\n> over two lines.\n>\n> > nested\n> > and on\n\nafter'
   assert.deepEqual(marks(previewState(doc, doc.length)), ['1:> ', '2:> ', '3:>', '4:> ', '4:> ', '5:> ', '5:> '])
 })
+
+test('a closed mermaid block off the cursor becomes one diagram; on the cursor or unclosed, it stays code', () => {
+  const diagrams = (s: EditorState) => {
+    const out: string[] = []
+    for (const set of decos(s)) {
+      set.between(0, s.doc.length, (from, to, d) => {
+        const w = d.spec.widget as { source?: unknown } | undefined
+        if (w && w.constructor.name === 'MermaidWidget') out.push(`${from}-${to}:${String(w.source)}`)
+      })
+    }
+    return out
+  }
+  const doc = 'intro\n\n```mermaid\ngraph TD\n  A --> B\n```\n\n```{mermaid}\npie\n```\n\nafter'
+  const end = doc.length
+  const a = doc.indexOf('```mermaid')
+  const b = doc.indexOf('```{mermaid}')
+  assert.deepEqual(diagrams(previewState(doc, end)), [
+    `${a}-${doc.indexOf('```', a + 3) + 3}:graph TD\n  A --> B`,
+    `${b}-${doc.indexOf('```', b + 3) + 3}:pie`,
+  ])
+  // The cursor inside the first shows its source; the second is still drawn.
+  assert.equal(diagrams(previewState(doc, a + 15)).length, 1)
+  // Half-typed: no closing fence yet.
+  assert.deepEqual(diagrams(previewState('x\n\n```mermaid\ngraph TD\n', 0)), [])
+})
